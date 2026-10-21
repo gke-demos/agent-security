@@ -1,0 +1,27 @@
+# Binaries and build outputs
+bin/
+dist/
+*.exe
+*.out
+*.test
+
+# Local caches, credentials, and temporary files
+.cache/
+.env
+.env.*
+!.env.example
+*.kubeconfig
+kubeconfig*
+*.pem
+*.key
+*.crt
+
+# Node / frontend
+node_modules/
+web/dist/
+.vite/
+
+# OS / Editor
+.DS_Store
+.idea/
+.vscode/

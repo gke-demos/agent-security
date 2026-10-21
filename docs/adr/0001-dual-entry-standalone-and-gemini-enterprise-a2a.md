@@ -1,0 +1,3 @@
+# Dual-Entry Architecture: Standalone A2UI Portal and Gemini Enterprise A2A Endpoint
+
+AegisSRE exposes both a self-contained A2UI v0.9 web portal on GKE (authenticated via Google OIDC or Cloud IAP) and a standards-compliant A2A JSON-RPC endpoint (`POST /a2a` with `/.well-known/agent-card.json` advertising `serverSideOauth2`). Because Gemini Enterprise trial environments expire monthly, the standalone GKE portal guarantees that all six security boundaries and per-user 3LO flows work 100% independently of Gemini Enterprise, while allowing zero-code attachment to Gemini Enterprise whenever a trial is active.

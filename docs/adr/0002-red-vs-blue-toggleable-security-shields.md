@@ -1,0 +1,3 @@
+# Red-vs-Blue Arena with Toggleable Security Shields
+
+Every live incident workflow in AegisSRE runs against a per-session `SecurityPosture` state carrying five independently toggleable Security Shields: Prompt Screen (Model Armor), PII Redactor (Cloud SDP), Token Broker (Per-User 3LO vs. over-privileged shared token), Step-Up Confirmation (`adk_request_confirmation`), and Sandbox Egress MITM (`Agent Substrate` gVisor + `EgressPolicy`). Rather than maintaining separate vulnerable and patched codebases, runtime shield toggles let an Operator execute the exact same live Gmail, Jira Cloud, GitHub, and GCP MCP workflow in Vulnerable ("Red") or Defended ("Blue") posture and observe the exact boundary that stops each exploit.
