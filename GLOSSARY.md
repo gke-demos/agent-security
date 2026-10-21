@@ -31,8 +31,12 @@ An in-loop content inspection gate that detects indirect prompt injection and po
 _Avoid_: Input validator, regex filter
 
 **PII Redactor**:
-An in-flight data protection transform that masks sensitive personal or secret identifiers before text reaches a reasoning model or an external ticket comment.
+An in-flight data protection transform that masks sensitive personal or secret identifiers before text reaches a reasoning model or an external ticket comment, allowing execution to continue when sensitive data is the sole policy match.
 _Avoid_: Log scrubber, string sanitizer
+
+**Unified Access Policy**:
+A principal-and-tool access rule evaluated at the Agent Gateway boundary that permits or denies individual MCP tool invocations based on workload identity and tool metadata.
+_Avoid_: Firewall rule, IAM role binding
 
 **Token Broker**:
 A credential vaulting boundary that exchanges and attaches an Operator's per-provider OAuth token onto outbound tool transport requests outside the reasoning model's context window.
@@ -49,7 +53,7 @@ _Avoid_: Sidecar proxy, NAT gateway
 ## Protocols & Artifacts
 
 **Declarative UI Card**:
-A schema-validated, non-executable visual component descriptor emitted by an agent and rendered by the portal from a trusted component catalog.
+A schema-validated, non-executable visual component descriptor (`application/json+a2ui`) emitted by an agent and rendered by the portal from a trusted six-component catalog.
 _Avoid_: HTML snippet, iframe widget, raw markdown card
 
 **Consent Challenge**:
@@ -57,5 +61,13 @@ A structured interrupt emitted when a tool requires a per-user 3LO authorization
 _Avoid_: Auth error, login redirect
 
 **Attenuated Delegation**:
-A cross-agent task handoff that strips upstream user credentials and narrows permission scope to the minimum required by the receiving peer agent.
+A cross-agent task handoff that strips upstream user credentials, narrows permission scope, and screens the peer agent's response as untrusted input before updating parent state.
 _Avoid_: Token passthrough, full impersonation
+
+**Boundary Trace Waterfall**:
+A real-time ordered sequence of security inspection, credential brokering, policy evaluation, and sandbox isolation events recorded across all six boundaries for a single agent turn.
+_Avoid_: Audit log, debug trace
+
+**Security Scenario**:
+A reproducible incident and attack trajectory evaluated across both Red Mode (shields disabled, exploit succeeds) and Blue Mode (shields enabled, boundary blocks or redacts).
+_Avoid_: Test case, demo script

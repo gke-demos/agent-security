@@ -1,0 +1,3 @@
+# Model Armor Hard-Block on Prompt Injection vs. In-Flight Cloud SDP De-Identification
+
+When inspecting untrusted tool inputs and outputs (such as Gmail escalation threads or GitHub issue bodies), AegisSRE distinguishes between adversarial instruction attacks and incidental customer PII. Matches on Prompt Injection, Jailbreak, or Malicious URI filters trigger an immediate hard-block and emit a `ThreatInterceptCard`, whereas matches solely on Sensitive Data Protection (`IsSdpOnlyBlock`) perform in-flight de-identification (`[REDACTED_SSN]`, `[REDACTED_API_KEY]`, `[REDACTED_EMAIL]`, `[REDACTED_PHONE]`) and continue execution so SREs can safely triage customer incidents without leaking PII into Gemini or downstream Jira/GitHub comments.
