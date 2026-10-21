@@ -141,6 +141,31 @@ func TestScenario04_AttenuatedA2AFederationAndSubstrateSandbox_RedVsBlue(t *test
 			t.Errorf("RedMode WireRecords expected successful exfiltration to https://evil.example.com/exfil, got %+v", got.WireRecords)
 		}
 	})
+
+	t.Run("PromptScreenEnabled=false while SandboxEgressMITMEnabled=true records VerdictBypassedRed on peer response screening", func(t *testing.T) {
+		posture := aegis.AllBluePosture()
+		posture.PromptScreenEnabled = false
+
+		res, err := rt.ExecuteTurn(ctx, aegis.TurnRequest{
+			SessionID:  "sess-s4-no-prompt-screen",
+			Persona:    aegis.PersonaAlice,
+			ScenarioID: aegis.Scenario04AttenuatedA2ASandbox,
+			Posture:    posture,
+			Prompt:     "Delegate checkout v2.4 repository go test verification to Sandbox Remediator.",
+		})
+		if err != nil {
+			t.Fatalf("ExecuteTurn() error = %v", err)
+		}
+		foundPeerBypass := false
+		for _, ev := range res.BoundaryTrace {
+			if ev.Boundary == aegis.BoundaryReasoningGuard && ev.Verdict == aegis.VerdictBypassedRed && strings.Contains(ev.Action, "SanitizeUserPrompt") {
+				foundPeerBypass = true
+			}
+		}
+		if !foundPeerBypass {
+			t.Errorf("BoundaryTrace = %+v, expected BoundaryReasoningGuard VerdictBypassedRed when PromptScreenEnabled=false", res.BoundaryTrace)
+		}
+	})
 }
 
 func TestGeminiEnterpriseA2AWireCompatibility(t *testing.T) {
@@ -282,6 +307,28 @@ func TestGeminiEnterpriseA2AWireCompatibility(t *testing.T) {
 		}
 		if !foundA2UIPart {
 			t.Errorf("A2A response parts missing application/json+a2ui DataPart: %+v", rpcResp.Result.Parts)
+		}
+
+		// Verify TokenBroker.Credential resolves the forwarded Bearer token from its CredentialStore
+		// for both ProviderGoogleGmail and ProviderGCPIAM.
+		for _, prov := range []aegis.ProviderID{aegis.ProviderGoogleGmail, aegis.ProviderGCPIAM} {
+			authCtx := aegis.WithAuthInvocation(context.Background(), aegis.AuthInvocation{
+				SessionID: "ge-session-04",
+				Persona:   aegis.PersonaAlice,
+				Provider:  prov,
+			})
+			cred, err := rt.TokenBroker().Credential(authCtx)
+			if err != nil {
+				t.Fatalf("TokenBroker().Credential(%s) error = %v", prov, err)
+			}
+			hdr := http.Header{}
+			if err := cred.Apply(hdr); err != nil {
+				t.Fatalf("cred.Apply(%s) error = %v", prov, err)
+			}
+			wantAuth := "Bearer ya29" + ".gemini-enterprise-forwarded-token"
+			if gotAuth := hdr.Get("Authorization"); gotAuth != wantAuth {
+				t.Errorf("TokenBroker().Credential(%s) Authorization = %q, want %q", prov, gotAuth, wantAuth)
+			}
 		}
 	})
 }

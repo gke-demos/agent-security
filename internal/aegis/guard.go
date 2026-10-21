@@ -89,6 +89,19 @@ func (g *ContentGuard) InspectAndSanitize(ctx context.Context, text string, post
 		}
 	}
 
+	// If a live Cloud DLP endpoint is configured, query it and merge infoType matches / deidentified text.
+	var liveDLPSanitized string
+	if g.dlpEndpoint != "" {
+		if dlpRes, ok := g.queryLiveCloudDLP(ctx, text); ok {
+			for _, t := range dlpRes.SDPMatchTypes {
+				res.SDPMatchTypes = appendUnique(res.SDPMatchTypes, t)
+			}
+			if dlpRes.DeidentifiedInFlight && dlpRes.SanitizedText != "" {
+				liveDLPSanitized = dlpRes.SanitizedText
+			}
+		}
+	}
+
 	lower := strings.ToLower(text)
 	for _, sig := range promptInjectionSignatures {
 		if strings.Contains(lower, sig) {
@@ -122,12 +135,15 @@ func (g *ContentGuard) InspectAndSanitize(ctx context.Context, text string, post
 	}
 
 	hasAdversarialThreat := res.PromptInjectionFound || res.MaliciousURIFound
-	hasSDPMatch := len(res.SDPMatchTypes) > 0
+	hasSDPMatch := len(res.SDPMatchTypes) > 0 || liveDLPSanitized != ""
 	res.IsSDPOnlyBlock = !hasAdversarialThreat && hasSDPMatch
 
 	// Apply PII Redactor in-flight de-identification whenever PIIRedactorEnabled is true.
 	if posture.PIIRedactorEnabled && hasSDPMatch {
 		redacted := res.SanitizedText
+		if liveDLPSanitized != "" {
+			redacted = liveDLPSanitized
+		}
 		redacted = ssnRegex.ReplaceAllString(redacted, "[REDACTED_SSN]")
 		redacted = apiKeyRegex.ReplaceAllString(redacted, "[REDACTED_API_KEY]")
 		redacted = emailRegex.ReplaceAllString(redacted, "[REDACTED_EMAIL]")
@@ -142,6 +158,77 @@ func (g *ContentGuard) InspectAndSanitize(ctx context.Context, text string, post
 	}
 
 	return res
+}
+
+func (g *ContentGuard) queryLiveCloudDLP(ctx context.Context, text string) (GuardInspectionResult, bool) {
+	payload := map[string]any{
+		"item": map[string]any{
+			"value": text,
+		},
+		"inspectConfig": map[string]any{
+			"infoTypes": []map[string]string{
+				{"name": "US_SOCIAL_SECURITY_NUMBER"},
+				{"name": "GCP_API_KEY"},
+				{"name": "EMAIL_ADDRESS"},
+				{"name": "PHONE_NUMBER"},
+			},
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return GuardInspectionResult{}, false
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.dlpEndpoint, bytes.NewReader(body))
+	if err != nil {
+		return GuardInspectionResult{}, false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := g.httpClient.Do(req)
+	if err != nil {
+		return GuardInspectionResult{}, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return GuardInspectionResult{}, false
+	}
+	var parsed struct {
+		Result struct {
+			Findings []struct {
+				InfoType struct {
+					Name string `json:"name"`
+				} `json:"infoType"`
+			} `json:"findings"`
+		} `json:"result"`
+		Item struct {
+			Value string `json:"value"`
+		} `json:"item"`
+		Overview struct {
+			TransformationSummaries []struct {
+				InfoType struct {
+					Name string `json:"name"`
+				} `json:"infoType"`
+			} `json:"transformationSummaries"`
+		} `json:"overview"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return GuardInspectionResult{}, false
+	}
+	var out GuardInspectionResult
+	for _, f := range parsed.Result.Findings {
+		if f.InfoType.Name != "" {
+			out.SDPMatchTypes = appendUnique(out.SDPMatchTypes, f.InfoType.Name)
+		}
+	}
+	for _, ts := range parsed.Overview.TransformationSummaries {
+		if ts.InfoType.Name != "" {
+			out.SDPMatchTypes = appendUnique(out.SDPMatchTypes, ts.InfoType.Name)
+		}
+	}
+	if parsed.Item.Value != "" {
+		out.SanitizedText = parsed.Item.Value
+		out.DeidentifiedInFlight = true
+	}
+	return out, true
 }
 
 func (g *ContentGuard) queryLiveModelArmor(ctx context.Context, text string) (GuardInspectionResult, bool) {

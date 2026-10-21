@@ -36,6 +36,8 @@ type Runtime struct {
 	extState map[string]any
 }
 
+var _ AegisRuntime = (*Runtime)(nil)
+
 // NewRuntime creates a new AegisRuntime instance.
 func NewRuntime(cfg RuntimeConfig) *Runtime {
 	return &Runtime{
@@ -71,13 +73,7 @@ func (r *Runtime) GetExtension(key string) (any, bool) {
 	return v, ok
 }
 
-// GetOrCreateSession returns a copy of the SessionSnapshot for sessionID.
-func (r *Runtime) GetOrCreateSession(sessionID string) *SessionSnapshot {
-	if sessionID == "" {
-		sessionID = "default-session"
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
+func (r *Runtime) getOrCreateSessionLocked(sessionID string) *SessionSnapshot {
 	sess, ok := r.sessions[sessionID]
 	if !ok {
 		sess = &SessionSnapshot{
@@ -94,6 +90,16 @@ func (r *Runtime) GetOrCreateSession(sessionID string) *SessionSnapshot {
 	return sess
 }
 
+// GetOrCreateSession returns the SessionSnapshot for sessionID, initializing default state if needed.
+func (r *Runtime) GetOrCreateSession(sessionID string) *SessionSnapshot {
+	if sessionID == "" {
+		sessionID = "default-session"
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.getOrCreateSessionLocked(sessionID)
+}
+
 // UpdateSession mutates a session under lock.
 func (r *Runtime) UpdateSession(sessionID string, fn func(s *SessionSnapshot)) *SessionSnapshot {
 	if sessionID == "" {
@@ -101,21 +107,34 @@ func (r *Runtime) UpdateSession(sessionID string, fn func(s *SessionSnapshot)) *
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	sess, ok := r.sessions[sessionID]
-	if !ok {
-		sess = &SessionSnapshot{
-			SessionID:     sessionID,
-			ActivePersona: PersonaAlice,
-			Posture:       AllBluePosture(),
-			GrantedProviders: map[PersonaID][]ProviderID{
-				PersonaAlice: {ProviderGoogleGmail, ProviderAtlassianJira, ProviderGitHub, ProviderGCPIAM},
-				PersonaBob:   {ProviderGoogleGmail, ProviderAtlassianJira, ProviderGitHub, ProviderGCPIAM},
-			},
-		}
-		r.sessions[sessionID] = sess
-	}
+	sess := r.getOrCreateSessionLocked(sessionID)
 	fn(sess)
 	return sess
+}
+
+// CompleteOAuthConsent completes a 3LO OAuth grant for a Persona and Provider via the Runtime's TokenBroker.
+func (r *Runtime) CompleteOAuthConsent(ctx context.Context, cb OAuthCallback) (*ConsentResult, error) {
+	snap := r.TokenBroker().Grant(ctx, cb)
+	persona := cb.Persona
+	if persona == "" {
+		persona = snap.ActivePersona
+	}
+	provider := cb.Provider
+	if provider == "" {
+		provider = ProviderAtlassianJira
+	}
+	return &ConsentResult{
+		SessionID: snap.SessionID,
+		Persona:   persona,
+		Provider:  provider,
+		Granted:   true,
+		Session:   snap,
+	}, nil
+}
+
+// GetSessionState returns the current SessionSnapshot for sessionID.
+func (r *Runtime) GetSessionState(_ context.Context, sessionID string) (*SessionSnapshot, error) {
+	return r.GetOrCreateSession(sessionID), nil
 }
 
 // ExecuteTurn processes an Operator turn across the active SecurityPosture and ScenarioID.
@@ -183,31 +202,24 @@ Hi SRE team, our checkout pods in us-central1 are returning HTTP 502 after the v
 )
 
 func (r *Runtime) executeScenario01(ctx context.Context, req TurnRequest) (*TurnResult, error) {
+	trace := make([]BoundaryTraceEvent, 0, 4)
+
+	// Boundary 3: Token Broker (Gmail readonly fetch)
+	consentRes, gmailTrace, err := executeGmail3LOCheck(ctx, r, req, "card-consent-s1")
+	if err != nil {
+		return nil, err
+	}
+	if consentRes != nil {
+		return consentRes, nil
+	}
+	trace = append(trace, gmailTrace)
+
 	rawEmail := fixtureGmailAdversarialBody
 	if req.CleanPIIOnly {
 		rawEmail = fixtureGmailCleanPIIBody
 	}
 
 	inspection := r.guard.InspectAndSanitize(ctx, rawEmail, req.Posture)
-	trace := make([]BoundaryTraceEvent, 0, 4)
-
-	// Boundary 3: Token Broker (Gmail readonly fetch)
-	tokenVerdict := VerdictAllowed
-	tokenDetail := fmt.Sprintf("Resolved %s 3LO token for google_gmail (scope: gmail.readonly) via auth.Transport", req.Persona)
-	if !req.Posture.TokenBrokerEnabled {
-		tokenVerdict = VerdictBypassedRed
-		tokenDetail = "Shared static agent token used (Per-User 3LO Token Broker shield disabled)"
-	}
-	trace = append(trace, BoundaryTraceEvent{
-		Order:     1,
-		Boundary:  BoundaryIdentity3LO,
-		Shield:    "Token Broker (3LO)",
-		Component: "adk/v2/auth.Transport",
-		Action:    "gmail.users.messages.get",
-		Verdict:   tokenVerdict,
-		Detail:    tokenDetail,
-		Timestamp: time.Now().UTC(),
-	})
 
 	// Boundary 2: Model Armor Prompt Screen + Cloud SDP PII Redactor
 	if inspection.Blocked {

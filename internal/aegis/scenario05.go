@@ -2,16 +2,10 @@ package aegis
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"strings"
-	"sync"
 	"time"
 
-	"google.golang.org/adk/v2/auth"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -22,7 +16,17 @@ func init() {
 func executeScenario05(ctx context.Context, rt *Runtime, req TurnRequest) (*TurnResult, error) {
 	trace := make([]BoundaryTraceEvent, 0, 8)
 	wireRecords := make([]OutboundWireRecord, 0, 6)
-	var wireMu sync.Mutex
+
+	// Step 0: Boundary 3 (Gmail 3LO credential check when TokenBrokerEnabled is true)
+	if req.Posture.TokenBrokerEnabled {
+		gmailConsentRes, _, err := executeGmail3LOCheck(ctx, rt, req, "card-consent-s5-gmail")
+		if err != nil {
+			return nil, err
+		}
+		if gmailConsentRes != nil {
+			return gmailConsentRes, nil
+		}
+	}
 
 	// Step 1: Boundary 2 — In-Flight Cloud SDP De-Identification on Gmail Customer Escalation
 	rawEmail := fixtureGmailCleanPIIBody
@@ -131,348 +135,36 @@ func executeScenario05(ctx context.Context, rt *Runtime, req TurnRequest) (*Turn
 	)
 
 	// Step 3: Boundary 3 — Per-User 3LO Token Broker via adk/v2/auth.Transport (Jira SEC-101 & GitHub GHSA-sec-101)
-	broker := rt.TokenBroker()
-	downstream := roundTripFuncInternal(func(httpReq *http.Request) (*http.Response, error) {
-		authHeader := httpReq.Header.Get("Authorization")
-		token := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer"))
-		principal := classifyPrincipal(token)
-		toolName := "jira_get_issue"
-		provider := ProviderAtlassianJira
-		if strings.Contains(httpReq.URL.Host, "github.com") {
-			toolName = "github_get_security_advisory"
-			provider = ProviderGitHub
-		}
-
-		status := http.StatusOK
-		respPayload := map[string]any{
-			"id":             "SEC-101",
-			"classification": "RESTRICTED_SECOPS_ONLY",
-			"summary":        "P0 Checkout 502 & OAuth Token Investigation",
-			"advisory":       "GHSA-sec-101",
-			"authorizedAs":   principal,
-		}
-		if strings.HasPrefix(token, "3lo-bob-") {
-			status = http.StatusForbidden
-			respPayload = map[string]any{
-				"error":    "ACL_FORBIDDEN",
-				"resource": "SEC-101",
-				"message":  "Persona 'bob' (External Contractor) lacks 'secops:restricted:read' permission on SEC-101 (allowed: PUB-202 only)",
-			}
-		}
-
-		wireMu.Lock()
-		wireRecords = append(wireRecords, OutboundWireRecord{
-			Provider:          provider,
-			ToolName:          toolName,
-			Method:            httpReq.Method,
-			URL:               httpReq.URL.String(),
-			AuthHeaderPresent: authHeader != "",
-			AuthPrincipal:     principal,
-			StatusCode:        status,
-		})
-		wireMu.Unlock()
-
-		rawBytes, _ := json.Marshal(respPayload)
-		return &http.Response{
-			StatusCode: status,
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(string(rawBytes))),
-			Request:    httpReq,
-		}, nil
-	})
-
-	transportClient := &http.Client{
-		Transport: &auth.Transport{
-			Provider: broker,
-			Base:     downstream,
-		},
-	}
-
-	jiraCtx := WithAuthInvocation(ctx, AuthInvocation{
-		SessionID:             req.SessionID,
-		Persona:               req.Persona,
-		Provider:              ProviderAtlassianJira,
-		Scopes:                defaultScopesForProvider(ProviderAtlassianJira),
-		BypassBrokerRedMode:   !req.Posture.TokenBrokerEnabled,
-		RequireCold3LOConsent: req.RequireCold3LOConsent,
-	})
-	jiraHTTPReq, err := http.NewRequestWithContext(jiraCtx, http.MethodGet, jiraIssueSEC101URL, nil)
+	b3Trace, b3Wire, b3EarlyExit, err := executeSecOps3LOTriageStep(
+		ctx,
+		rt,
+		req,
+		len(trace)+1,
+		"card-consent-s5",
+		"card-acl-denial-s5",
+		"Full-Chain Halted at Boundary 3: Downstream 403 Forbidden on SEC-101",
+	)
 	if err != nil {
 		return nil, err
 	}
-	jiraResp, err := transportClient.Do(jiraHTTPReq)
-	if err != nil {
-		var consentErr *auth.ConsentRequiredError
-		if errors.As(err, &consentErr) {
-			ch := &ConsentChallenge{
-				Provider:    ProviderAtlassianJira,
-				Persona:     req.Persona,
-				Scopes:      defaultScopesForProvider(ProviderAtlassianJira),
-				AuthURI:     consentErr.AuthURI,
-				Nonce:       consentErr.Nonce,
-				ResourceRef: "SEC-101",
-			}
-			trace = append(trace, BoundaryTraceEvent{
-				Order:     len(trace) + 1,
-				Boundary:  BoundaryIdentity3LO,
-				Shield:    "Token Broker (3LO)",
-				Component: "adk/v2/auth.Transport",
-				Action:    "jira_get_issue(SEC-101)",
-				Verdict:   VerdictChallenge,
-				Detail:    fmt.Sprintf("Missing 3LO OAuth grant for persona %q on provider %q; emitted adk_request_credential ConsentChallenge", req.Persona, ProviderAtlassianJira),
-				Timestamp: time.Now().UTC(),
-			})
-			card := A2UICard{
-				SurfaceID: "card-consent-s5",
-				MimeType:  "application/json+a2ui",
-				Version:   "0.9",
-				Type:      CardConsentChallenge,
-				Title:     "Per-User 3LO OAuth Consent Required",
-				Subtitle:  "Boundary 3: Identity & 3LO Token Broker (adk_request_credential)",
-				Severity:  "WARNING",
-				Body:      fmt.Sprintf("Operator persona %q has not granted %q access (%s) in this session.", req.Persona, ProviderAtlassianJira, strings.Join(ch.Scopes, ", ")),
-				Fields: map[string]string{
-					"Persona":  string(req.Persona),
-					"Provider": string(ProviderAtlassianJira),
-					"Resource": "SEC-101",
-				},
-			}
-			return &TurnResult{
-				SessionID:             req.SessionID,
-				Persona:               req.Persona,
-				ScenarioID:            req.ScenarioID,
-				Posture:               req.Posture,
-				Outcome:               OutcomeConsentRequired,
-				AssistantText:         fmt.Sprintf("Paused full-chain triage: %s requires per-user 3LO OAuth consent from %s before reading SEC-101.", ProviderAtlassianJira, req.Persona),
-				SanitizedInputPreview: inspection.SanitizedText,
-				Cards:                 []A2UICard{card},
-				BoundaryTrace:         trace,
-				ConsentChallenge:      ch,
-				WireRecords:           wireRecords,
-			}, nil
-		}
-		return nil, err
-	}
-	defer jiraResp.Body.Close()
-
-	if jiraResp.StatusCode == http.StatusForbidden {
-		trace = append(trace, BoundaryTraceEvent{
-			Order:     len(trace) + 1,
-			Boundary:  BoundaryIdentity3LO,
-			Shield:    "Token Broker (3LO)",
-			Component: "adk/v2/auth.Transport",
-			Action:    "jira_get_issue(SEC-101)",
-			Verdict:   VerdictBlocked,
-			Detail:    fmt.Sprintf("Injected %s's scoped 3LO bearer token on the HTTP wire; Atlassian Jira denied access to SEC-101 with 403 Forbidden (Zero Confused Deputy)", req.Persona),
-			Metadata: map[string]string{
-				"persona":    string(req.Persona),
-				"provider":   string(ProviderAtlassianJira),
-				"httpStatus": "403",
-			},
-			Timestamp: time.Now().UTC(),
-		})
-		card := A2UICard{
-			SurfaceID: "card-acl-denial-s5",
-			MimeType:  "application/json+a2ui",
-			Version:   "0.9",
-			Type:      CardAclDenial,
-			Title:     "Full-Chain Halted at Boundary 3: Downstream 403 Forbidden on SEC-101",
-			Subtitle:  "Boundary 3: Per-Persona 3LO Token Broker via auth.Transport",
-			Severity:  "HIGH",
-			Body:      "Token Broker attached Bob's personal 3LO OAuth credential onto the outbound Jira request. Jira enforced per-user ACLs and blocked contractor access to restricted SecOps issue SEC-101 before sandbox delegation.",
-			Fields: map[string]string{
-				"Active Persona":    string(req.Persona),
-				"Target Resource":   "Jira Issue SEC-101 (Restricted SecOps)",
-				"Downstream Status": "403 Forbidden",
-			},
-		}
-		return &TurnResult{
-			SessionID:             req.SessionID,
-			Persona:               req.Persona,
-			ScenarioID:            req.ScenarioID,
-			Posture:               req.Posture,
-			Outcome:               OutcomeBlocked,
-			AssistantText:         "Access denied (403 Forbidden): Persona 'bob' (External Contractor) is not authorized to read restricted SecOps Jira issue SEC-101.",
-			SanitizedInputPreview: inspection.SanitizedText,
-			Cards:                 []A2UICard{card},
-			BoundaryTrace:         trace,
-			WireRecords:           wireRecords,
-		}, nil
+	trace = append(trace, b3Trace...)
+	wireRecords = append(wireRecords, b3Wire...)
+	if b3EarlyExit != nil {
+		b3EarlyExit.SanitizedInputPreview = inspection.SanitizedText
+		b3EarlyExit.BoundaryTrace = trace
+		b3EarlyExit.WireRecords = wireRecords
+		return b3EarlyExit, nil
 	}
 
-	ghCtx := WithAuthInvocation(ctx, AuthInvocation{
-		SessionID:           req.SessionID,
-		Persona:             req.Persona,
-		Provider:            ProviderGitHub,
-		Scopes:              defaultScopesForProvider(ProviderGitHub),
-		BypassBrokerRedMode: !req.Posture.TokenBrokerEnabled,
-	})
-	ghHTTPReq, err := http.NewRequestWithContext(ghCtx, http.MethodGet, githubAdvisorySEC101URL, nil)
-	if err != nil {
-		return nil, err
-	}
-	ghResp, err := transportClient.Do(ghHTTPReq)
-	if err != nil {
-		return nil, err
-	}
-	defer ghResp.Body.Close()
-
-	if req.Posture.TokenBrokerEnabled {
-		trace = append(trace, BoundaryTraceEvent{
-			Order:     len(trace) + 1,
-			Boundary:  BoundaryIdentity3LO,
-			Shield:    "Token Broker (3LO)",
-			Component: "adk/v2/auth.Transport",
-			Action:    "jira_get_issue(SEC-101) + github_get_security_advisory(GHSA-sec-101)",
-			Verdict:   VerdictAllowed,
-			Detail:    fmt.Sprintf("Injected %s's per-provider 3LO OAuth tokens on HTTP transport outside LLM context window; verified 200 OK for SEC-101 and GHSA-sec-101", req.Persona),
-			Timestamp: time.Now().UTC(),
-		})
-	} else {
-		trace = append(trace, BoundaryTraceEvent{
-			Order:     len(trace) + 1,
-			Boundary:  BoundaryIdentity3LO,
-			Shield:    "Token Broker (3LO)",
-			Component: "StaticToken(shared-service-account-root-token)",
-			Action:    "jira_get_issue(SEC-101) + github_get_security_advisory(GHSA-sec-101)",
-			Verdict:   VerdictBypassedRed,
-			Detail:    fmt.Sprintf("CONFUSED DEPUTY EXPLOIT: Per-User 3LO Token Broker disabled; outbound requests for %q used shared root service token and leaked restricted SEC-101!", req.Persona),
-			Timestamp: time.Now().UTC(),
-		})
-	}
-
-	// Step 4 & 5: Boundary 5 (Attenuated A2A v2) & Boundary 6 (Agent Substrate v0.5.0 gVisor Sandbox + Egress MITM)
-	upstreamToken := req.ForwardedBearerToken
-	if upstreamToken == "" {
-		upstreamToken = "ya29" + ".alice-gmail-jira-github-3lo-token"
-	}
-	rawA2AParts := []a2aMessagePart{
-		{Type: "text", Kind: "text", Text: req.Prompt},
-		{
-			Type: "credential",
-			Kind: "adk_request_credential",
-			Data: map[string]any{
-				"provider":    string(ProviderGitHub),
-				"persona":     string(req.Persona),
-				"accessToken": upstreamToken,
-			},
-		},
-	}
-
-	cleanPeerSummary := "PASS: TestCheckoutHotfix (0.04s) [poisoned peer instruction stripped by Model Armor SanitizeUserPrompt]"
-	if req.Posture.SandboxEgressMITMEnabled {
-		attenuatedParts, strippedCount := withoutCredentialParts(rawA2AParts)
-		trace = append(trace, BoundaryTraceEvent{
-			Order:     len(trace) + 1,
-			Boundary:  BoundaryCrossAgentA2A,
-			Shield:    "Attenuated Delegation (A2A v2)",
-			Component: "adk/v2/server/adka2a/v2 (withoutCredentialParts)",
-			Action:    "DelegateToPeer(sandbox-remediator)",
-			Verdict:   VerdictAllowed,
-			Detail:    fmt.Sprintf("Stripped %d upstream 3LO credential part(s) via withoutCredentialParts before A2A handoff (%d safe text part forwarded)", strippedCount, len(attenuatedParts)),
-			Metadata: map[string]string{
-				"credentialsStripped": "true",
-				"strippedPartsCount":  fmt.Sprintf("%d", strippedCount),
-				"peerAgent":           "sandbox-remediator",
-			},
-			Timestamp: time.Now().UTC(),
-		})
-
-		wireRecords = append(wireRecords,
-			OutboundWireRecord{
-				Provider:          ProviderGitHub,
-				ToolName:          "substrate.atenet.github_archive_fetch",
-				Method:            http.MethodGet,
-				URL:               "https://api.github.com/repos/acme-corp/checkout-service/tarball/v2.4",
-				AuthHeaderPresent: true,
-				AuthPrincipal:     "atenet-egress-mitm:github-installation-token",
-				StatusCode:        http.StatusOK,
-				Headers: map[string]string{
-					"X-Atenet-Egress-Mitm": "injected-out-of-sandbox",
-				},
-			},
-			OutboundWireRecord{
-				Provider:          ProviderGitHub,
-				ToolName:          "untrusted_go_test.init_exfil",
-				Method:            http.MethodPost,
-				URL:               "https://evil.example.com/exfil",
-				AuthHeaderPresent: false,
-				AuthPrincipal:     "none (zero-env-secrets)",
-				StatusCode:        http.StatusForbidden,
-				Headers: map[string]string{
-					"X-Substrate-Egress-Policy": "DENIED",
-				},
-			},
-		)
-
-		trace = append(trace, BoundaryTraceEvent{
-			Order:     len(trace) + 1,
-			Boundary:  BoundarySandboxEgress,
-			Shield:    "Sandbox Egress MITM (Agent Substrate v0.5.0)",
-			Component: "ate.dev/v1alpha1 Actor (gvisor + atenet)",
-			Action:    "ExecuteUntrustedGoTest(checkout-service@v2.4)",
-			Verdict:   VerdictBlocked,
-			Detail:    "Executed in gVisor Actor (SNAPSHOT_FIDELITY_MEMORY) with 0 env secrets; atenet MITM injected GitHub token for api.github.com and EgressPolicy blocked init() exfiltration to https://evil.example.com/exfil",
-			Metadata: map[string]string{
-				"apiVersion":          "ate.dev/v1alpha1",
-				"sandboxClass":        "gvisor",
-				"preferredFidelity":   "SNAPSHOT_FIDELITY_MEMORY",
-				"containerEnvSecrets": "0",
-				"allowedEgress":       "api.github.com",
-				"blockedEgress":       "https://evil.example.com/exfil",
-			},
-			Timestamp: time.Now().UTC(),
-		})
-
-		screenPosture := req.Posture
-		screenPosture.PromptScreenEnabled = true
-		peerInspection := rt.Guard().InspectAndSanitize(ctx, poisonedPeerTestOutput, screenPosture)
-		trace = append(trace, BoundaryTraceEvent{
-			Order:     len(trace) + 1,
-			Boundary:  BoundaryReasoningGuard,
-			Shield:    "Prompt Screen (Peer A2A Response Guard)",
-			Component: "ModelArmor SanitizeUserPrompt",
-			Action:    "SanitizeUserPrompt(a2a_peer_response)",
-			Verdict:   VerdictAllowed,
-			Detail:    fmt.Sprintf("Screened inbound Sandbox Remediator A2A response (%s) and neutralized embedded prompt injection before updating Triage Orchestrator state", peerInspection.ThreatReason),
-			Timestamp: time.Now().UTC(),
-		})
-	} else {
-		trace = append(trace,
-			BoundaryTraceEvent{
-				Order:     len(trace) + 1,
-				Boundary:  BoundaryCrossAgentA2A,
-				Shield:    "Attenuated Delegation (A2A v2)",
-				Component: "adk/v2/server/adka2a/v2",
-				Action:    "DelegateToPeer(sandbox-remediator)",
-				Verdict:   VerdictBypassedRed,
-				Detail:    "Unattenuated A2A handoff: upstream 3LO credentials forwarded directly to Sandbox Remediator!",
-				Timestamp: time.Now().UTC(),
-			},
-			BoundaryTraceEvent{
-				Order:     len(trace) + 1,
-				Boundary:  BoundarySandboxEgress,
-				Shield:    "Sandbox Egress MITM (Agent Substrate v0.5.0)",
-				Component: "Unisolated Runner (No EgressPolicy)",
-				Action:    "ExecuteUntrustedGoTest(checkout-service@v2.4)",
-				Verdict:   VerdictBypassedRed,
-				Detail:    "RED MODE EXPLOIT: Container env held secrets and unguarded egress allowed malicious init() test to POST os.Environ() to https://evil.example.com/exfil!",
-				Timestamp: time.Now().UTC(),
-			},
-		)
-		wireRecords = append(wireRecords, OutboundWireRecord{
-			Provider:          ProviderGitHub,
-			ToolName:          "untrusted_go_test.init_exfil",
-			Method:            http.MethodPost,
-			URL:               "https://evil.example.com/exfil",
-			AuthHeaderPresent: true,
-			AuthPrincipal:     string(req.Persona) + "-leaked-3lo-and-env-secrets",
-			StatusCode:        http.StatusOK,
-		})
-	}
+	// Step 4 & 5: Boundary 5 (Attenuated A2A v2), Boundary 6 (Agent Substrate v0.5.0 gVisor Sandbox + Egress MITM),
+	// and Boundary 2 (Model Armor SanitizeUserPrompt on inbound peer A2A response)
+	sandboxTrace, sandboxWire, cleanPeerSummary := executeA2ASandboxVerificationStep(ctx, rt, req, len(trace)+1)
+	trace = append(trace, sandboxTrace...)
+	wireRecords = append(wireRecords, sandboxWire...)
 
 	// Step 6: Boundary 1 — Step-Up Confirmation (adk_request_confirmation) + A2UI v0.9 Catalog Validation
-	if req.Posture.StepUpAndA2UICatalogEnabled && req.Posture.TokenBrokerEnabled && req.Posture.SandboxEgressMITMEnabled && req.Posture.PIIRedactorEnabled {
+	// Evaluated independently on req.Posture.StepUpAndA2UICatalogEnabled.
+	if req.Posture.StepUpAndA2UICatalogEnabled {
 		confirmationID := fmt.Sprintf("confirm-%s-s5-pr-42", req.SessionID)
 		stepUp, err := buildADKStepUpConfirmation(
 			confirmationID,
@@ -480,10 +172,10 @@ func executeScenario05(ctx context.Context, rt *Runtime, req TurnRequest) (*Turn
 			"github.com/gke-demos/checkout-service/pulls",
 			"Full-chain verification passed in gVisor. Operator approval required before creating GitHub Pull Request #42 and posting redacted Jira update on SEC-101.",
 			map[string]string{
-				"repo":        "gke-demos/checkout-service",
-				"base":        "main",
-				"head":        "fix/checkout-502-nil-guard",
-				"title":       "fix(checkout): guard nil RetryPolicy on v2.4 rollout",
+				"repo":         "gke-demos/checkout-service",
+				"base":         "main",
+				"head":         "fix/checkout-502-nil-guard",
+				"title":        "fix(checkout): guard nil RetryPolicy on v2.4 rollout",
 				"jiraFollowUp": "post_jira_comment(SEC-101)",
 			},
 		)
@@ -583,7 +275,7 @@ func executeScenario05(ctx context.Context, rt *Runtime, req TurnRequest) (*Turn
 		}, nil
 	}
 
-	// Red Mode Full-Chain Exploit
+	// Step 6 when StepUpAndA2UICatalogEnabled is false: Boundary 1 bypassed
 	trace = append(trace, BoundaryTraceEvent{
 		Order:     len(trace) + 1,
 		Boundary:  BoundaryGenerativeUI,

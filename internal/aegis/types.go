@@ -221,6 +221,27 @@ type OAuthGrantRequest struct {
 	Nonce     string     `json:"nonce,omitempty"`
 }
 
+// OAuthCallback carries parameters to complete an OAuth 2.0 3LO grant or callback.
+type OAuthCallback = OAuthGrantRequest
+
+// ConsentResult captures the updated session state after completing an OAuth 2.0 3LO grant.
+type ConsentResult struct {
+	SessionID string           `json:"sessionId"`
+	Persona   PersonaID        `json:"persona"`
+	Provider  ProviderID       `json:"provider"`
+	Granted   bool             `json:"granted"`
+	Session   *SessionSnapshot `json:"session,omitempty"`
+}
+
+// AegisRuntime defines the primary in-process seam for executing turns, resolving HITL
+// confirmations, completing 3LO OAuth callbacks, and inspecting session state.
+type AegisRuntime interface {
+	ExecuteTurn(ctx context.Context, req TurnRequest) (*TurnResult, error)
+	ResolveConfirmation(ctx context.Context, res ConfirmationResolution) (*TurnResult, error)
+	CompleteOAuthConsent(ctx context.Context, cb OAuthCallback) (*ConsentResult, error)
+	GetSessionState(ctx context.Context, sessionID string) (*SessionSnapshot, error)
+}
+
 // SessionSnapshot holds the current state of an Operator session.
 type SessionSnapshot struct {
 	SessionID          string                        `json:"sessionId"`

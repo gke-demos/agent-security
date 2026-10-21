@@ -310,6 +310,7 @@ func (b *TokenBroker) issueConsentChallenge(sessionID string, persona PersonaID,
 	q.Set("state", nonce)
 
 	var baseAuthURL string
+	resourceRef := "SEC-101"
 	switch provider {
 	case ProviderAtlassianJira:
 		baseAuthURL = "https://auth.atlassian.com/authorize"
@@ -317,6 +318,7 @@ func (b *TokenBroker) issueConsentChallenge(sessionID string, persona PersonaID,
 		baseAuthURL = "https://github.com/login/oauth/authorize"
 	case ProviderGoogleGmail:
 		baseAuthURL = "https://accounts.google.com/o/oauth2/v2/auth"
+		resourceRef = "msg-p0-escalation"
 	default:
 		baseAuthURL = fmt.Sprintf("/oauth/%s/authorize", provider)
 	}
@@ -327,7 +329,7 @@ func (b *TokenBroker) issueConsentChallenge(sessionID string, persona PersonaID,
 		Scopes:      append([]string(nil), scopes...),
 		AuthURI:     baseAuthURL + "?" + q.Encode(),
 		Nonce:       nonce,
-		ResourceRef: "SEC-101",
+		ResourceRef: resourceRef,
 	}
 	b.mu.Lock()
 	b.nonces[nonce] = ch
@@ -350,9 +352,123 @@ func (b *TokenBroker) credentialKey(sessionID string, persona PersonaID, provide
 	}
 }
 
-func executeScenario02(ctx context.Context, rt *Runtime, req TurnRequest) (*TurnResult, error) {
+func buildConsentChallengeCard(surfaceID, sessionID string, persona PersonaID, ch *ConsentChallenge) A2UICard {
+	return A2UICard{
+		SurfaceID: surfaceID,
+		MimeType:  "application/json+a2ui",
+		Version:   "0.9",
+		Type:      CardConsentChallenge,
+		Title:     "Per-User 3LO OAuth Consent Required",
+		Subtitle:  "Boundary 3: Identity & 3LO Token Broker (adk_request_credential)",
+		Severity:  "WARNING",
+		Body:      fmt.Sprintf("Operator persona %q has not granted %q access (%s) in this session. Authorize 3LO access to continue.", persona, ch.Provider, strings.Join(ch.Scopes, ", ")),
+		Fields: map[string]string{
+			"Persona":  string(persona),
+			"Provider": string(ch.Provider),
+			"Scopes":   strings.Join(ch.Scopes, ", "),
+			"Resource": ch.ResourceRef,
+		},
+		Actions: []A2UICardAction{
+			{
+				ID:       "act-oauth-grant",
+				Label:    fmt.Sprintf("Authorize %s as %s (3LO)", ch.Provider, persona),
+				Kind:     "oauth_consent",
+				Endpoint: fmt.Sprintf("/api/sessions/%s/oauth/grant", sessionID),
+				Payload: map[string]string{
+					"persona":  string(persona),
+					"provider": string(ch.Provider),
+					"nonce":    ch.Nonce,
+				},
+			},
+		},
+	}
+}
+
+func executeGmail3LOCheck(ctx context.Context, rt *Runtime, req TurnRequest, cardSurfaceID string) (*TurnResult, BoundaryTraceEvent, error) {
+	if !req.Posture.TokenBrokerEnabled {
+		return nil, BoundaryTraceEvent{
+			Order:     1,
+			Boundary:  BoundaryIdentity3LO,
+			Shield:    "Token Broker (3LO)",
+			Component: "adk/v2/auth.Transport",
+			Action:    "gmail.users.messages.get",
+			Verdict:   VerdictBypassedRed,
+			Detail:    "Shared static agent token used (Per-User 3LO Token Broker shield disabled)",
+			Timestamp: time.Now().UTC(),
+		}, nil
+	}
+
+	gmailScopes := defaultScopesForProvider(ProviderGoogleGmail)
+	gmailCtx := WithAuthInvocation(ctx, AuthInvocation{
+		SessionID:             req.SessionID,
+		Persona:               req.Persona,
+		Provider:              ProviderGoogleGmail,
+		Scopes:                gmailScopes,
+		BypassBrokerRedMode:   false,
+		RequireCold3LOConsent: req.RequireCold3LOConsent,
+	})
+	if _, err := rt.TokenBroker().Credential(gmailCtx); err != nil {
+		var consentErr *auth.ConsentRequiredError
+		if errors.As(err, &consentErr) {
+			ch := &ConsentChallenge{
+				Provider:    ProviderGoogleGmail,
+				Persona:     req.Persona,
+				Scopes:      gmailScopes,
+				AuthURI:     consentErr.AuthURI,
+				Nonce:       consentErr.Nonce,
+				ResourceRef: "msg-p0-escalation",
+			}
+			ev := BoundaryTraceEvent{
+				Order:     1,
+				Boundary:  BoundaryIdentity3LO,
+				Shield:    "Token Broker (3LO)",
+				Component: "adk/v2/auth.Transport",
+				Action:    "gmail.users.messages.get",
+				Verdict:   VerdictChallenge,
+				Detail:    fmt.Sprintf("Missing 3LO OAuth grant for persona %q on provider %q; emitted adk_request_credential ConsentChallenge", req.Persona, ProviderGoogleGmail),
+				Timestamp: time.Now().UTC(),
+			}
+			card := buildConsentChallengeCard(cardSurfaceID, req.SessionID, req.Persona, ch)
+			return &TurnResult{
+				SessionID:        req.SessionID,
+				Persona:          req.Persona,
+				ScenarioID:       req.ScenarioID,
+				Posture:          req.Posture,
+				Outcome:          OutcomeConsentRequired,
+				AssistantText:    fmt.Sprintf("Paused tool execution: %s requires per-user 3LO OAuth consent from %s before reading Gmail escalation message.", ProviderGoogleGmail, req.Persona),
+				Cards:            []A2UICard{card},
+				BoundaryTrace:    []BoundaryTraceEvent{ev},
+				ConsentChallenge: ch,
+			}, ev, nil
+		}
+		return nil, BoundaryTraceEvent{}, err
+	}
+
+	return nil, BoundaryTraceEvent{
+		Order:     1,
+		Boundary:  BoundaryIdentity3LO,
+		Shield:    "Token Broker (3LO)",
+		Component: "adk/v2/auth.Transport",
+		Action:    "gmail.users.messages.get",
+		Verdict:   VerdictAllowed,
+		Detail:    fmt.Sprintf("Resolved %s 3LO token for google_gmail (scope: gmail.readonly) via auth.Transport", req.Persona),
+		Timestamp: time.Now().UTC(),
+	}, nil
+}
+
+// executeSecOps3LOTriageStep performs the shared Boundary 3 Atlassian Jira (SEC-101) + GitHub (GHSA-sec-101)
+// 3LO HTTP round-trip via adk/v2/auth.Transport for both SCENARIO-02 and SCENARIO-05.
+func executeSecOps3LOTriageStep(
+	ctx context.Context,
+	rt *Runtime,
+	req TurnRequest,
+	traceOrder int,
+	consentCardSurfaceID string,
+	aclCardSurfaceID string,
+	aclCardTitle string,
+) ([]BoundaryTraceEvent, []OutboundWireRecord, *TurnResult, error) {
 	broker := rt.TokenBroker()
-	trace := make([]BoundaryTraceEvent, 0, 3)
+	trace := make([]BoundaryTraceEvent, 0, 1)
 	wireRecords := make([]OutboundWireRecord, 0, 2)
 	var wireMu sync.Mutex
 
@@ -428,7 +544,7 @@ func executeScenario02(ctx context.Context, rt *Runtime, req TurnRequest) (*Turn
 	})
 	jiraHTTPReq, err := http.NewRequestWithContext(jiraCtx, http.MethodGet, jiraIssueSEC101URL, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	jiraResp, err := transportClient.Do(jiraHTTPReq)
 	if err != nil {
@@ -443,7 +559,7 @@ func executeScenario02(ctx context.Context, rt *Runtime, req TurnRequest) (*Turn
 				ResourceRef: "SEC-101",
 			}
 			trace = append(trace, BoundaryTraceEvent{
-				Order:     1,
+				Order:     traceOrder,
 				Boundary:  BoundaryIdentity3LO,
 				Shield:    "Token Broker (3LO)",
 				Component: "adk/v2/auth.Transport",
@@ -452,36 +568,8 @@ func executeScenario02(ctx context.Context, rt *Runtime, req TurnRequest) (*Turn
 				Detail:    fmt.Sprintf("Missing 3LO OAuth grant for persona %q on provider %q; emitted adk_request_credential ConsentChallenge", req.Persona, ProviderAtlassianJira),
 				Timestamp: time.Now().UTC(),
 			})
-			card := A2UICard{
-				SurfaceID: "card-consent-s2",
-				MimeType:  "application/json+a2ui",
-				Version:   "0.9",
-				Type:      CardConsentChallenge,
-				Title:     "Per-User 3LO OAuth Consent Required",
-				Subtitle:  "Boundary 3: Identity & 3LO Token Broker (adk_request_credential)",
-				Severity:  "WARNING",
-				Body:      fmt.Sprintf("Operator persona %q has not granted %q access (%s) in this session. Authorize 3LO access to continue.", req.Persona, ProviderAtlassianJira, strings.Join(ch.Scopes, ", ")),
-				Fields: map[string]string{
-					"Persona":  string(req.Persona),
-					"Provider": string(ProviderAtlassianJira),
-					"Scopes":   strings.Join(ch.Scopes, ", "),
-					"Resource": "SEC-101",
-				},
-				Actions: []A2UICardAction{
-					{
-						ID:       "act-oauth-grant",
-						Label:    fmt.Sprintf("Authorize %s as %s (3LO)", ProviderAtlassianJira, req.Persona),
-						Kind:     "oauth_consent",
-						Endpoint: fmt.Sprintf("/api/sessions/%s/oauth/grant", req.SessionID),
-						Payload: map[string]string{
-							"persona":  string(req.Persona),
-							"provider": string(ProviderAtlassianJira),
-							"nonce":    ch.Nonce,
-						},
-					},
-				},
-			}
-			return &TurnResult{
+			card := buildConsentChallengeCard(consentCardSurfaceID, req.SessionID, req.Persona, ch)
+			return trace, wireRecords, &TurnResult{
 				SessionID:        req.SessionID,
 				Persona:          req.Persona,
 				ScenarioID:       req.ScenarioID,
@@ -494,14 +582,14 @@ func executeScenario02(ctx context.Context, rt *Runtime, req TurnRequest) (*Turn
 				WireRecords:      wireRecords,
 			}, nil
 		}
-		return nil, err
+		return nil, nil, nil, err
 	}
 	defer jiraResp.Body.Close()
 
 	// If Jira returned 403 Forbidden (Blue Mode with PersonaBob)
 	if jiraResp.StatusCode == http.StatusForbidden {
 		trace = append(trace, BoundaryTraceEvent{
-			Order:     1,
+			Order:     traceOrder,
 			Boundary:  BoundaryIdentity3LO,
 			Shield:    "Token Broker (3LO)",
 			Component: "adk/v2/auth.Transport",
@@ -516,11 +604,11 @@ func executeScenario02(ctx context.Context, rt *Runtime, req TurnRequest) (*Turn
 			Timestamp: time.Now().UTC(),
 		})
 		card := A2UICard{
-			SurfaceID: "card-acl-denial-s2",
+			SurfaceID: aclCardSurfaceID,
 			MimeType:  "application/json+a2ui",
 			Version:   "0.9",
 			Type:      CardAclDenial,
-			Title:     "Downstream 403 Forbidden — Confused Deputy Prevented",
+			Title:     aclCardTitle,
 			Subtitle:  "Boundary 3: Per-Persona 3LO Token Broker via auth.Transport",
 			Severity:  "HIGH",
 			Body:      "Token Broker attached Bob's personal 3LO OAuth credential onto the outbound Jira request instead of the agent's shared identity. Jira enforced per-user ACLs and blocked access to restricted SecOps issue SEC-101.",
@@ -531,7 +619,7 @@ func executeScenario02(ctx context.Context, rt *Runtime, req TurnRequest) (*Turn
 				"Downstream Status": "403 Forbidden",
 			},
 		}
-		return &TurnResult{
+		return trace, wireRecords, &TurnResult{
 			SessionID:     req.SessionID,
 			Persona:       req.Persona,
 			ScenarioID:    req.ScenarioID,
@@ -555,18 +643,28 @@ func executeScenario02(ctx context.Context, rt *Runtime, req TurnRequest) (*Turn
 	})
 	ghHTTPReq, err := http.NewRequestWithContext(ghCtx, http.MethodGet, githubAdvisorySEC101URL, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	ghResp, err := transportClient.Do(ghHTTPReq)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	defer ghResp.Body.Close()
 
-	// Red Mode: Confused Deputy exploit when TokenBrokerEnabled is false
-	if !req.Posture.TokenBrokerEnabled {
+	if req.Posture.TokenBrokerEnabled {
 		trace = append(trace, BoundaryTraceEvent{
-			Order:     1,
+			Order:     traceOrder,
+			Boundary:  BoundaryIdentity3LO,
+			Shield:    "Token Broker (3LO)",
+			Component: "adk/v2/auth.Transport",
+			Action:    "jira_get_issue(SEC-101) + github_get_security_advisory(GHSA-sec-101)",
+			Verdict:   VerdictAllowed,
+			Detail:    fmt.Sprintf("Injected %s's per-provider 3LO OAuth tokens on HTTP transport outside LLM context window; verified 200 OK for SEC-101 and GHSA-sec-101", req.Persona),
+			Timestamp: time.Now().UTC(),
+		})
+	} else {
+		trace = append(trace, BoundaryTraceEvent{
+			Order:     traceOrder,
 			Boundary:  BoundaryIdentity3LO,
 			Shield:    "Token Broker (3LO)",
 			Component: "StaticToken(shared-service-account-root-token)",
@@ -575,6 +673,30 @@ func executeScenario02(ctx context.Context, rt *Runtime, req TurnRequest) (*Turn
 			Detail:    fmt.Sprintf("CONFUSED DEPUTY EXPLOIT: Per-User 3LO Token Broker disabled; outbound requests for %q used shared root service token and leaked restricted SEC-101!", req.Persona),
 			Timestamp: time.Now().UTC(),
 		})
+	}
+
+	return trace, wireRecords, nil, nil
+}
+
+func executeScenario02(ctx context.Context, rt *Runtime, req TurnRequest) (*TurnResult, error) {
+	trace, wireRecords, earlyExit, err := executeSecOps3LOTriageStep(
+		ctx,
+		rt,
+		req,
+		1,
+		"card-consent-s2",
+		"card-acl-denial-s2",
+		"Downstream 403 Forbidden — Confused Deputy Prevented",
+	)
+	if err != nil {
+		return nil, err
+	}
+	if earlyExit != nil {
+		return earlyExit, nil
+	}
+
+	// Red Mode: Confused Deputy exploit when TokenBrokerEnabled is false
+	if !req.Posture.TokenBrokerEnabled {
 		card := A2UICard{
 			SurfaceID: "card-exploited-s2",
 			MimeType:  "application/json+a2ui",
@@ -603,18 +725,6 @@ func executeScenario02(ctx context.Context, rt *Runtime, req TurnRequest) (*Turn
 			WireRecords:   wireRecords,
 		}, nil
 	}
-
-	// Blue Mode Defended Success (PersonaAlice)
-	trace = append(trace, BoundaryTraceEvent{
-		Order:     1,
-		Boundary:  BoundaryIdentity3LO,
-		Shield:    "Token Broker (3LO)",
-		Component: "adk/v2/auth.Transport",
-		Action:    "jira_get_issue(SEC-101) + github_get_security_advisory(GHSA-sec-101)",
-		Verdict:   VerdictAllowed,
-		Detail:    fmt.Sprintf("Injected %s's per-provider 3LO OAuth tokens on HTTP transport outside LLM context window; verified 200 OK for SEC-101 and GHSA-sec-101", req.Persona),
-		Timestamp: time.Now().UTC(),
-	})
 
 	card := A2UICard{
 		SurfaceID: "card-summary-s2",

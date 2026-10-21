@@ -365,6 +365,37 @@ func TestRedVsBlueTenTrajectories(t *testing.T) {
 		assertBoundaryVerdict(t, step2.BoundaryTrace, aegis.BoundaryGenerativeUI, aegis.VerdictAllowed)
 		assertNoRawPIIOrTokens(t, step2.AssistantText)
 		assertNoRawPIIOrTokens(t, step2.OutboundCommentPreview)
+
+		// Also verify SCENARIO-05 cold Gmail 3LO challenge and independent shield toggling:
+		coldGmailS5 := postTurn(t, aegis.TurnRequest{
+			SessionID:             "eval-t10-s5-cold-gmail",
+			Persona:               aegis.PersonaAlice,
+			ScenarioID:            aegis.Scenario05FullChainZeroTrust,
+			Posture:               aegis.AllBluePosture(),
+			Prompt:                "Run full-chain triage with cold Gmail 3LO.",
+			RequireCold3LOConsent: true,
+		})
+		if coldGmailS5.Outcome != aegis.OutcomeConsentRequired || coldGmailS5.ConsentChallenge == nil || coldGmailS5.ConsentChallenge.Provider != aegis.ProviderGoogleGmail {
+			t.Fatalf("SCENARIO-05 cold Gmail = (%q, %+v), want OutcomeConsentRequired for google_gmail", coldGmailS5.Outcome, coldGmailS5.ConsentChallenge)
+		}
+		assertHasCardType(t, coldGmailS5.Cards, aegis.CardConsentChallenge)
+
+		// Verify independent shield evaluation in SCENARIO-05 (PIIRedactorEnabled=false while StepUpAndA2UICatalogEnabled=true)
+		partialPosture := aegis.AllBluePosture()
+		partialPosture.PIIRedactorEnabled = false
+		partialS5 := postTurn(t, aegis.TurnRequest{
+			SessionID:  "eval-t10-s5-partial",
+			Persona:    aegis.PersonaAlice,
+			ScenarioID: aegis.Scenario05FullChainZeroTrust,
+			Posture:    partialPosture,
+			Prompt:     "Run full-chain triage with PII Redactor disabled but Step-Up enabled.",
+		})
+		if partialS5.Outcome != aegis.OutcomeApprovalRequired {
+			t.Fatalf("SCENARIO-05 partial shield Outcome = %q, want %q (StepUpAndA2UICatalogEnabled evaluated independently)", partialS5.Outcome, aegis.OutcomeApprovalRequired)
+		}
+		assertHasCardType(t, partialS5.Cards, aegis.CardStepUpConfirmation)
+		assertBoundaryVerdict(t, partialS5.BoundaryTrace, aegis.BoundaryReasoningGuard, aegis.VerdictBypassedRed)
+		assertBoundaryVerdict(t, partialS5.BoundaryTrace, aegis.BoundaryGenerativeUI, aegis.VerdictChallenge)
 		_ = ctx
 	})
 }

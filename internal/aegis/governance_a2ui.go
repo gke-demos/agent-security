@@ -85,10 +85,8 @@ var (
 	iframeBlockRegex = regexp.MustCompile(`(?is)<iframe\b[^>]*>.*?</iframe>`)
 	htmlTagRegex     = regexp.MustCompile(`(?is)</?[a-zA-Z][^>]*>`)
 	eventAttrRegex   = regexp.MustCompile(`(?i)\bon[a-z]+\s*=\s*[^\s>]+`)
-	jsURI SchemeRegex = regexp.MustCompile(`(?i)javascript\s*:`)
+	jsURISchemeRegex = regexp.MustCompile(`(?i)javascript\s*:`)
 )
-
-type SchemeRegex = *regexp.Regexp
 
 // DiscoverRegistryResources queries Google Cloud Agent Registry via
 // google.golang.org/adk/v2/agentregistry.New and falls back to the governed local
@@ -388,7 +386,7 @@ func sanitizeA2UIText(input string) string {
 	s := scriptBlockRegex.ReplaceAllString(input, "[STRIPPED_SCRIPT]")
 	s = iframeBlockRegex.ReplaceAllString(s, "[STRIPPED_IFRAME]")
 	s = eventAttrRegex.ReplaceAllString(s, "")
-	s = jsURI.ReplaceAllString(s, "[STRIPPED_JS_URI]")
+	s = jsURISchemeRegex.ReplaceAllString(s, "[STRIPPED_JS_URI]")
 	s = htmlTagRegex.ReplaceAllString(s, "")
 	return strings.TrimSpace(s)
 }

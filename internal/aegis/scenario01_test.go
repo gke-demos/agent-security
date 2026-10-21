@@ -112,4 +112,125 @@ func TestScenario01_PromptScreenAndPIIRedactor_RedVsBlue(t *testing.T) {
 			t.Errorf("RedMode expected raw SSN leak in unredacted input preview, got %q", got.SanitizedInputPreview)
 		}
 	})
+
+	t.Run("Cold 3LO Gmail lookup returns OutcomeConsentRequired with ConsentChallengeCard for ProviderGoogleGmail and CompleteOAuthConsent unblocks turn", func(t *testing.T) {
+		var iface aegis.AegisRuntime = rt
+
+		coldRes, err := iface.ExecuteTurn(ctx, aegis.TurnRequest{
+			SessionID:             "sess-cold-gmail-s1",
+			Persona:               aegis.PersonaAlice,
+			ScenarioID:            aegis.Scenario01PromptInjectionAndPII,
+			Posture:               aegis.AllBluePosture(),
+			Prompt:                "Triage the clean customer escalation email from Gmail.",
+			CleanPIIOnly:          true,
+			RequireCold3LOConsent: true,
+		})
+		if err != nil {
+			t.Fatalf("ExecuteTurn(RequireCold3LOConsent) error = %v", err)
+		}
+		if coldRes.Outcome != aegis.OutcomeConsentRequired {
+			t.Fatalf("Outcome = %q, want %q", coldRes.Outcome, aegis.OutcomeConsentRequired)
+		}
+		if coldRes.ConsentChallenge == nil || coldRes.ConsentChallenge.Provider != aegis.ProviderGoogleGmail {
+			t.Fatalf("ConsentChallenge = %+v, want ProviderGoogleGmail", coldRes.ConsentChallenge)
+		}
+		if len(coldRes.Cards) == 0 || coldRes.Cards[0].Type != aegis.CardConsentChallenge {
+			t.Fatalf("Cards = %+v, want first card %q", coldRes.Cards, aegis.CardConsentChallenge)
+		}
+
+		// Revoke Gmail grant, verify it still challenges, then complete consent via AegisRuntime.CompleteOAuthConsent
+		rt.TokenBroker().Revoke(ctx, "sess-cold-gmail-s1", aegis.PersonaAlice, aegis.ProviderGoogleGmail, nil)
+		revokedRes, err := iface.ExecuteTurn(ctx, aegis.TurnRequest{
+			SessionID:    "sess-cold-gmail-s1",
+			Persona:      aegis.PersonaAlice,
+			ScenarioID:   aegis.Scenario01PromptInjectionAndPII,
+			Posture:      aegis.AllBluePosture(),
+			Prompt:       "Triage the clean customer escalation email from Gmail.",
+			CleanPIIOnly: true,
+		})
+		if err != nil {
+			t.Fatalf("ExecuteTurn(after revoke) error = %v", err)
+		}
+		if revokedRes.Outcome != aegis.OutcomeConsentRequired {
+			t.Fatalf("Outcome after revoke = %q, want %q", revokedRes.Outcome, aegis.OutcomeConsentRequired)
+		}
+
+		consentRes, err := iface.CompleteOAuthConsent(ctx, aegis.OAuthCallback{
+			SessionID: "sess-cold-gmail-s1",
+			Persona:   aegis.PersonaAlice,
+			Provider:  aegis.ProviderGoogleGmail,
+			Scopes:    []string{"https://www.googleapis.com/auth/gmail.readonly"},
+			Nonce:     revokedRes.ConsentChallenge.Nonce,
+		})
+		if err != nil {
+			t.Fatalf("CompleteOAuthConsent() error = %v", err)
+		}
+		if !consentRes.Granted || consentRes.Provider != aegis.ProviderGoogleGmail {
+			t.Fatalf("ConsentResult = %+v, want Granted=true for google_gmail", consentRes)
+		}
+
+		snap, err := iface.GetSessionState(ctx, "sess-cold-gmail-s1")
+		if err != nil || snap.SessionID != "sess-cold-gmail-s1" {
+			t.Fatalf("GetSessionState() = (%+v, %v), want session sess-cold-gmail-s1", snap, err)
+		}
+
+		warmRes, err := iface.ExecuteTurn(ctx, aegis.TurnRequest{
+			SessionID:    "sess-cold-gmail-s1",
+			Persona:      aegis.PersonaAlice,
+			ScenarioID:   aegis.Scenario01PromptInjectionAndPII,
+			Posture:      aegis.AllBluePosture(),
+			Prompt:       "Triage the clean customer escalation email from Gmail.",
+			CleanPIIOnly: true,
+		})
+		if err != nil {
+			t.Fatalf("ExecuteTurn(after CompleteOAuthConsent) error = %v", err)
+		}
+		if warmRes.Outcome != aegis.OutcomeDefendedSuccess {
+			t.Fatalf("Outcome after CompleteOAuthConsent = %q, want %q", warmRes.Outcome, aegis.OutcomeDefendedSuccess)
+		}
+	})
+
+	t.Run("ContentGuard queries live Cloud DLP endpoint (DLPEndpoint) via httptest.Server", func(t *testing.T) {
+		dlpHits := 0
+		dlpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			dlpHits++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"result": {
+					"findings": [
+						{"infoType": {"name": "US_SOCIAL_SECURITY_NUMBER"}},
+						{"infoType": {"name": "CUSTOM_FINANCE_TOKEN"}}
+					]
+				},
+				"item": {
+					"value": "Customer [REDACTED_DLP_TOKEN] reported 502 error."
+				}
+			}`))
+		}))
+		defer dlpSrv.Close()
+
+		liveRT := aegis.NewRuntime(aegis.RuntimeConfig{
+			DLPEndpoint: dlpSrv.URL,
+			HTTPClient:  dlpSrv.Client(),
+		})
+		res := liveRT.Guard().InspectAndSanitize(ctx, "Customer FIN-999999 reported 502 error.", aegis.AllBluePosture())
+		if dlpHits == 0 {
+			t.Fatalf("expected ContentGuard to query DLPEndpoint, got 0 hits")
+		}
+		if !res.IsSDPOnlyBlock || !res.DeidentifiedInFlight {
+			t.Errorf("InspectAndSanitize() = %+v, want IsSDPOnlyBlock=true and DeidentifiedInFlight=true", res)
+		}
+		if !strings.Contains(res.SanitizedText, "[REDACTED_DLP_TOKEN]") {
+			t.Errorf("SanitizedText = %q, want [REDACTED_DLP_TOKEN] from live DLP response", res.SanitizedText)
+		}
+		foundCustomType := false
+		for _, mt := range res.SDPMatchTypes {
+			if mt == "CUSTOM_FINANCE_TOKEN" {
+				foundCustomType = true
+			}
+		}
+		if !foundCustomType {
+			t.Errorf("SDPMatchTypes = %v, want CUSTOM_FINANCE_TOKEN from live DLP response", res.SDPMatchTypes)
+		}
+	})
 }
