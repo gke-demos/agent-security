@@ -1,0 +1,16 @@
+{
+  "version": 3,
+  "bindings": [
+    {
+      "role": "roles/iap.egressor",
+      "members": [
+        "principal://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT_ID}.svc.id.goog/subject/ns/aegis-system/sa/aegis-sre"
+      ],
+      "condition": {
+        "title": "aegis-agent-to-anywhere-uap",
+        "description": "Allow read-only Cloud Logging and GKE cluster inspection MCP tools while blocking destructive mutations such as container.clusters.delete",
+        "expression": "request.auth.claims[\"iap.googleapis.com/mcp.tool.isReadOnly\"] == true && request.auth.claims[\"iap.googleapis.com/mcp.toolName\"] in [\"logging.entries.list\", \"container.clusters.get\"]"
+      }
+    }
+  ]
+}

@@ -6,6 +6,7 @@ dist/
 *.test
 
 # Local caches, credentials, and temporary files
+.worktrees/
 .cache/
 .env
 .env.*

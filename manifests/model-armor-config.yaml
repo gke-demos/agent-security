@@ -1,0 +1,26 @@
+apiVersion: modelarmor.googleapis.com/v1
+kind: Template
+metadata:
+  name: aegis-sre-zero-trust-template
+spec:
+  filterConfig:
+    piAndJailbreakFilterSettings:
+      filterEnforcement: ENABLED
+      confidenceLevel: LOW_AND_ABOVE
+    maliciousUriFilterSettings:
+      filterEnforcement: ENABLED
+    raiSettings:
+      raiFilters:
+        - filterType: DANGEROUS
+          confidenceLevel: MEDIUM_AND_ABOVE
+    sdpSettings:
+      advancedConfig:
+        inspectTemplate: projects/${PROJECT_ID}/locations/global/inspectTemplates/aegis-sdp-inspect
+        deidentifyTemplate: projects/${PROJECT_ID}/locations/global/deidentifyTemplates/aegis-sdp-deidentify
+      inFlightDeidentification:
+        isSdpOnlyBlockContinue: true
+        infoTypes:
+          - US_SOCIAL_SECURITY_NUMBER
+          - GCP_API_KEY
+          - EMAIL_ADDRESS
+          - PHONE_NUMBER
