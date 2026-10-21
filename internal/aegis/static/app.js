@@ -79,7 +79,24 @@
     });
   }
 
+  function closePersonaDropdown() {
+    const menu = document.getElementById("persona-dropdown");
+    const trigger = document.getElementById("btn-persona-dropdown");
+    if (menu) menu.hidden = true;
+    if (trigger) trigger.setAttribute("aria-expanded", "false");
+  }
+
+  function togglePersonaDropdown() {
+    const menu = document.getElementById("persona-dropdown");
+    const trigger = document.getElementById("btn-persona-dropdown");
+    if (!menu) return;
+    const nextHidden = !menu.hidden;
+    menu.hidden = nextHidden;
+    if (trigger) trigger.setAttribute("aria-expanded", nextHidden ? "false" : "true");
+  }
+
   function openDemoModal() {
+    closePersonaDropdown();
     const modal = document.getElementById("demo-controls-modal");
     if (!modal) return;
     modal.hidden = false;
@@ -130,9 +147,9 @@
       else dot.classList.add("status-amber");
     }
     if (text) {
-      if (allBlue) text.textContent = "5/5 Shields";
-      else if (allRed) text.textContent = "Vulnerable (0/5)";
-      else text.textContent = enabledCount + "/5 Shields";
+      if (allBlue) text.textContent = "5/5 Shields Active";
+      else if (allRed) text.textContent = "0/5 Shields Active";
+      else text.textContent = enabledCount + "/5 Shields Active";
     }
   }
 
@@ -148,7 +165,7 @@
     const topbarPersona = document.getElementById("topbar-persona-text");
     if (topbarPersona) {
       topbarPersona.textContent =
-        state.persona === "alice" ? "Alice · SecOps Lead" : "Bob · Contractor";
+        state.persona === "alice" ? "Alice (SecOps Lead)" : "Bob (External Contractor)";
     }
 
     const grantedList = (state.grantedProviders && state.grantedProviders[state.persona]) || [];
@@ -166,29 +183,44 @@
     });
   }
 
-  function syncScenarioHeader(updatePromptInput) {
-    const tabs = document.querySelectorAll(".scenario-tab");
-    tabs.forEach(function (tab) {
+  function selectScenarioAndFillPrompt(scenId, focusInput) {
+    if (scenId) {
+      state.scenarioId = scenId;
+    }
+
+    document.querySelectorAll(".scenario-tab").forEach(function (tab) {
       tab.classList.toggle("active", tab.getAttribute("data-scenario") === state.scenarioId);
+    });
+
+    document.querySelectorAll(".starter-card").forEach(function (card) {
+      card.classList.toggle("active", card.getAttribute("data-starter-scenario") === state.scenarioId);
     });
 
     const badge = document.getElementById("active-scenario-badge");
     if (badge) badge.textContent = state.scenarioId;
 
     const meta = state.scenarios[state.scenarioId];
-    if (!meta) return;
-
-    const title = document.getElementById("active-scenario-title");
-    const subtitle = document.getElementById("active-scenario-subtitle");
     const promptInput = document.getElementById("input-prompt");
 
-    if (title) title.textContent = meta.title;
-    if (subtitle) subtitle.textContent = meta.subtitle;
-    if (updatePromptInput !== false && promptInput && meta.defaultPrompt) {
-      promptInput.value = meta.defaultPrompt;
+    if (meta) {
+      const title = document.getElementById("active-scenario-title");
+      const subtitle = document.getElementById("active-scenario-subtitle");
+      if (title) title.textContent = meta.title;
+      if (subtitle) subtitle.textContent = meta.subtitle;
+      if (promptInput && meta.defaultPrompt) {
+        promptInput.value = meta.defaultPrompt;
+      }
     }
 
     syncComposerFlagsIndicator();
+
+    if (focusInput && promptInput) {
+      promptInput.focus();
+      const len = promptInput.value.length;
+      if (typeof promptInput.setSelectionRange === "function") {
+        promptInput.setSelectionRange(len, len);
+      }
+    }
   }
 
   function syncComposerFlagsIndicator() {
@@ -579,7 +611,7 @@
       traceEvents.length +
       " boundary checks, " +
       wireCount +
-      " outbound calls)</span><span>Expand ▾</span>";
+      " outbound calls)</span><span>Expand</span>";
     details.appendChild(summary);
 
     const drawerBody = document.createElement("div");
@@ -729,7 +761,7 @@
       if (cleanCheck) cleanCheck.checked = false;
       syncShieldUI();
       syncPersonaAndVaultUI();
-      syncScenarioHeader();
+      selectScenarioAndFillPrompt(state.scenarioId, false);
       clearChatToWelcome();
       closeDemoModal();
     } catch (err) {
@@ -758,22 +790,19 @@
     }
     syncShieldUI();
     syncPersonaAndVaultUI();
-    syncScenarioHeader();
+    selectScenarioAndFillPrompt(state.scenarioId, false);
   }
 
   function bindEvents() {
-    // Modal open/close triggers
+    // 1. ONLY open Demo Controls modal via Cmd+K / Ctrl+K or the "5/5 Shields Active" button
     const btnDemo = document.getElementById("btn-demo-controls");
     if (btnDemo) btnDemo.addEventListener("click", openDemoModal);
 
-    const btnOpenPersona = document.getElementById("btn-open-persona");
-    if (btnOpenPersona) btnOpenPersona.addEventListener("click", openDemoModal);
-
-    const btnScenarioChip = document.getElementById("btn-scenario-chip");
-    if (btnScenarioChip) btnScenarioChip.addEventListener("click", openDemoModal);
-
     const btnCloseModal = document.getElementById("btn-close-modal");
     if (btnCloseModal) btnCloseModal.addEventListener("click", closeDemoModal);
+
+    const btnModalDone = document.getElementById("btn-modal-done");
+    if (btnModalDone) btnModalDone.addEventListener("click", closeDemoModal);
 
     const modalBackdrop = document.getElementById("demo-controls-modal");
     if (modalBackdrop) {
@@ -782,12 +811,42 @@
       });
     }
 
+    // 2. Topbar Persona Dropdown (Quick switch between Alice and Bob without opening modal)
+    const btnPersonaDropdown = document.getElementById("btn-persona-dropdown");
+    if (btnPersonaDropdown) {
+      btnPersonaDropdown.addEventListener("click", function (ev) {
+        ev.stopPropagation();
+        togglePersonaDropdown();
+      });
+    }
+
+    document.querySelectorAll(".persona-option").forEach(function (opt) {
+      opt.addEventListener("click", async function (ev) {
+        ev.stopPropagation();
+        const p = opt.getAttribute("data-persona");
+        if (!p) return;
+        state.persona = p;
+        syncPersonaAndVaultUI();
+        closePersonaDropdown();
+        await persistPosture();
+      });
+    });
+
+    // Close persona dropdown when clicking outside
+    document.addEventListener("click", function (ev) {
+      const wrap = document.querySelector(".persona-dropdown-wrap");
+      if (wrap && !wrap.contains(ev.target)) {
+        closePersonaDropdown();
+      }
+    });
+
     // Keyboard shortcut Cmd+K / Ctrl+K & Escape
     document.addEventListener("keydown", function (ev) {
       if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "k") {
         ev.preventDefault();
         toggleDemoModal();
       } else if (ev.key === "Escape") {
+        closePersonaDropdown();
         closeDemoModal();
       }
     });
@@ -800,15 +859,11 @@
       });
     }
 
-    // Starter prompt cards on welcome screen
+    // 3. Starter prompt cards on welcome screen ONLY fill the input box & focus it (no auto-send)
     document.querySelectorAll(".starter-card").forEach(function (card) {
-      card.addEventListener("click", async function () {
+      card.addEventListener("click", function () {
         const scenId = card.getAttribute("data-starter-scenario");
-        if (scenId) {
-          state.scenarioId = scenId;
-          syncScenarioHeader(true);
-        }
-        await executeTurn();
+        selectScenarioAndFillPrompt(scenId, true);
       });
     });
 
@@ -854,16 +909,6 @@
       });
     }
 
-    document.querySelectorAll(".persona-btn").forEach(function (btn) {
-      btn.addEventListener("click", async function () {
-        const p = btn.getAttribute("data-persona");
-        if (!p) return;
-        state.persona = p;
-        syncPersonaAndVaultUI();
-        await persistPosture();
-      });
-    });
-
     document.querySelectorAll(".btn-revoke-provider").forEach(function (btn) {
       btn.addEventListener("click", async function () {
         const provider = btn.getAttribute("data-provider");
@@ -890,22 +935,13 @@
       });
     });
 
+    // Scenario tabs inside modal also fill the prompt in the chat box
     document.querySelectorAll(".scenario-tab").forEach(function (tab) {
       tab.addEventListener("click", function () {
         const scenId = tab.getAttribute("data-scenario");
-        if (!scenId) return;
-        state.scenarioId = scenId;
-        syncScenarioHeader(true);
+        selectScenarioAndFillPrompt(scenId, false);
       });
     });
-
-    const btnModalRun = document.getElementById("btn-modal-run");
-    if (btnModalRun) {
-      btnModalRun.addEventListener("click", async function () {
-        closeDemoModal();
-        await executeTurn();
-      });
-    }
 
     const chatForm = document.getElementById("chat-form");
     if (chatForm) {

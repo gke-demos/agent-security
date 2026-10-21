@@ -75,6 +75,7 @@ func TestPortal_RootHTMLAndStaticAssets(t *testing.T) {
 		`id="btn-theme-toggle"`,
 		`id="chat-stream"`,
 		`id="chat-welcome"`,
+		`id="persona-dropdown"`,
 		`id="demo-controls-modal"`,
 		`id="btn-demo-controls"`,
 		"<svg",
