@@ -1,0 +1,3 @@
+# Attenuated A2A v2 Delegation and Agent Substrate v0.5.0 gVisor Sandbox with Egress MITM
+
+When the `Triage Orchestrator` delegates repository verification to the `Sandbox Remediator` over A2A v2 (`google.golang.org/adk/v2/server/adka2a/v2`), it strips all upstream 3LO credential parts from the delegated invocation and screens the returned A2A response through Model Armor (`SanitizeUserPrompt`) as untrusted peer input. The `Sandbox Remediator` executes untrusted `go test` payloads inside an Agent Substrate `v0.5.0` (`ate.dev/v1alpha1`) Actor configured with `sandboxClass: gvisor`, zero secrets in container environment variables, a strict `EgressPolicy` domain allowlist, and out-of-sandbox `atenet` Egress MITM credential injection.

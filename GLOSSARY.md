@@ -9,7 +9,7 @@ A human security or reliability engineer who initiates an incident investigation
 _Avoid_: End user, client, caller
 
 **Persona**:
-A named Operator identity profile with a distinct set of third-party resource permissions used to verify per-user authorization boundaries.
+A named Operator identity profile (`Alice` for privileged SecOps, `Bob` for restricted contractor) with an isolated third-party 3LO credential partition used to verify per-user authorization boundaries and prevent Confused Deputy access.
 _Avoid_: Mock user, role account, test user
 
 **Triage Orchestrator**:
