@@ -73,6 +73,10 @@ func TestPortal_RootHTMLAndStaticAssets(t *testing.T) {
 		"Seed / Reset Fixtures",
 		"Boundary Trace Waterfall",
 		`id="btn-theme-toggle"`,
+		`id="chat-stream"`,
+		`id="chat-welcome"`,
+		`id="demo-controls-modal"`,
+		`id="btn-demo-controls"`,
 		"<svg",
 	}
 	for _, snippet := range requiredHTMLSnippets {

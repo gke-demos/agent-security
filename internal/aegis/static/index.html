@@ -3,64 +3,47 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AegisSRE — Zero-Trust Agent Security Red-vs-Blue Arena</title>
+  <title>AegisSRE — AI Incident Response Assistant</title>
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
-  <div class="app-shell">
-    <!-- Top Header Bar -->
-    <header class="top-header">
-      <div class="brand-group">
-        <div class="brand-logo" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <div class="chat-app">
+    <!-- Minimal Top Navigation Bar -->
+    <header class="chat-topbar">
+      <div class="topbar-left">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
             <path d="m9 12 2 2 4-4"/>
           </svg>
         </div>
-        <div class="brand-titles">
-          <div class="brand-title-row">
-            <h1 class="brand-name">AegisSRE</h1>
-            <span class="arena-badge">Red-vs-Blue Arena</span>
-            <span class="protocol-badge">ADK Go v2 · MCP · A2A v2 · A2UI v0.9 · Substrate v0.5.0</span>
-          </div>
-          <p class="brand-subtitle">Zero-Trust Incident Triage &amp; gVisor Sandbox Remediation across 6 Security Boundaries on GKE</p>
-        </div>
+        <span class="brand-name">AegisSRE</span>
+        <button type="button" id="btn-new-chat" class="ghost-pill-btn" title="Clear conversation and return to welcome screen">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 5v14M5 12h14"/>
+          </svg>
+          <span>New Chat</span>
+        </button>
       </div>
 
-      <div class="header-controls">
-        <!-- Persona Switcher -->
-        <div class="persona-switcher" role="group" aria-label="Operator Persona Switcher">
-          <button type="button" id="btn-persona-alice" class="persona-btn active" data-persona="alice">
-            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
-              <circle cx="9" cy="7" r="4"/>
-              <path d="m16 11 2 2 4-4"/>
-            </svg>
-            <span>Alice (SecOps Lead)</span>
-          </button>
-          <button type="button" id="btn-persona-bob" class="persona-btn" data-persona="bob">
-            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
-              <circle cx="9" cy="7" r="4"/>
-              <line x1="17" y1="8" x2="22" y2="13"/>
-              <line x1="22" y1="8" x2="17" y2="13"/>
-            </svg>
-            <span>Bob (External Contractor)</span>
-          </button>
-        </div>
-
-        <!-- Seed / Reset Fixtures Button -->
-        <button type="button" id="btn-seed-fixtures" class="action-btn secondary-btn" title="Reset 3LO grants, clear pending confirmations, and re-seed Gmail, Jira, GitHub, and GCP MCP fixtures">
-          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
-            <path d="M3 3v5h5"/>
-            <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/>
-            <path d="M16 16h5v5"/>
+      <div class="topbar-right">
+        <!-- Active Operator Persona Pill (Opens Demo Controls Modal) -->
+        <button type="button" id="btn-open-persona" class="status-pill-btn" title="Switch active operator persona or inspect 3LO OAuth tokens (Cmd+K)">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/>
+            <circle cx="12" cy="7" r="4"/>
           </svg>
-          <span>Seed / Reset Fixtures</span>
+          <span id="topbar-persona-text">Alice · SecOps Lead</span>
         </button>
 
-        <!-- Icon-Only Moon/Sun Projector Light Mode Toggle (Top-Right Corner, Zero Text Label) -->
+        <!-- Hidden-by-default Demo & Security Controls Trigger (Cmd+K) -->
+        <button type="button" id="btn-demo-controls" class="status-pill-btn posture-trigger-btn" title="Open Red-vs-Blue Demo &amp; Security Controls (Cmd+K)">
+          <span id="topbar-posture-dot" class="status-dot status-blue" aria-hidden="true"></span>
+          <span id="topbar-posture-text">5/5 Shields</span>
+          <kbd class="kbd-hint">⌘K</kbd>
+        </button>
+
+        <!-- Top-Right Icon-Only Moon/Sun Projector Light Mode Toggle (Zero Text Label) -->
         <button type="button" id="btn-theme-toggle" class="theme-segmented-toggle" aria-label="Toggle Projector Light Mode" title="Toggle Dark / Projector Light Mode">
           <span class="theme-seg theme-seg-dark" aria-hidden="true">
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -84,284 +67,341 @@
       </div>
     </header>
 
-    <!-- 5-Shield Security Posture Bar + Per-Provider 3LO Vault Bar -->
-    <section class="posture-section" aria-label="Security Shields and 3LO Token Broker Status">
-      <div class="posture-bar">
-        <div class="posture-presets">
-          <span class="section-kicker">5 Security Shields</span>
-          <button type="button" id="btn-all-blue" class="preset-btn preset-blue active">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Main Centered Conversation Stream -->
+    <main id="chat-stream" class="chat-stream" aria-label="Incident Response Conversation">
+      <div class="chat-container">
+        <!-- Clean Welcome Empty State -->
+        <section id="chat-welcome" class="chat-welcome">
+          <div class="welcome-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
               <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+              <path d="m9 12 2 2 4-4"/>
             </svg>
-            <span>All Blue (Defended)</span>
-          </button>
-          <button type="button" id="btn-all-red" class="preset-btn preset-red">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
-              <line x1="12" y1="9" x2="12" y2="13"/>
-              <line x1="12" y1="17" x2="12.01" y2="17"/>
-            </svg>
-            <span>All Red (Vulnerable)</span>
-          </button>
-        </div>
+          </div>
+          <h1 class="welcome-title">What incident are we investigating?</h1>
+          <p class="welcome-subtitle">
+            Ask AegisSRE to triage an alert, inspect logs, or propose a remediation PR. Press <kbd class="kbd-inline">⌘K</kbd> anytime to toggle security shields or switch personas.
+          </p>
 
-        <div class="shield-toggles" id="shield-toggles">
-          <label class="shield-pill active" data-shield="promptScreenEnabled">
-            <input type="checkbox" id="shield-prompt-screen" checked />
-            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-              <path d="M12 8v4"/>
-              <path d="M12 16h.01"/>
-            </svg>
-            <span class="shield-name">Prompt Screen</span>
-            <span class="shield-sub">Model Armor B2</span>
-          </label>
+          <!-- Progressive Starter Prompts -->
+          <div class="starter-list" role="list" aria-label="Suggested Incident Prompts">
+            <button type="button" class="starter-card" data-starter-scenario="SCENARIO-01">
+              <div class="starter-main">
+                <span class="starter-prompt">Triage the P0 checkout 502 escalation email and post a summary to Jira</span>
+                <span class="starter-desc">Screens untrusted email content with Model Armor &amp; masks customer PII in-flight with Cloud SDP</span>
+              </div>
+              <span class="starter-tag">SCENARIO-01</span>
+            </button>
 
-          <label class="shield-pill active" data-shield="piiRedactorEnabled">
-            <input type="checkbox" id="shield-pii-redactor" checked />
-            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/>
-              <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/>
-              <line x1="1" y1="1" x2="23" y2="23"/>
-            </svg>
-            <span class="shield-name">PII Redactor</span>
-            <span class="shield-sub">Cloud SDP B2</span>
-          </label>
+            <button type="button" class="starter-card" data-starter-scenario="SCENARIO-02">
+              <div class="starter-main">
+                <span class="starter-prompt">Investigate restricted Jira issue SEC-101 and linked private GitHub advisory</span>
+                <span class="starter-desc">Enforces per-user 3LO OAuth tokens (Alice vs. Bob) to prevent Confused Deputy escalation</span>
+              </div>
+              <span class="starter-tag">SCENARIO-02</span>
+            </button>
 
-          <label class="shield-pill active" data-shield="tokenBrokerEnabled">
-            <input type="checkbox" id="shield-token-broker" checked />
-            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="7.5" cy="15.5" r="5.5"/>
-              <path d="m21 2-9.6 9.6"/>
-              <path d="m15.5 7.5 3 3L22 7l-3-3"/>
-            </svg>
-            <span class="shield-name">Token Broker</span>
-            <span class="shield-sub">Per-User 3LO B3</span>
-          </label>
+            <button type="button" class="starter-card" data-starter-scenario="SCENARIO-03">
+              <div class="starter-main">
+                <span class="starter-prompt">Correlate GKE cluster logs and open a rollback PR for checkout-service</span>
+                <span class="starter-desc">Verifies MCP tools via Agent Gateway UAP and pauses state-mutating PR creation for human approval</span>
+              </div>
+              <span class="starter-tag">SCENARIO-03</span>
+            </button>
 
-          <label class="shield-pill active" data-shield="stepUpAndA2UICatalogEnabled">
-            <input type="checkbox" id="shield-step-up" checked />
-            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
-              <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-            </svg>
-            <span class="shield-name">Step-Up Confirmation</span>
-            <span class="shield-sub">UAP &amp; A2UI v0.9 B1/B4</span>
-          </label>
+            <button type="button" class="starter-card" data-starter-scenario="SCENARIO-04">
+              <div class="starter-main">
+                <span class="starter-prompt">Run untrusted repository unit tests in the sandbox to verify the fix</span>
+                <span class="starter-desc">Strips credentials over A2A v2 and blocks secret exfiltration inside an Agent Substrate gVisor sandbox</span>
+              </div>
+              <span class="starter-tag">SCENARIO-04</span>
+            </button>
 
-          <label class="shield-pill active" data-shield="sandboxEgressMitmEnabled">
-            <input type="checkbox" id="shield-sandbox-mitm" checked />
-            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
-              <line x1="8" y1="21" x2="16" y2="21"/>
-              <line x1="12" y1="17" x2="12" y2="21"/>
-            </svg>
-            <span class="shield-name">Sandbox Egress MITM</span>
-            <span class="shield-sub">A2A &amp; gVisor B5/B6</span>
-          </label>
-        </div>
+            <button type="button" class="starter-card" data-starter-scenario="SCENARIO-05">
+              <div class="starter-main">
+                <span class="starter-prompt">Execute end-to-end zero-trust incident triage and remediation across all systems</span>
+                <span class="starter-desc">Walks through Gmail SDP masking, GCP MCP logs, Jira 3LO, gVisor test verification, and Step-Up PR approval</span>
+              </div>
+              <span class="starter-tag">SCENARIO-05</span>
+            </button>
+          </div>
+        </section>
+
+        <!-- Dynamic Conversation Messages Append Here -->
+        <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
       </div>
+    </main>
 
-      <!-- Per-Provider 3LO Vault Status & Revoke/Grant Controls -->
-      <div class="provider-vault-bar" id="provider-vault-bar">
-        <span class="vault-label">
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>
-          </svg>
-          <span>Persona 3LO Vault (<strong id="active-persona-label">alice</strong>):</span>
-        </span>
-        <div class="provider-badges" id="provider-badges">
-          <div class="provider-chip" data-provider="google_gmail">
-            <span class="provider-dot granted"></span>
-            <span class="provider-title">Gmail (3LO)</span>
-            <button type="button" class="btn-revoke-provider" data-provider="google_gmail" title="Revoke 3LO token to test cold ConsentChallengeCard">Test Revoke 3LO</button>
+    <!-- Clean Bottom Chat Composer -->
+    <footer class="chat-composer-bar">
+      <form id="chat-form" class="chat-composer-box" onsubmit="return false;">
+        <input
+          type="text"
+          id="input-prompt"
+          class="composer-input"
+          placeholder="Message AegisSRE or describe an incident..."
+          value="Triage customer P0 checkout 502 escalation email and post sanitized summary to Jira."
+          aria-label="Message AegisSRE"
+          autocomplete="off"
+        />
+        <div class="composer-footer">
+          <div class="composer-left-tools">
+            <button type="button" id="btn-scenario-chip" class="composer-chip" title="Change active scenario or payload options (Cmd+K)">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="12 2 2 7 12 12 22 7 12 2"/>
+                <polyline points="2 17 12 22 22 17"/>
+                <polyline points="2 12 12 17 22 12"/>
+              </svg>
+              <span id="active-scenario-badge">SCENARIO-01</span>
+              <span id="active-scenario-title" class="sr-only">Indirect Prompt Injection &amp; In-Flight Cloud SDP Redaction</span>
+              <span id="active-scenario-subtitle" class="sr-only">Boundary 2</span>
+            </button>
+            <span id="composer-flags-indicator" class="composer-flags-indicator" hidden></span>
           </div>
-          <div class="provider-chip" data-provider="atlassian_jira">
-            <span class="provider-dot granted"></span>
-            <span class="provider-title">Jira Cloud (3LO)</span>
-            <button type="button" class="btn-revoke-provider" data-provider="atlassian_jira" title="Revoke 3LO token to test cold ConsentChallengeCard">Test Revoke 3LO</button>
-          </div>
-          <div class="provider-chip" data-provider="github">
-            <span class="provider-dot granted"></span>
-            <span class="provider-title">GitHub (3LO)</span>
-            <button type="button" class="btn-revoke-provider" data-provider="github" title="Revoke 3LO token to test cold ConsentChallengeCard">Test Revoke 3LO</button>
-          </div>
-          <div class="provider-chip" data-provider="gcp_iam">
-            <span class="provider-dot granted"></span>
-            <span class="provider-title">GCP IAM / MCP</span>
-            <button type="button" class="btn-revoke-provider" data-provider="gcp_iam" title="Revoke 3LO token to test cold ConsentChallengeCard">Test Revoke 3LO</button>
+
+          <div class="composer-right-tools">
+            <button type="submit" id="btn-run-turn" class="send-btn" title="Send message (Enter)">
+              <span>Send</span>
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="22" y1="2" x2="11" y2="13"/>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+              </svg>
+            </button>
           </div>
         </div>
-      </div>
-    </section>
+      </form>
+    </footer>
 
-    <!-- 5-Scenario Choreography Bar -->
-    <nav class="scenario-bar" aria-label="Security Scenario Choreography Bar">
-      <button type="button" class="scenario-tab active" data-scenario="SCENARIO-01">
-        <span class="scenario-code">SCENARIO-01</span>
-        <span class="scenario-title">Prompt Injection &amp; In-Flight PII</span>
-      </button>
-      <button type="button" class="scenario-tab" data-scenario="SCENARIO-02">
-        <span class="scenario-code">SCENARIO-02</span>
-        <span class="scenario-title">Confused Deputy &amp; 3LO Vault</span>
-      </button>
-      <button type="button" class="scenario-tab" data-scenario="SCENARIO-03">
-        <span class="scenario-code">SCENARIO-03</span>
-        <span class="scenario-title">Agent Gateway UAP &amp; Step-Up</span>
-      </button>
-      <button type="button" class="scenario-tab" data-scenario="SCENARIO-04">
-        <span class="scenario-code">SCENARIO-04</span>
-        <span class="scenario-title">Attenuated A2A &amp; gVisor MITM</span>
-      </button>
-      <button type="button" class="scenario-tab" data-scenario="SCENARIO-05">
-        <span class="scenario-code">SCENARIO-05</span>
-        <span class="scenario-title">Full-Chain 6-Boundary Triage</span>
-      </button>
-    </nav>
+    <!-- Hidden Presenter / Demo Controls Modal (Opened via Cmd+K or Topbar Pill) -->
+    <div id="demo-controls-modal" class="modal-backdrop" hidden aria-hidden="true">
+      <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+        <div class="modal-header">
+          <div class="modal-title-group">
+            <span class="arena-badge">Red-vs-Blue Arena</span>
+            <h2 id="modal-title" class="modal-title">Demo &amp; Security Controls</h2>
+          </div>
+          <button type="button" id="btn-close-modal" class="icon-close-btn" aria-label="Close Demo Controls">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"/>
+              <line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
 
-    <!-- Main 2-Column Arena Workspace -->
-    <main class="arena-grid">
-      <!-- Left Column: Scenario Dispatch, Assistant Turn Outcome, A2UI v0.9 Cards & Wire Inspector -->
-      <section class="workspace-col" aria-label="Incident Investigation and A2UI v0.9 Surface">
-        <div class="panel dispatch-panel">
-          <div class="dispatch-header">
-            <div>
-              <span class="badge-scenario" id="active-scenario-badge">SCENARIO-01</span>
-              <h2 class="panel-title" id="active-scenario-title">Indirect Prompt Injection &amp; In-Flight Cloud SDP Redaction</h2>
-              <p class="panel-subtitle" id="active-scenario-subtitle">Boundary 2: Model Armor Prompt Screen hard-blocks injection while Cloud SDP masks SSN, phone, and API key in-flight.</p>
+        <div class="modal-body">
+          <!-- Section 1: 5 Security Shields (Red vs Blue) -->
+          <section class="control-block">
+            <div class="control-block-header">
+              <div>
+                <h3 class="control-heading">Security Shields</h3>
+                <p class="control-desc">Toggle individual defense boundaries to compare Blue (defended) vs. Red (vulnerable) behavior.</p>
+              </div>
+              <div class="posture-presets">
+                <button type="button" id="btn-all-blue" class="preset-btn preset-blue active">
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                  </svg>
+                  <span>All Blue (Defended)</span>
+                </button>
+                <button type="button" id="btn-all-red" class="preset-btn preset-red">
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                    <line x1="12" y1="9" x2="12" y2="13"/>
+                    <line x1="12" y1="17" x2="12.01" y2="17"/>
+                  </svg>
+                  <span>All Red (Vulnerable)</span>
+                </button>
+              </div>
             </div>
-            <div class="dispatch-actions">
-              <button type="button" id="btn-run-turn" class="action-btn primary-btn">
-                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <polygon points="5 3 19 12 5 21 5 3"/>
-                </svg>
-                <span>Execute Turn</span>
+
+            <div class="shield-toggles" id="shield-toggles">
+              <label class="shield-pill active" data-shield="promptScreenEnabled">
+                <input type="checkbox" id="shield-prompt-screen" checked />
+                <div class="shield-copy">
+                  <span class="shield-name">Prompt Screen</span>
+                  <span class="shield-sub">Model Armor (B2)</span>
+                </div>
+              </label>
+
+              <label class="shield-pill active" data-shield="piiRedactorEnabled">
+                <input type="checkbox" id="shield-pii-redactor" checked />
+                <div class="shield-copy">
+                  <span class="shield-name">PII Redactor</span>
+                  <span class="shield-sub">Cloud SDP (B2)</span>
+                </div>
+              </label>
+
+              <label class="shield-pill active" data-shield="tokenBrokerEnabled">
+                <input type="checkbox" id="shield-token-broker" checked />
+                <div class="shield-copy">
+                  <span class="shield-name">Token Broker</span>
+                  <span class="shield-sub">Per-User 3LO (B3)</span>
+                </div>
+              </label>
+
+              <label class="shield-pill active" data-shield="stepUpAndA2UICatalogEnabled">
+                <input type="checkbox" id="shield-step-up" checked />
+                <div class="shield-copy">
+                  <span class="shield-name">Step-Up Confirmation</span>
+                  <span class="shield-sub">Gateway UAP &amp; A2UI (B1/B4)</span>
+                </div>
+              </label>
+
+              <label class="shield-pill active" data-shield="sandboxEgressMitmEnabled">
+                <input type="checkbox" id="shield-sandbox-mitm" checked />
+                <div class="shield-copy">
+                  <span class="shield-name">Sandbox Egress MITM</span>
+                  <span class="shield-sub">A2A &amp; gVisor (B5/B6)</span>
+                </div>
+              </label>
+            </div>
+          </section>
+
+          <!-- Section 2: Guided Scenarios & Payload Options -->
+          <section class="control-block">
+            <div class="control-block-header">
+              <div>
+                <h3 class="control-heading">Guided Demo Scenarios</h3>
+                <p class="control-desc">Select a scenario to populate the prompt and run it in the conversation.</p>
+              </div>
+            </div>
+
+            <nav class="scenario-bar" aria-label="Security Scenario Choreography Bar">
+              <button type="button" class="scenario-tab active" data-scenario="SCENARIO-01">
+                <span class="scenario-code">SCENARIO-01</span>
+                <span class="scenario-title">Prompt Injection &amp; In-Flight PII</span>
               </button>
-            </div>
-          </div>
+              <button type="button" class="scenario-tab" data-scenario="SCENARIO-02">
+                <span class="scenario-code">SCENARIO-02</span>
+                <span class="scenario-title">Confused Deputy &amp; 3LO Vault</span>
+              </button>
+              <button type="button" class="scenario-tab" data-scenario="SCENARIO-03">
+                <span class="scenario-code">SCENARIO-03</span>
+                <span class="scenario-title">Agent Gateway UAP &amp; Step-Up</span>
+              </button>
+              <button type="button" class="scenario-tab" data-scenario="SCENARIO-04">
+                <span class="scenario-code">SCENARIO-04</span>
+                <span class="scenario-title">Attenuated A2A &amp; gVisor MITM</span>
+              </button>
+              <button type="button" class="scenario-tab" data-scenario="SCENARIO-05">
+                <span class="scenario-code">SCENARIO-05</span>
+                <span class="scenario-title">Full-Chain 6-Boundary Triage</span>
+              </button>
+            </nav>
 
-          <div class="prompt-row">
-            <input type="text" id="input-prompt" class="prompt-input" value="Triage customer P0 checkout 502 escalation email and post sanitized summary to Jira." aria-label="Operator Incident Prompt" />
             <div class="prompt-options">
               <label class="option-check" title="Use clean customer escalation containing raw SSN/API key without prompt injection to demonstrate IsSdpOnlyBlock in-flight masking">
                 <input type="checkbox" id="chk-clean-pii" />
-                <span>SDP-Only Payload (Clean PII)</span>
+                <span>SDP-Only Payload (Clean PII without Prompt Injection)</span>
               </label>
               <label class="option-check" title="Force cold 3LO OAuth ConsentChallenge (adk_request_credential)">
                 <input type="checkbox" id="chk-cold-3lo" />
-                <span>Force Cold 3LO Challenge</span>
+                <span>Force Cold 3LO OAuth Challenge</span>
               </label>
             </div>
-          </div>
-        </div>
+          </section>
 
-        <!-- Turn Outcome & Assistant Summary Banner -->
-        <div class="panel outcome-banner" id="outcome-banner">
-          <div class="outcome-meta">
-            <span class="outcome-pill outcome-defended" id="outcome-badge">READY</span>
-            <span class="outcome-persona" id="outcome-persona-meta">Persona: alice (SecOps Lead)</span>
-          </div>
-          <p class="assistant-text" id="assistant-text">Select a Security Scenario and click Execute Turn (or toggle any Security Shield) to evaluate Red vs. Blue behavior across all 6 boundaries.</p>
-        </div>
+          <!-- Section 3: Operator Identity, 3LO OAuth Vault & Fixture Reset -->
+          <section class="control-block">
+            <div class="control-block-header">
+              <div>
+                <h3 class="control-heading">Operator Persona &amp; 3LO OAuth Vault</h3>
+                <p class="control-desc">Switch human operator identity or revoke a 3LO token to trigger an in-chat OAuth consent card.</p>
+              </div>
+              <button type="button" id="btn-seed-fixtures" class="action-btn secondary-btn">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                  <path d="M3 3v5h5"/>
+                  <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/>
+                  <path d="M16 16h5v5"/>
+                </svg>
+                <span>Seed / Reset Fixtures</span>
+              </button>
+            </div>
 
-        <!-- A2UI v0.9 Trusted 6-Component Catalog Surface -->
-        <div class="panel a2ui-panel">
-          <div class="panel-header-row">
-            <div class="panel-title-group">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <rect x="3" y="3" width="18" height="18" rx="2"/>
-                <path d="M3 9h18"/>
-                <path d="M9 21V9"/>
-              </svg>
-              <h3 class="panel-heading">Declarative UI Cards (A2UI v0.9 Trusted Catalog)</h3>
+            <div class="persona-switcher" role="group" aria-label="Operator Persona Switcher">
+              <button type="button" id="btn-persona-alice" class="persona-btn active" data-persona="alice">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+                  <circle cx="9" cy="7" r="4"/>
+                  <path d="m16 11 2 2 4-4"/>
+                </svg>
+                <span>Alice (SecOps Lead)</span>
+              </button>
+              <button type="button" id="btn-persona-bob" class="persona-btn" data-persona="bob">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+                  <circle cx="9" cy="7" r="4"/>
+                  <line x1="17" y1="8" x2="22" y2="13"/>
+                  <line x1="22" y1="8" x2="17" y2="13"/>
+                </svg>
+                <span>Bob (External Contractor)</span>
+              </button>
             </div>
-            <span class="mime-tag">application/json+a2ui</span>
-          </div>
-          <div id="a2ui-cards-container" class="a2ui-cards-container">
-            <!-- Populated dynamically by app.js -->
-          </div>
-        </div>
 
-        <!-- Sanitized Payload & Outbound HTTP Wire Inspector -->
-        <div class="panel wire-panel">
-          <div class="panel-header-row">
-            <div class="panel-title-group">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="16 18 22 12 16 6"/>
-                <polyline points="8 6 2 12 8 18"/>
-              </svg>
-              <h3 class="panel-heading">In-Flight Sanitized Payload &amp; Outbound HTTP Wire Audit</h3>
-            </div>
-          </div>
-          <div class="wire-grid">
-            <div class="wire-box">
-              <div class="wire-box-label">Sanitized Context / Outbound Comment Preview</div>
-              <pre class="code-preview" id="sanitized-preview">No turn executed yet.</pre>
-            </div>
-            <div class="wire-box">
-              <div class="wire-box-label">Outbound Tool Transport Wire Records (auth.Transport / atenet MITM)</div>
-              <div id="wire-records-list" class="wire-records-list">
-                <div class="empty-hint">Outbound HTTP tool calls will appear here.</div>
+            <div class="provider-vault-bar" id="provider-vault-bar">
+              <span class="vault-label">
+                <span>Active 3LO Grants (<strong id="active-persona-label">alice</strong>):</span>
+              </span>
+              <div class="provider-badges" id="provider-badges">
+                <div class="provider-chip" data-provider="google_gmail">
+                  <span class="provider-dot granted"></span>
+                  <span class="provider-title">Gmail</span>
+                  <button type="button" class="btn-revoke-provider" data-provider="google_gmail">Test Revoke 3LO</button>
+                </div>
+                <div class="provider-chip" data-provider="atlassian_jira">
+                  <span class="provider-dot granted"></span>
+                  <span class="provider-title">Jira Cloud</span>
+                  <button type="button" class="btn-revoke-provider" data-provider="atlassian_jira">Test Revoke 3LO</button>
+                </div>
+                <div class="provider-chip" data-provider="github">
+                  <span class="provider-dot granted"></span>
+                  <span class="provider-title">GitHub</span>
+                  <button type="button" class="btn-revoke-provider" data-provider="github">Test Revoke 3LO</button>
+                </div>
+                <div class="provider-chip" data-provider="gcp_iam">
+                  <span class="provider-dot granted"></span>
+                  <span class="provider-title">GCP IAM / MCP</span>
+                  <button type="button" class="btn-revoke-provider" data-provider="gcp_iam">Test Revoke 3LO</button>
+                </div>
               </div>
             </div>
-          </div>
+          </section>
         </div>
-      </section>
 
-      <!-- Right Column: 6-Boundary Trace Waterfall -->
-      <aside class="waterfall-col" aria-label="Boundary Trace Waterfall">
-        <div class="panel waterfall-panel">
-          <div class="panel-header-row">
-            <div class="panel-title-group">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+        <div class="modal-footer">
+          <span class="modal-shortcut-tip">Tip: Press <kbd class="kbd-inline">⌘K</kbd> or <kbd class="kbd-inline">Esc</kbd> to toggle this panel anytime</span>
+          <div class="modal-footer-actions">
+            <button type="button" id="btn-modal-run" class="action-btn primary-btn">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="5 3 19 12 5 21 5 3"/>
               </svg>
-              <h3 class="panel-heading">Boundary Trace Waterfall</h3>
-            </div>
-            <span class="boundary-count-tag">6 Defense-in-Depth Boundaries</span>
-          </div>
-
-          <!-- Reference Matrix of All 6 Boundaries -->
-          <div class="boundary-matrix" id="boundary-matrix">
-            <div class="boundary-slot" data-boundary="B1_A2UI_STEP_UP">
-              <span class="b-code">B1</span>
-              <span class="b-name">Generative UI &amp; Step-Up (A2UI v0.9)</span>
-              <span class="b-verdict" id="b-status-B1_A2UI_STEP_UP">STANDBY</span>
-            </div>
-            <div class="boundary-slot" data-boundary="B2_MODEL_ARMOR_SDP">
-              <span class="b-code">B2</span>
-              <span class="b-name">Reasoning Guard (Model Armor + SDP)</span>
-              <span class="b-verdict" id="b-status-B2_MODEL_ARMOR_SDP">STANDBY</span>
-            </div>
-            <div class="boundary-slot" data-boundary="B3_TOKEN_BROKER_3LO">
-              <span class="b-code">B3</span>
-              <span class="b-name">Per-User 3LO Token Broker</span>
-              <span class="b-verdict" id="b-status-B3_TOKEN_BROKER_3LO">STANDBY</span>
-            </div>
-            <div class="boundary-slot" data-boundary="B4_AGENT_REGISTRY_GATEWAY">
-              <span class="b-code">B4</span>
-              <span class="b-name">Agent Registry &amp; Gateway UAP</span>
-              <span class="b-verdict" id="b-status-B4_AGENT_REGISTRY_GATEWAY">STANDBY</span>
-            </div>
-            <div class="boundary-slot" data-boundary="B5_ATTENUATED_A2A">
-              <span class="b-code">B5</span>
-              <span class="b-name">Attenuated A2A v2 Delegation</span>
-              <span class="b-verdict" id="b-status-B5_ATTENUATED_A2A">STANDBY</span>
-            </div>
-            <div class="boundary-slot" data-boundary="B6_SUBSTRATE_GVISOR_MITM">
-              <span class="b-code">B6</span>
-              <span class="b-name">Substrate v0.5.0 gVisor &amp; Egress MITM</span>
-              <span class="b-verdict" id="b-status-B6_SUBSTRATE_GVISOR_MITM">STANDBY</span>
-            </div>
-          </div>
-
-          <div class="waterfall-events-header">Ordered Turn Trace Events</div>
-          <div id="boundary-trace-list" class="boundary-trace-list">
-            <!-- Populated dynamically by app.js -->
+              <span>Run Selected Scenario in Chat</span>
+            </button>
           </div>
         </div>
-      </aside>
-    </main>
+      </div>
+    </div>
+
+    <!-- Hidden Reference DOM Containers for Latest Turn Inspection / Test Compatibility -->
+    <div class="sr-only" aria-hidden="true">
+      <span id="outcome-badge">READY</span>
+      <span id="outcome-persona-meta">Persona: alice</span>
+      <p id="assistant-text"></p>
+      <div id="a2ui-cards-container"></div>
+      <pre id="sanitized-preview"></pre>
+      <div id="wire-records-list"></div>
+      <h3>Boundary Trace Waterfall</h3>
+      <div id="boundary-matrix">
+        <span id="b-status-B1_A2UI_STEP_UP">STANDBY</span>
+        <span id="b-status-B2_MODEL_ARMOR_SDP">STANDBY</span>
+        <span id="b-status-B3_TOKEN_BROKER_3LO">STANDBY</span>
+        <span id="b-status-B4_AGENT_REGISTRY_GATEWAY">STANDBY</span>
+        <span id="b-status-B5_ATTENUATED_A2A">STANDBY</span>
+        <span id="b-status-B6_SUBSTRATE_GVISOR_MITM">STANDBY</span>
+      </div>
+      <div id="boundary-trace-list"></div>
+    </div>
   </div>
 
   <script src="/static/app.js"></script>
