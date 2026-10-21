@@ -1,0 +1,26 @@
+apiVersion: networkservices.googleapis.com/v1alpha1
+kind: AgentGateway
+metadata:
+  name: aegis-agent-to-anywhere-gateway
+  namespace: aegis-system
+spec:
+  deploymentMode: AGENT_TO_ANYWHERE
+  workloadSelector:
+    serviceAccount: aegis-sre
+  governedTargets:
+    - name: gcp-cloud-logging-mcp
+      url: https://logging.googleapis.com/mcp
+      protocol: MCP_JSONRPC
+      uapPolicyRef: aegis-agent-to-anywhere-uap
+    - name: gke-container-mcp
+      url: https://container.googleapis.com/mcp
+      protocol: MCP_JSONRPC
+      uapPolicyRef: aegis-agent-to-anywhere-uap
+    - name: github-mcp
+      url: https://api.github.com/mcp
+      protocol: MCP_JSONRPC
+      uapPolicyRef: aegis-agent-to-anywhere-uap
+    - name: atlassian-jira-mcp
+      url: https://api.atlassian.com/mcp
+      protocol: MCP_JSONRPC
+      uapPolicyRef: aegis-agent-to-anywhere-uap
