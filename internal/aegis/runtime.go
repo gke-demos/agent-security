@@ -3,6 +3,7 @@ package aegis
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -153,6 +154,7 @@ func (r *Runtime) ExecuteTurn(ctx context.Context, req TurnRequest) (*TurnResult
 		s.ActivePersona = req.Persona
 		s.Posture = req.Posture
 	})
+	r.SetExtension(lastGmailFetchExtPrefix+req.SessionID, nil)
 
 	registeredScenarioHandlersMu.RLock()
 	customHandler, hasCustom := registeredScenarioHandlers[req.ScenarioID]
@@ -169,6 +171,31 @@ func (r *Runtime) ExecuteTurn(ctx context.Context, req TurnRequest) (*TurnResult
 	}
 	if err != nil {
 		return nil, err
+	}
+	if req.ScenarioID == Scenario05FullChainZeroTrust && res != nil {
+		if ext, ok := r.GetExtension(lastGmailFetchExtPrefix + req.SessionID); ok {
+			if liveGmail, ok := ext.(*liveGmailFetchResult); ok && liveGmail != nil && liveGmail.Live {
+				res.WireRecords = append(append([]OutboundWireRecord(nil), liveGmail.WireRecords...), res.WireRecords...)
+				markedB3 := false
+				for i := range res.BoundaryTrace {
+					if res.BoundaryTrace[i].Boundary == BoundaryIdentity3LO {
+						res.BoundaryTrace[i].Provenance = ProvenanceLive
+						markedB3 = true
+					}
+				}
+				if !markedB3 {
+					res.BoundaryTrace = append([]BoundaryTraceEvent{liveGmail.TraceEvent}, res.BoundaryTrace...)
+					for i := range res.BoundaryTrace {
+						res.BoundaryTrace[i].Order = i + 1
+					}
+				}
+				if strings.TrimSpace(liveGmail.RawEmail) != "" && res.SanitizedInputPreview != "" {
+					insp := r.guard.InspectAndSanitize(ctx, liveGmail.RawEmail, req.Posture)
+					res.SanitizedInputPreview = insp.SanitizedText
+					res.OutboundCommentPreview = insp.SanitizedText
+				}
+			}
+		}
 	}
 	normalizeTurnResultProvenance(res)
 
@@ -219,6 +246,15 @@ func (r *Runtime) executeScenario01(ctx context.Context, req TurnRequest) (*Turn
 	if req.CleanPIIOnly {
 		rawEmail = fixtureGmailCleanPIIBody
 	}
+	var wireRecords []OutboundWireRecord
+	if ext, ok := r.GetExtension(lastGmailFetchExtPrefix + req.SessionID); ok {
+		if liveGmail, ok := ext.(*liveGmailFetchResult); ok && liveGmail != nil && liveGmail.Live {
+			if strings.TrimSpace(liveGmail.RawEmail) != "" {
+				rawEmail = liveGmail.RawEmail
+			}
+			wireRecords = append(wireRecords, liveGmail.WireRecords...)
+		}
+	}
 
 	inspection := r.guard.InspectAndSanitize(ctx, rawEmail, req.Posture)
 
@@ -264,6 +300,7 @@ func (r *Runtime) executeScenario01(ctx context.Context, req TurnRequest) (*Turn
 			SanitizedInputPreview: inspection.SanitizedText,
 			Cards:                 []A2UICard{card},
 			BoundaryTrace:         trace,
+			WireRecords:           wireRecords,
 		}, nil
 	}
 
@@ -319,6 +356,7 @@ func (r *Runtime) executeScenario01(ctx context.Context, req TurnRequest) (*Turn
 			OutboundCommentPreview: inspection.SanitizedText,
 			Cards:                  []A2UICard{card},
 			BoundaryTrace:          trace,
+			WireRecords:            wireRecords,
 		}, nil
 	}
 
@@ -349,6 +387,7 @@ func (r *Runtime) executeScenario01(ctx context.Context, req TurnRequest) (*Turn
 		OutboundCommentPreview: inspection.SanitizedText,
 		Cards:                  []A2UICard{card},
 		BoundaryTrace:          trace,
+		WireRecords:            wireRecords,
 	}, nil
 }
 
