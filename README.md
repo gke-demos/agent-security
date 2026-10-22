@@ -48,11 +48,18 @@ make evals
 make test
 ```
 
-### 2. Run Standalone Locally
+### 2. Run Standalone Locally (Deterministic Fixtures or Hybrid Live Sources)
 
 ```bash
 make run
 # Open http://localhost:8080 in your browser
+```
+
+To configure and run against live External Sources (Vertex AI Gemini `gemini-2.5-flash`, Model Armor + Cloud SDP, GitHub companion target repo `gke-demos/aegis-checkout-target`, Gmail/Jira Cloud 3LO, and Agent Substrate `v0.5.0` gVisor sandbox):
+
+```bash
+make setup-live
+make run-live
 ```
 
 ### 3. Deploy to GKE with Agent Substrate `v0.5.0` & Agent Gateway

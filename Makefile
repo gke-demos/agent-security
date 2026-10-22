@@ -3,7 +3,7 @@ PROJECT_ID ?= $(shell gcloud config get-value project 2>/dev/null)
 REGION ?= us-central1
 PORT ?= 8080
 
-.PHONY: test evals build run deploy-gke seed-fixtures register-gemini-enterprise
+.PHONY: test evals build run setup-live run-live deploy-gke seed-fixtures register-gemini-enterprise
 
 test:
 	go test -race ./...
@@ -16,6 +16,13 @@ build:
 
 run:
 	PORT=$(PORT) go run ./cmd/aegis-server
+
+setup-live:
+	./hack/setup-live-sources.sh
+
+run-live: build
+	@set -a; [ -f .env.local ] && . ./.env.local; set +a; \
+	PORT=$(PORT) LIVE_GITHUB=true LIVE_SUBSTRATE=true VERTEX_LIVE_LLM=true ./bin/aegis-server
 
 deploy-gke:
 	KUBE_CONTEXT="$(KUBE_CONTEXT)" PROJECT_ID="$(PROJECT_ID)" REGION="$(REGION)" ./hack/deploy-gke.sh
