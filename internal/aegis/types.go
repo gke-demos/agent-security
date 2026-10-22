@@ -58,6 +58,39 @@ const (
 	VerdictBypassedRed BoundaryVerdict = "BYPASSED_RED"
 )
 
+// SourceProvenance records whether a tool call or boundary trace event executed against a
+// live External Source ("LIVE") or the deterministic local fixture fallback ("FIXTURE").
+type SourceProvenance string
+
+const (
+	ProvenanceFixture SourceProvenance = "FIXTURE"
+	ProvenanceLive    SourceProvenance = "LIVE"
+)
+
+// ExternalSourceID identifies one of the 8 External Sources in GLOSSARY.md / ADR-0007.
+type ExternalSourceID string
+
+const (
+	SourceVertexGemini     ExternalSourceID = "vertex_gemini"
+	SourceModelArmorSDP    ExternalSourceID = "model_armor_sdp"
+	SourceGCPObservability ExternalSourceID = "gcp_observability"
+	SourceAgentRegistry    ExternalSourceID = "agent_registry"
+	SourceGitHub           ExternalSourceID = "github"
+	SourceGoogleGmail      ExternalSourceID = "google_gmail"
+	SourceAtlassianJira    ExternalSourceID = "atlassian_jira"
+	SourceSubstrateSandbox ExternalSourceID = "substrate_sandbox"
+)
+
+// SourceStatus reports the connection mode and endpoint of an External Source.
+type SourceStatus struct {
+	ID         ExternalSourceID `json:"id"`
+	Name       string           `json:"name"`
+	Boundary   BoundaryID       `json:"boundary"`
+	Provenance SourceProvenance `json:"provenance"`
+	Endpoint   string           `json:"endpoint"`
+	Detail     string           `json:"detail"`
+}
+
 // TurnOutcome summarizes the end-to-end result of a turn.
 type TurnOutcome string
 
@@ -108,15 +141,16 @@ func AllRedPosture() SecurityPosture {
 
 // BoundaryTraceEvent is a single entry in the Boundary Trace Waterfall.
 type BoundaryTraceEvent struct {
-	Order       int               `json:"order"`
-	Boundary    BoundaryID        `json:"boundary"`
-	Shield      string            `json:"shield"`
-	Component   string            `json:"component"`
-	Action      string            `json:"action"`
-	Verdict     BoundaryVerdict   `json:"verdict"`
-	Detail      string            `json:"detail"`
-	Metadata    map[string]string `json:"metadata,omitempty"`
-	Timestamp   time.Time         `json:"timestamp"`
+	Order      int               `json:"order"`
+	Boundary   BoundaryID        `json:"boundary"`
+	Shield     string            `json:"shield"`
+	Component  string            `json:"component"`
+	Action     string            `json:"action"`
+	Verdict    BoundaryVerdict   `json:"verdict"`
+	Provenance SourceProvenance  `json:"provenance"`
+	Detail     string            `json:"detail"`
+	Metadata   map[string]string `json:"metadata,omitempty"`
+	Timestamp  time.Time         `json:"timestamp"`
 }
 
 // A2UICard is a schema-validated Declarative UI Card (application/json+a2ui).
@@ -172,6 +206,7 @@ type OutboundWireRecord struct {
 	AuthHeaderPresent bool              `json:"authHeaderPresent"`
 	AuthPrincipal     string            `json:"authPrincipal"`
 	StatusCode        int               `json:"statusCode"`
+	Provenance        SourceProvenance  `json:"provenance"`
 	Headers           map[string]string `json:"headers,omitempty"`
 }
 
@@ -240,24 +275,51 @@ type AegisRuntime interface {
 	ResolveConfirmation(ctx context.Context, res ConfirmationResolution) (*TurnResult, error)
 	CompleteOAuthConsent(ctx context.Context, cb OAuthCallback) (*ConsentResult, error)
 	GetSessionState(ctx context.Context, sessionID string) (*SessionSnapshot, error)
+	GetSourcesStatus(ctx context.Context) ([]SourceStatus, error)
 }
 
 // SessionSnapshot holds the current state of an Operator session.
 type SessionSnapshot struct {
-	SessionID          string                        `json:"sessionId"`
-	ActivePersona      PersonaID                     `json:"activePersona"`
-	Posture            SecurityPosture               `json:"posture"`
-	GrantedProviders   map[PersonaID][]ProviderID    `json:"grantedProviders"`
-	PendingConfirmation *StepUpConfirmation          `json:"pendingConfirmation,omitempty"`
-	LastTurn           *TurnResult                   `json:"lastTurn,omitempty"`
+	SessionID           string                     `json:"sessionId"`
+	ActivePersona       PersonaID                  `json:"activePersona"`
+	Posture             SecurityPosture            `json:"posture"`
+	GrantedProviders    map[PersonaID][]ProviderID `json:"grantedProviders"`
+	PendingConfirmation *StepUpConfirmation        `json:"pendingConfirmation,omitempty"`
+	LastTurn            *TurnResult                `json:"lastTurn,omitempty"`
 }
 
 // RuntimeConfig configures NewRuntime.
 type RuntimeConfig struct {
-	ModelArmorEndpoint string
-	DLPEndpoint        string
-	AgentRegistryURL   string
-	HTTPClient         *http.Client
+	ModelArmorEndpoint         string
+	DLPEndpoint                string
+	AgentRegistryURL           string
+	GCPProjectID               string
+	GCPLocation                string
+	GKEClusterName             string
+	VertexLiveLLM              bool
+	GeminiEndpoint             string
+	GitHubAPIURL               string
+	GitHubTargetRepo           string
+	GmailAPIURL                string
+	JiraBaseURL                string
+	JiraRestrictedKey          string
+	JiraPublicKey              string
+	SubstrateGatewayURL        string
+	LiveSubstrate              bool
+	AliceGitHubToken           string
+	BobGitHubToken             string
+	AliceGmailToken            string
+	BobGmailToken              string
+	AliceJiraToken             string
+	BobJiraToken               string
+	GitHubOAuthClientID        string
+	GitHubOAuthClientSecret    string
+	GoogleOAuthClientID        string
+	GoogleOAuthClientSecret    string
+	JiraOAuthClientID          string
+	JiraOAuthClientSecret      string
+	OAuthTokenEndpointOverride string
+	HTTPClient                 *http.Client
 }
 
 // ScenarioHandlerFunc allows modular vertical slices (Tickets 2, 3, 4, 6) to register

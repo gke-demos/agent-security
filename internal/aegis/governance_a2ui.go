@@ -776,6 +776,8 @@ func (r *Runtime) ResolveConfirmation(ctx context.Context, req ConfirmationResol
 		}
 	}
 
+	normalizeTurnResultProvenance(res)
+
 	r.UpdateSession(req.SessionID, func(s *SessionSnapshot) {
 		s.PendingConfirmation = nil
 		s.LastTurn = res

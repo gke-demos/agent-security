@@ -170,6 +170,7 @@ func (r *Runtime) ExecuteTurn(ctx context.Context, req TurnRequest) (*TurnResult
 	if err != nil {
 		return nil, err
 	}
+	normalizeTurnResultProvenance(res)
 
 	r.UpdateSession(req.SessionID, func(s *SessionSnapshot) {
 		s.LastTurn = res
