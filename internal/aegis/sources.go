@@ -90,6 +90,28 @@ func detectGitHubCLIToken() string {
 	return strings.TrimSpace(string(out))
 }
 
+func enrichTurnWithLiveGCP(ctx context.Context, r *Runtime, req TurnRequest, res *TurnResult) {
+	if r == nil || res == nil {
+		return
+	}
+	cfg := r.Config()
+
+	// 1. Model Armor + Cloud SDP provenance on BoundaryReasoningGuard trace events
+	if strings.TrimSpace(cfg.ModelArmorEndpoint) != "" || strings.TrimSpace(cfg.DLPEndpoint) != "" {
+		for i := range res.BoundaryTrace {
+			if res.BoundaryTrace[i].Boundary == BoundaryReasoningGuard {
+				res.BoundaryTrace[i].Provenance = ProvenanceLive
+			}
+		}
+	}
+
+	// 2. Live Agent Registry + GCP Observability (Cloud Logging & GKE) for SCENARIO-03 and SCENARIO-05
+	enrichTurnWithLiveGCPObservabilityAndRegistry(ctx, r, req, res)
+
+	// 3. Live ADK Go v2 llmagent (Vertex AI Gemini gemini-2.5-flash) synthesis on defended success turns
+	enrichTurnWithLiveVertexGemini(ctx, r, req, res)
+}
+
 func normalizeTurnResultProvenance(res *TurnResult) {
 	if res == nil {
 		return
