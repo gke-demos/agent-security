@@ -676,15 +676,55 @@ func (r *Runtime) ResolveConfirmation(ctx context.Context, req ConfirmationResol
 
 	var res *TurnResult
 	if req.Confirmed {
+		githubLive := isGitHubLive(r)
+		jiraLive := isJiraLive(r)
+
+		prURL := "https://github.com/gke-demos/checkout-service/pull/42"
+		b1Provenance := ProvenanceFixture
+		wireRecords := make([]OutboundWireRecord, 0, 2)
+
+		if githubLive {
+			b1Provenance = ProvenanceLive
+			livePRURL, ghWires, err := executeLiveGitHubPullRequest(ctx, r, req.SessionID, snap.ActivePersona, resolvedConfirmation.TargetTool)
+			if err != nil {
+				return nil, err
+			}
+			if livePRURL != "" {
+				prURL = livePRURL
+			}
+			wireRecords = append(wireRecords, ghWires...)
+		} else {
+			wireRecords = append(wireRecords, OutboundWireRecord{
+				Provider:          ProviderGitHub,
+				ToolName:          resolvedConfirmation.TargetTool,
+				Method:            http.MethodPost,
+				URL:               "https://api.github.com/repos/gke-demos/checkout-service/pulls",
+				AuthHeaderPresent: true,
+				AuthPrincipal:     string(snap.ActivePersona),
+				StatusCode:        http.StatusCreated,
+				Provenance:        ProvenanceFixture,
+			})
+		}
+
+		if jiraLive {
+			b1Provenance = ProvenanceLive
+			jiraWires, err := executeLiveJiraComment(ctx, r, req.SessionID, snap.ActivePersona, snap.Posture, snap.LastTurn)
+			if err != nil {
+				return nil, err
+			}
+			wireRecords = append(wireRecords, jiraWires...)
+		}
+
 		baseTrace = append(baseTrace, BoundaryTraceEvent{
-			Order:     len(baseTrace) + 1,
-			Boundary:  BoundaryGenerativeUI,
-			Shield:    "Step-Up Confirmation + A2UI v0.9 Catalog",
-			Component: "adk/v2/tool/toolconfirmation",
-			Action:    toolconfirmation.FunctionCallName + " -> Confirmed=true",
-			Verdict:   VerdictAllowed,
-			Detail:    fmt.Sprintf("Operator %s approved %s (%s); executed create_github_pull_request (#42) and post_jira_comment", snap.ActivePersona, resolvedConfirmation.ConfirmationID, resolvedConfirmation.TargetTool),
-			Timestamp: time.Now().UTC(),
+			Order:      len(baseTrace) + 1,
+			Boundary:   BoundaryGenerativeUI,
+			Shield:     "Step-Up Confirmation + A2UI v0.9 Catalog",
+			Component:  "adk/v2/tool/toolconfirmation",
+			Action:     toolconfirmation.FunctionCallName + " -> Confirmed=true",
+			Verdict:    VerdictAllowed,
+			Provenance: b1Provenance,
+			Detail:     fmt.Sprintf("Operator %s approved %s (%s); executed create_github_pull_request (%s) and post_jira_comment", snap.ActivePersona, resolvedConfirmation.ConfirmationID, resolvedConfirmation.TargetTool, prURL),
+			Timestamp:  time.Now().UTC(),
 		})
 
 		summaryCard, err := ValidateAndSanitizeA2UICard(A2UICard{
@@ -697,10 +737,11 @@ func (r *Runtime) ResolveConfirmation(ctx context.Context, req ConfirmationResol
 			Severity:  "SUCCESS",
 			Body:      "Operator approved adk_request_confirmation. Created GitHub PR #42 (fix/checkout-502-nil-guard) and posted incident update to Jira SEC-101.",
 			Fields: map[string]string{
-				"Confirmation ID": resolvedConfirmation.ConfirmationID,
-				"Approved Tool":   resolvedConfirmation.TargetTool,
-				"Pull Request":    "https://github.com/gke-demos/checkout-service/pull/42",
-				"UAP Protection":  "container.clusters.delete remained BLOCKED by Agent Gateway UAP",
+				"Confirmation ID":  resolvedConfirmation.ConfirmationID,
+				"Approved Tool":    resolvedConfirmation.TargetTool,
+				"Pull Request":     prURL,
+				"Pull Request URL": prURL,
+				"UAP Protection":   "container.clusters.delete remained BLOCKED by Agent Gateway UAP",
 			},
 		}, snap.Posture)
 		if err != nil {
@@ -719,17 +760,7 @@ func (r *Runtime) ResolveConfirmation(ctx context.Context, req ConfirmationResol
 			Cards:                  []A2UICard{summaryCard},
 			BoundaryTrace:          baseTrace,
 			StepUpConfirmation:     &resolvedConfirmation,
-			WireRecords: []OutboundWireRecord{
-				{
-					Provider:          ProviderGitHub,
-					ToolName:          resolvedConfirmation.TargetTool,
-					Method:            http.MethodPost,
-					URL:               "https://api.github.com/repos/gke-demos/checkout-service/pulls",
-					AuthHeaderPresent: true,
-					AuthPrincipal:     string(snap.ActivePersona),
-					StatusCode:        http.StatusCreated,
-				},
-			},
+			WireRecords:            wireRecords,
 		}
 	} else {
 		baseTrace = append(baseTrace, BoundaryTraceEvent{
@@ -775,6 +806,8 @@ func (r *Runtime) ResolveConfirmation(ctx context.Context, req ConfirmationResol
 			StepUpConfirmation:    &resolvedConfirmation,
 		}
 	}
+
+	normalizeTurnResultProvenance(res)
 
 	r.UpdateSession(req.SessionID, func(s *SessionSnapshot) {
 		s.PendingConfirmation = nil

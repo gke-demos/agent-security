@@ -78,6 +78,8 @@ func TestPortal_RootHTMLAndStaticAssets(t *testing.T) {
 		`id="persona-dropdown"`,
 		`id="demo-controls-modal"`,
 		`id="btn-demo-controls"`,
+		`Connected External Sources`,
+		`id="sources-status-grid"`,
 		"<svg",
 	}
 	for _, snippet := range requiredHTMLSnippets {
@@ -163,6 +165,9 @@ func TestPortal_RootHTMLAndStaticAssets(t *testing.T) {
 		"/confirmations",
 		"/api/fixtures/seed",
 		"/api/scenarios",
+		"/api/sources/status",
+		"provenance-badge",
+		"sources-status-grid",
 		"data-theme",
 	}
 	for _, snippet := range requiredJSSnippets {

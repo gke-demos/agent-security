@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -62,22 +63,82 @@ func AuthInvocationFromContext(ctx context.Context) (AuthInvocation, bool) {
 // interfaces with a Persona-partitioned credential vault and dual-backend support
 // (Direct OAuth 2.0 3LO + Google Cloud IAM Connector / Agent Identity via adk/v2/auth/gcp).
 type TokenBroker struct {
-	rt        *Runtime
-	store     auth.CredentialStore
-	mu        sync.RWMutex
-	gcpClient *gcp.Client
-	revoked   map[string]bool
-	nonces    map[string]ConsentChallenge
+	rt               *Runtime
+	store            auth.CredentialStore
+	mu               sync.RWMutex
+	gcpClient        *gcp.Client
+	revoked          map[string]bool
+	nonFixtureGrants map[string]string
+	nonces           map[string]ConsentChallenge
 }
 
 // NewTokenBroker constructs a TokenBroker bound to rt.
 func NewTokenBroker(rt *Runtime) *TokenBroker {
-	return &TokenBroker{
-		rt:      rt,
-		store:   auth.NewInMemoryCredentialStore(),
-		revoked: make(map[string]bool),
-		nonces:  make(map[string]ConsentChallenge),
+	b := &TokenBroker{
+		rt:               rt,
+		store:            auth.NewInMemoryCredentialStore(),
+		revoked:          make(map[string]bool),
+		nonFixtureGrants: make(map[string]string),
+		nonces:           make(map[string]ConsentChallenge),
 	}
+	b.seedConfiguredTokens(context.Background(), "default-session")
+	return b
+}
+
+func (b *TokenBroker) seedConfiguredTokens(ctx context.Context, sessionID string) {
+	if b.rt == nil {
+		return
+	}
+	for _, persona := range []PersonaID{PersonaAlice, PersonaBob} {
+		for _, provider := range []ProviderID{ProviderGitHub, ProviderGoogleGmail, ProviderAtlassianJira, ProviderGCPIAM} {
+			if tok := b.configuredPersonaToken(persona, provider); tok != "" {
+				scopes := defaultScopesForProvider(provider)
+				key := b.credentialKey(sessionID, persona, provider, scopes)
+				_ = b.store.Set(ctx, key, auth.BearerCredential{Token: tok}, time.Now().Add(defaultCredentialTTL))
+			}
+		}
+	}
+}
+
+func (b *TokenBroker) configuredPersonaToken(persona PersonaID, provider ProviderID) string {
+	if b.rt == nil {
+		return ""
+	}
+	cfg := b.rt.Config()
+	if provider == ProviderGCPIAM {
+		if strings.TrimSpace(cfg.GCPProjectID) != "" || parseBoolEnv(os.Getenv("LIVE_GCP")) {
+			return resolveGoogleADCToken(context.Background())
+		}
+		return ""
+	}
+	switch persona {
+	case PersonaAlice:
+		switch provider {
+		case ProviderGitHub:
+			return strings.TrimSpace(cfg.AliceGitHubToken)
+		case ProviderGoogleGmail:
+			return strings.TrimSpace(cfg.AliceGmailToken)
+		case ProviderAtlassianJira:
+			return strings.TrimSpace(cfg.AliceJiraToken)
+		}
+	case PersonaBob:
+		switch provider {
+		case ProviderGitHub:
+			return strings.TrimSpace(cfg.BobGitHubToken)
+		case ProviderGoogleGmail:
+			return strings.TrimSpace(cfg.BobGmailToken)
+		case ProviderAtlassianJira:
+			return strings.TrimSpace(cfg.BobJiraToken)
+		}
+	}
+	return ""
+}
+
+func (b *TokenBroker) configuredOrDefaultPersonaToken(persona PersonaID, provider ProviderID) string {
+	if tok := b.configuredPersonaToken(persona, provider); tok != "" {
+		return tok
+	}
+	return defaultPersona3LOToken(persona, provider)
 }
 
 // TokenBroker returns the Runtime's singleton TokenBroker instance.
@@ -181,8 +242,8 @@ func (b *TokenBroker) Credential(ctx context.Context) (auth.Credential, error) {
 		return cached, nil
 	}
 
-	// Seed deterministic per-persona 3LO token for warm session fixture
-	token := defaultPersona3LOToken(inv.Persona, inv.Provider)
+	// Seed configured or deterministic per-persona 3LO token for warm session
+	token := b.configuredOrDefaultPersonaToken(inv.Persona, inv.Provider)
 	cred := auth.BearerCredential{Token: token}
 	_ = b.store.Set(ctx, key, cred, time.Now().Add(defaultCredentialTTL))
 	return cred, nil
@@ -224,11 +285,17 @@ func (b *TokenBroker) Grant(ctx context.Context, req OAuthGrantRequest) *Session
 	}
 	token := strings.TrimSpace(req.Token)
 	if token == "" {
-		token = defaultPersona3LOToken(persona, provider)
+		token = b.configuredOrDefaultPersonaToken(persona, provider)
 	}
 
 	b.mu.Lock()
-	delete(b.revoked, revocationSlot(sessionID, persona, provider))
+	slot := revocationSlot(sessionID, persona, provider)
+	delete(b.revoked, slot)
+	if !isFixture3LOToken(token) {
+		b.nonFixtureGrants[slot] = token
+	} else {
+		delete(b.nonFixtureGrants, slot)
+	}
 	b.mu.Unlock()
 
 	key := b.credentialKey(sessionID, persona, provider, scopes)
@@ -261,7 +328,9 @@ func (b *TokenBroker) Revoke(ctx context.Context, sessionID string, persona Pers
 	}
 
 	b.mu.Lock()
-	b.revoked[revocationSlot(sessionID, persona, provider)] = true
+	slot := revocationSlot(sessionID, persona, provider)
+	b.revoked[slot] = true
+	delete(b.nonFixtureGrants, slot)
 	b.mu.Unlock()
 
 	key := b.credentialKey(sessionID, persona, provider, scopes)
@@ -281,6 +350,30 @@ func (b *TokenBroker) Revoke(ctx context.Context, sessionID string, persona Pers
 		}
 		s.GrantedProviders[persona] = filtered
 	})
+}
+
+// HasNonFixtureGrant returns true when any active session holds a granted non-fixture 3LO token for provider.
+func (b *TokenBroker) HasNonFixtureGrant(provider ProviderID) bool {
+	if b == nil {
+		return false
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	suffix := fmt.Sprintf("|%d:%s", len(provider), provider)
+	for slot, tok := range b.nonFixtureGrants {
+		if strings.HasSuffix(slot, suffix) && !b.revoked[slot] && !isFixture3LOToken(tok) {
+			return true
+		}
+	}
+	return false
+}
+
+func isFixture3LOToken(token string) bool {
+	tok := strings.TrimSpace(token)
+	return tok == "" ||
+		strings.HasPrefix(tok, "3lo-alice-") ||
+		strings.HasPrefix(tok, "3lo-bob-") ||
+		tok == sharedRootServiceToken
 }
 
 func (b *TokenBroker) hasActiveGrant(sessionID string, persona PersonaID, provider ProviderID) bool {
@@ -428,6 +521,9 @@ func executeGmail3LOCheck(ctx context.Context, rt *Runtime, req TurnRequest, car
 				Detail:    fmt.Sprintf("Missing 3LO OAuth grant for persona %q on provider %q; emitted adk_request_credential ConsentChallenge", req.Persona, ProviderGoogleGmail),
 				Timestamp: time.Now().UTC(),
 			}
+			if isGmailLive(rt) {
+				ev.Provenance = ProvenanceLive
+			}
 			card := buildConsentChallengeCard(cardSurfaceID, req.SessionID, req.Persona, ch)
 			return &TurnResult{
 				SessionID:        req.SessionID,
@@ -442,6 +538,14 @@ func executeGmail3LOCheck(ctx context.Context, rt *Runtime, req TurnRequest, car
 			}, ev, nil
 		}
 		return nil, BoundaryTraceEvent{}, err
+	}
+
+	if isGmailLive(rt) {
+		if liveRes, err := fetchLiveGmailEscalation(ctx, rt, req); err != nil {
+			return nil, BoundaryTraceEvent{}, err
+		} else if liveRes != nil && liveRes.Live {
+			return nil, liveRes.TraceEvent, nil
+		}
 	}
 
 	return nil, BoundaryTraceEvent{
@@ -459,6 +563,18 @@ func executeGmail3LOCheck(ctx context.Context, rt *Runtime, req TurnRequest, car
 // executeSecOps3LOTriageStep performs the shared Boundary 3 Atlassian Jira (SEC-101) + GitHub (GHSA-sec-101)
 // 3LO HTTP round-trip via adk/v2/auth.Transport for both SCENARIO-02 and SCENARIO-05.
 func executeSecOps3LOTriageStep(
+	ctx context.Context,
+	rt *Runtime,
+	req TurnRequest,
+	traceOrder int,
+	consentCardSurfaceID string,
+	aclCardSurfaceID string,
+	aclCardTitle string,
+) ([]BoundaryTraceEvent, []OutboundWireRecord, *TurnResult, error) {
+	return executeJiraAndGitHub3LORoundTrip(ctx, rt, req, traceOrder, consentCardSurfaceID, aclCardSurfaceID, aclCardTitle)
+}
+
+func executeFixtureSecOps3LOTriageStep(
 	ctx context.Context,
 	rt *Runtime,
 	req TurnRequest,
@@ -776,6 +892,9 @@ func registerTokenBrokerRoutes(mux *http.ServeMux, rt *Runtime) {
 		code := firstNonEmpty(r.URL.Query().Get("code"), "oauthcode")
 		nonce := firstNonEmpty(r.URL.Query().Get("nonce"), r.URL.Query().Get("state"))
 		token := fmt.Sprintf("3lo-%s-%s-%s", persona, provider, code)
+		if exchanged, err := rt.TokenBroker().exchangeOAuthCode(r.Context(), provider, code); err == nil && exchanged != "" {
+			token = exchanged
+		}
 
 		snap := rt.TokenBroker().Grant(r.Context(), OAuthGrantRequest{
 			SessionID: sessionID,
@@ -824,6 +943,87 @@ func defaultScopesForProvider(provider ProviderID) []string {
 	default:
 		return []string{"read"}
 	}
+}
+
+func (b *TokenBroker) exchangeOAuthCode(ctx context.Context, provider ProviderID, code string) (string, error) {
+	if b.rt == nil || strings.TrimSpace(code) == "" {
+		return "", nil
+	}
+	cfg := b.rt.Config()
+
+	var (
+		clientID      string
+		clientSecret  string
+		tokenEndpoint string
+	)
+	switch provider {
+	case ProviderGitHub:
+		clientID = strings.TrimSpace(cfg.GitHubOAuthClientID)
+		clientSecret = strings.TrimSpace(cfg.GitHubOAuthClientSecret)
+		tokenEndpoint = "https://github.com/login/oauth/access_token"
+	case ProviderGoogleGmail:
+		clientID = strings.TrimSpace(cfg.GoogleOAuthClientID)
+		clientSecret = strings.TrimSpace(cfg.GoogleOAuthClientSecret)
+		tokenEndpoint = "https://oauth2.googleapis.com/token"
+	case ProviderAtlassianJira:
+		clientID = strings.TrimSpace(cfg.JiraOAuthClientID)
+		clientSecret = strings.TrimSpace(cfg.JiraOAuthClientSecret)
+		tokenEndpoint = "https://auth.atlassian.com/oauth/token"
+	}
+
+	if override := strings.TrimSpace(cfg.OAuthTokenEndpointOverride); override != "" {
+		tokenEndpoint = override
+	} else if clientID == "" || clientSecret == "" {
+		return "", nil
+	}
+
+	if tokenEndpoint == "" {
+		return "", nil
+	}
+
+	form := url.Values{}
+	form.Set("code", code)
+	form.Set("client_id", clientID)
+	form.Set("client_secret", clientSecret)
+	form.Set("grant_type", "authorization_code")
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+
+	hc := cfg.HTTPClient
+	if hc == nil {
+		hc = &http.Client{Timeout: 10 * time.Second}
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("oauth token exchange status %d", resp.StatusCode)
+	}
+
+	var parsed struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err == nil && strings.TrimSpace(parsed.AccessToken) != "" {
+		return strings.TrimSpace(parsed.AccessToken), nil
+	}
+	if vals, err := url.ParseQuery(string(raw)); err == nil {
+		if tok := strings.TrimSpace(vals.Get("access_token")); tok != "" {
+			return tok, nil
+		}
+	}
+	return "", nil
 }
 
 func defaultPersona3LOToken(persona PersonaID, provider ProviderID) string {

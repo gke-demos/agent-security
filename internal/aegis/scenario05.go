@@ -37,13 +37,14 @@ func executeScenario05(ctx context.Context, rt *Runtime, req TurnRequest) (*Turn
 
 	if req.Posture.PIIRedactorEnabled && inspection.DeidentifiedInFlight {
 		trace = append(trace, BoundaryTraceEvent{
-			Order:     len(trace) + 1,
-			Boundary:  BoundaryReasoningGuard,
-			Shield:    "PII Redactor (Cloud SDP)",
-			Component: "CloudSDP DeidentifyContent (IsSdpOnlyBlock=true)",
-			Action:    "DeidentifyToolOutput(gmail_message)",
-			Verdict:   VerdictRedacted,
-			Detail:    fmt.Sprintf("SDP-only match (%s): masked customer SSN, API key, email, and phone in-flight before Gemini reasoning", stringsJoin(inspection.SDPMatchTypes)),
+			Order:      len(trace) + 1,
+			Boundary:   BoundaryReasoningGuard,
+			Shield:     "PII Redactor (Cloud SDP)",
+			Component:  "CloudSDP DeidentifyContent (IsSdpOnlyBlock=true)",
+			Action:     "DeidentifyToolOutput(gmail_message)",
+			Verdict:    VerdictRedacted,
+			Provenance: inspection.Provenance,
+			Detail:     fmt.Sprintf("SDP-only match (%s): masked customer SSN, API key, email, and phone in-flight before Gemini reasoning", stringsJoin(inspection.SDPMatchTypes)),
 			Metadata: map[string]string{
 				"sdpMatches": stringsJoin(inspection.SDPMatchTypes),
 			},
@@ -51,14 +52,15 @@ func executeScenario05(ctx context.Context, rt *Runtime, req TurnRequest) (*Turn
 		})
 	} else {
 		trace = append(trace, BoundaryTraceEvent{
-			Order:     len(trace) + 1,
-			Boundary:  BoundaryReasoningGuard,
-			Shield:    "Prompt Screen + PII Redactor",
-			Component: "ModelArmor + CloudSDP",
-			Action:    "SanitizeToolOutput(gmail_message)",
-			Verdict:   VerdictBypassedRed,
-			Detail:    "Prompt Screen and PII Redactor disabled in Red Mode: raw SSN (123-45-6789), API key (AIzaSyD-CustomerLeakedKey999), and hidden prompt injection entered LLM context!",
-			Timestamp: time.Now().UTC(),
+			Order:      len(trace) + 1,
+			Boundary:   BoundaryReasoningGuard,
+			Shield:     "Prompt Screen + PII Redactor",
+			Component:  "ModelArmor + CloudSDP",
+			Action:     "SanitizeToolOutput(gmail_message)",
+			Verdict:    VerdictBypassedRed,
+			Provenance: inspection.Provenance,
+			Detail:     "Prompt Screen and PII Redactor disabled in Red Mode: raw SSN (123-45-6789), API key (AIzaSyD-CustomerLeakedKey999), and hidden prompt injection entered LLM context!",
+			Timestamp:  time.Now().UTC(),
 		})
 	}
 

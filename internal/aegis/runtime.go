@@ -3,6 +3,7 @@ package aegis
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -153,6 +154,7 @@ func (r *Runtime) ExecuteTurn(ctx context.Context, req TurnRequest) (*TurnResult
 		s.ActivePersona = req.Persona
 		s.Posture = req.Posture
 	})
+	r.SetExtension(lastGmailFetchExtPrefix+req.SessionID, nil)
 
 	registeredScenarioHandlersMu.RLock()
 	customHandler, hasCustom := registeredScenarioHandlers[req.ScenarioID]
@@ -170,6 +172,33 @@ func (r *Runtime) ExecuteTurn(ctx context.Context, req TurnRequest) (*TurnResult
 	if err != nil {
 		return nil, err
 	}
+	if req.ScenarioID == Scenario05FullChainZeroTrust && res != nil {
+		if ext, ok := r.GetExtension(lastGmailFetchExtPrefix + req.SessionID); ok {
+			if liveGmail, ok := ext.(*liveGmailFetchResult); ok && liveGmail != nil && liveGmail.Live {
+				res.WireRecords = append(append([]OutboundWireRecord(nil), liveGmail.WireRecords...), res.WireRecords...)
+				markedB3 := false
+				for i := range res.BoundaryTrace {
+					if res.BoundaryTrace[i].Boundary == BoundaryIdentity3LO {
+						res.BoundaryTrace[i].Provenance = ProvenanceLive
+						markedB3 = true
+					}
+				}
+				if !markedB3 {
+					res.BoundaryTrace = append([]BoundaryTraceEvent{liveGmail.TraceEvent}, res.BoundaryTrace...)
+					for i := range res.BoundaryTrace {
+						res.BoundaryTrace[i].Order = i + 1
+					}
+				}
+				if strings.TrimSpace(liveGmail.RawEmail) != "" && res.SanitizedInputPreview != "" {
+					insp := r.guard.InspectAndSanitize(ctx, liveGmail.RawEmail, req.Posture)
+					res.SanitizedInputPreview = insp.SanitizedText
+					res.OutboundCommentPreview = insp.SanitizedText
+				}
+			}
+		}
+	}
+	enrichTurnWithLiveGCP(ctx, r, req, res)
+	normalizeTurnResultProvenance(res)
 
 	r.UpdateSession(req.SessionID, func(s *SessionSnapshot) {
 		s.LastTurn = res
@@ -218,19 +247,29 @@ func (r *Runtime) executeScenario01(ctx context.Context, req TurnRequest) (*Turn
 	if req.CleanPIIOnly {
 		rawEmail = fixtureGmailCleanPIIBody
 	}
+	var wireRecords []OutboundWireRecord
+	if ext, ok := r.GetExtension(lastGmailFetchExtPrefix + req.SessionID); ok {
+		if liveGmail, ok := ext.(*liveGmailFetchResult); ok && liveGmail != nil && liveGmail.Live {
+			if strings.TrimSpace(liveGmail.RawEmail) != "" {
+				rawEmail = liveGmail.RawEmail
+			}
+			wireRecords = append(wireRecords, liveGmail.WireRecords...)
+		}
+	}
 
 	inspection := r.guard.InspectAndSanitize(ctx, rawEmail, req.Posture)
 
 	// Boundary 2: Model Armor Prompt Screen + Cloud SDP PII Redactor
 	if inspection.Blocked {
 		trace = append(trace, BoundaryTraceEvent{
-			Order:     2,
-			Boundary:  BoundaryReasoningGuard,
-			Shield:    "Prompt Screen + PII Redactor",
-			Component: "ModelArmor + CloudSDP",
-			Action:    "SanitizeToolOutput(gmail_message)",
-			Verdict:   VerdictBlocked,
-			Detail:    inspection.ThreatReason + " (PII also de-identified before logging)",
+			Order:      2,
+			Boundary:   BoundaryReasoningGuard,
+			Shield:     "Prompt Screen + PII Redactor",
+			Component:  "ModelArmor + CloudSDP",
+			Action:     "SanitizeToolOutput(gmail_message)",
+			Verdict:    VerdictBlocked,
+			Provenance: inspection.Provenance,
+			Detail:     inspection.ThreatReason + " (PII also de-identified before logging)",
 			Metadata: map[string]string{
 				"sdpMatches": stringsJoin(inspection.SDPMatchTypes),
 			},
@@ -263,30 +302,33 @@ func (r *Runtime) executeScenario01(ctx context.Context, req TurnRequest) (*Turn
 			SanitizedInputPreview: inspection.SanitizedText,
 			Cards:                 []A2UICard{card},
 			BoundaryTrace:         trace,
+			WireRecords:           wireRecords,
 		}, nil
 	}
 
 	if req.Posture.PIIRedactorEnabled && inspection.DeidentifiedInFlight {
 		trace = append(trace, BoundaryTraceEvent{
-			Order:     2,
-			Boundary:  BoundaryReasoningGuard,
-			Shield:    "PII Redactor (Cloud SDP)",
-			Component: "CloudSDP DeidentifyContent (IsSdpOnlyBlock=true)",
-			Action:    "DeidentifyToolOutput(gmail_message)",
-			Verdict:   VerdictRedacted,
-			Detail:    fmt.Sprintf("SDP-only match (%s): masked sensitive tokens in-flight and continued execution", stringsJoin(inspection.SDPMatchTypes)),
-			Timestamp: time.Now().UTC(),
+			Order:      2,
+			Boundary:   BoundaryReasoningGuard,
+			Shield:     "PII Redactor (Cloud SDP)",
+			Component:  "CloudSDP DeidentifyContent (IsSdpOnlyBlock=true)",
+			Action:     "DeidentifyToolOutput(gmail_message)",
+			Verdict:    VerdictRedacted,
+			Provenance: inspection.Provenance,
+			Detail:     fmt.Sprintf("SDP-only match (%s): masked sensitive tokens in-flight and continued execution", stringsJoin(inspection.SDPMatchTypes)),
+			Timestamp:  time.Now().UTC(),
 		})
 	} else {
 		trace = append(trace, BoundaryTraceEvent{
-			Order:     2,
-			Boundary:  BoundaryReasoningGuard,
-			Shield:    "Prompt Screen + PII Redactor",
-			Component: "ModelArmor + CloudSDP",
-			Action:    "SanitizeToolOutput(gmail_message)",
-			Verdict:   VerdictBypassedRed,
-			Detail:    "Prompt Screen and PII Redactor disabled in Red Mode: raw SSN, API key, and hidden prompt injection entered LLM context!",
-			Timestamp: time.Now().UTC(),
+			Order:      2,
+			Boundary:   BoundaryReasoningGuard,
+			Shield:     "Prompt Screen + PII Redactor",
+			Component:  "ModelArmor + CloudSDP",
+			Action:     "SanitizeToolOutput(gmail_message)",
+			Verdict:    VerdictBypassedRed,
+			Provenance: inspection.Provenance,
+			Detail:     "Prompt Screen and PII Redactor disabled in Red Mode: raw SSN, API key, and hidden prompt injection entered LLM context!",
+			Timestamp:  time.Now().UTC(),
 		})
 	}
 
@@ -318,6 +360,7 @@ func (r *Runtime) executeScenario01(ctx context.Context, req TurnRequest) (*Turn
 			OutboundCommentPreview: inspection.SanitizedText,
 			Cards:                  []A2UICard{card},
 			BoundaryTrace:          trace,
+			WireRecords:            wireRecords,
 		}, nil
 	}
 
@@ -348,6 +391,7 @@ func (r *Runtime) executeScenario01(ctx context.Context, req TurnRequest) (*Turn
 		OutboundCommentPreview: inspection.SanitizedText,
 		Cards:                  []A2UICard{card},
 		BoundaryTrace:          trace,
+		WireRecords:            wireRecords,
 	}, nil
 }
 

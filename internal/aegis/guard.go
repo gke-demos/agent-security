@@ -36,15 +36,16 @@ var maliciousURISignatures = []string{
 // GuardInspectionResult captures the outcome of screening untrusted text through
 // Model Armor (Prompt Screen) and Cloud SDP (PII Redactor).
 type GuardInspectionResult struct {
-	OriginalText          string   `json:"originalText"`
-	SanitizedText         string   `json:"sanitizedText"`
-	PromptInjectionFound  bool     `json:"promptInjectionFound"`
-	MaliciousURIFound     bool     `json:"maliciousUriFound"`
-	SDPMatchTypes         []string `json:"sdpMatchTypes,omitempty"`
-	IsSDPOnlyBlock        bool     `json:"isSdpOnlyBlock"`
-	Blocked               bool     `json:"blocked"`
-	DeidentifiedInFlight  bool     `json:"deidentifiedInFlight"`
-	ThreatReason          string   `json:"threatReason,omitempty"`
+	OriginalText         string           `json:"originalText"`
+	SanitizedText        string           `json:"sanitizedText"`
+	PromptInjectionFound bool             `json:"promptInjectionFound"`
+	MaliciousURIFound    bool             `json:"maliciousUriFound"`
+	SDPMatchTypes        []string         `json:"sdpMatchTypes,omitempty"`
+	IsSDPOnlyBlock       bool             `json:"isSdpOnlyBlock"`
+	Blocked              bool             `json:"blocked"`
+	DeidentifiedInFlight bool             `json:"deidentifiedInFlight"`
+	ThreatReason         string           `json:"threatReason,omitempty"`
+	Provenance           SourceProvenance `json:"provenance,omitempty"`
 }
 
 // ContentGuard enforces Boundary 2: Model Armor Prompt Screen + Cloud SDP PII Redactor (ADR-0005).
@@ -78,6 +79,7 @@ func (g *ContentGuard) InspectAndSanitize(ctx context.Context, text string, post
 	res := GuardInspectionResult{
 		OriginalText:  text,
 		SanitizedText: text,
+		Provenance:    ProvenanceFixture,
 	}
 
 	// If a live Model Armor endpoint is configured, query it first.
@@ -86,6 +88,7 @@ func (g *ContentGuard) InspectAndSanitize(ctx context.Context, text string, post
 			res.PromptInjectionFound = liveRes.PromptInjectionFound
 			res.MaliciousURIFound = liveRes.MaliciousURIFound
 			res.SDPMatchTypes = liveRes.SDPMatchTypes
+			res.Provenance = ProvenanceLive
 		}
 	}
 
@@ -99,6 +102,7 @@ func (g *ContentGuard) InspectAndSanitize(ctx context.Context, text string, post
 			if dlpRes.DeidentifiedInFlight && dlpRes.SanitizedText != "" {
 				liveDLPSanitized = dlpRes.SanitizedText
 			}
+			res.Provenance = ProvenanceLive
 		}
 	}
 
@@ -183,6 +187,9 @@ func (g *ContentGuard) queryLiveCloudDLP(ctx context.Context, text string) (Guar
 		return GuardInspectionResult{}, false
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if tok := resolveGCPBearerToken(ctx, g.dlpEndpoint); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
 		return GuardInspectionResult{}, false
@@ -246,6 +253,9 @@ func (g *ContentGuard) queryLiveModelArmor(ctx context.Context, text string) (Gu
 		return GuardInspectionResult{}, false
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if tok := resolveGCPBearerToken(ctx, g.modelArmorEndpoint); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
 		return GuardInspectionResult{}, false
