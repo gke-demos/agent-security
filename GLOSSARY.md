@@ -38,6 +38,10 @@ _Avoid_: Dummy repo, test repo, scratch branch
 One of the five independently toggleable defense mechanisms in the Red-vs-Blue Arena that enforces a specific trust boundary.
 _Avoid_: Feature flag, filter toggle, guardrail switch
 
+**Security Lifecycle Plugin**:
+A runtime interceptor registered on the agent execution loop that inspects user prompts, model invocations, and tool calls before and after execution to enforce the five Security Shields dynamically on any tool chain.
+_Avoid_: Scenario switch, wrapper function, middleware hook
+
 **Prompt Screen**:
 An in-loop content inspection gate that detects indirect prompt injection and policy violations in untrusted inputs and tool outputs before the reasoning model acts on them.
 _Avoid_: Input validator, regex filter
@@ -79,6 +83,10 @@ _Avoid_: Token passthrough, full impersonation
 **Boundary Trace Waterfall**:
 A real-time ordered sequence of security inspection, credential brokering, policy evaluation, and sandbox isolation events recorded across all six boundaries for a single agent turn.
 _Avoid_: Audit log, debug trace
+
+**Turn Event Stream**:
+A server-to-browser event channel that emits progressive boundary inspection verdicts, outbound wire records, declarative UI cards, and reasoning text deltas as each tool call executes within a turn.
+_Avoid_: Polling endpoint, batch response
 
 **Security Scenario**:
 A reproducible incident and attack trajectory evaluated across both Red Mode (shields disabled, exploit succeeds) and Blue Mode (shields enabled, boundary blocks or redacts).
