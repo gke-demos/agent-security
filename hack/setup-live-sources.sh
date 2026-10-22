@@ -205,9 +205,9 @@ TOTAL_STAGES=5
 
 banner "AegisSRE Live External Sources Setup"
 
-# ── Stage 1: Google Cloud Project, Region, GKE Cluster & Vertex AI Gemini ─
-stage "Google Cloud Project, GKE Cluster & Vertex AI Gemini"
-say "Configure your Google Cloud project, region, GKE cluster, and ADK Go v2 Vertex AI Gemini reasoning."
+# ── Stage 1: Google Cloud Project, Region, GKE Cluster & Gemini on Agent Platform ─
+stage "Google Cloud Project, GKE Cluster & Gemini on Agent Platform"
+say "Configure your Google Cloud project, region, GKE cluster, and ADK Go v2 Gemini Enterprise Agent Platform reasoning."
 step "Ensure Application Default Credentials (gcloud auth application-default login) are active."
 ask GOOGLE_CLOUD_PROJECT "Google Cloud Project ID (e.g. from gcloud config get-value project):"
 ask GOOGLE_CLOUD_LOCATION "Google Cloud Region (default: us-central1):"
@@ -216,7 +216,7 @@ ask GKE_CLUSTER_NAME "GKE Cluster Name (matches your active kubectl config curre
 write_env GOOGLE_CLOUD_PROJECT "$GOOGLE_CLOUD_PROJECT"
 write_env GOOGLE_CLOUD_LOCATION "$GOOGLE_CLOUD_LOCATION"
 write_env GKE_CLUSTER_NAME "$GKE_CLUSTER_NAME"
-write_env VERTEX_LIVE_LLM "true"
+write_env AGENT_PLATFORM_LIVE_LLM "true"
 
 # ── Stage 2: Google Cloud Model Armor & Cloud SDP Endpoint ────────────────
 stage "Google Cloud Model Armor & Cloud SDP (DLP)"

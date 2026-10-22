@@ -292,24 +292,24 @@ func (c *GCPObservabilityConnector) QueryLoggingAndGKE(ctx context.Context, pers
 	return records, ProvenanceLive
 }
 
-// VertexGeminiConnector builds and executes an ADK Go v2 llmagent ("aegis_triage_orchestrator")
-// backed by Vertex AI gemini-2.5-flash and governed functiontools.
-type VertexGeminiConnector struct {
+// AgentPlatformGeminiConnector builds and executes an ADK Go v2 llmagent ("aegis_triage_orchestrator")
+// backed by Gemini Enterprise Agent Platform gemini-2.5-flash and governed functiontools.
+type AgentPlatformGeminiConnector struct {
 	rt *Runtime
 }
 
-// NewVertexGeminiConnector constructs a VertexGeminiConnector for rt.
-func NewVertexGeminiConnector(rt *Runtime) *VertexGeminiConnector {
-	return &VertexGeminiConnector{rt: rt}
+// NewAgentPlatformGeminiConnector constructs an AgentPlatformGeminiConnector for rt.
+func NewAgentPlatformGeminiConnector(rt *Runtime) *AgentPlatformGeminiConnector {
+	return &AgentPlatformGeminiConnector{rt: rt}
 }
 
-// Provenance returns ProvenanceLive when VertexLiveLLM or GeminiEndpoint is configured.
-func (c *VertexGeminiConnector) Provenance() SourceProvenance {
+// Provenance returns ProvenanceLive when AgentPlatformLiveLLM or GeminiEndpoint is configured.
+func (c *AgentPlatformGeminiConnector) Provenance() SourceProvenance {
 	if c == nil || c.rt == nil {
 		return ProvenanceFixture
 	}
 	cfg := c.rt.Config()
-	if cfg.VertexLiveLLM || strings.TrimSpace(cfg.GeminiEndpoint) != "" {
+	if cfg.AgentPlatformLiveLLM || strings.TrimSpace(cfg.GeminiEndpoint) != "" {
 		return ProvenanceLive
 	}
 	return ProvenanceFixture
@@ -456,7 +456,7 @@ func buildGovernedADKTools(rt *Runtime) ([]tool.Tool, error) {
 
 // BuildOrchestratorAgent constructs the ADK Go v2 llmagent ("aegis_triage_orchestrator")
 // with gemini-2.5-flash and the 8 governed AegisSRE functiontools.
-func (c *VertexGeminiConnector) BuildOrchestratorAgent(ctx context.Context) (agent.Agent, error) {
+func (c *AgentPlatformGeminiConnector) BuildOrchestratorAgent(ctx context.Context) (agent.Agent, error) {
 	var rt *Runtime
 	if c != nil {
 		rt = c.rt
@@ -477,7 +477,7 @@ func (c *VertexGeminiConnector) BuildOrchestratorAgent(ctx context.Context) (age
 	})
 }
 
-func (c *VertexGeminiConnector) buildLLMModel(ctx context.Context) model.LLM {
+func (c *AgentPlatformGeminiConnector) buildLLMModel(ctx context.Context) model.LLM {
 	cfg := c.rt.Config()
 	project := firstNonEmpty(strings.TrimSpace(cfg.GCPProjectID), "aegis-sre")
 	location := firstNonEmpty(strings.TrimSpace(cfg.GCPLocation), "us-central1")
@@ -493,7 +493,7 @@ func (c *VertexGeminiConnector) buildLLMModel(ctx context.Context) model.LLM {
 		hc = &http.Client{Timeout: 8 * time.Second}
 	}
 
-	// Attempt to initialize standard adk/v2/model/gemini when using default Vertex AI endpoint
+	// Attempt to initialize standard adk/v2/model/gemini when using default Gemini Enterprise Agent Platform endpoint
 	var sdkModel model.LLM
 	if strings.TrimSpace(cfg.GeminiEndpoint) == "" && strings.TrimSpace(cfg.GCPProjectID) != "" {
 		if m, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
@@ -505,7 +505,7 @@ func (c *VertexGeminiConnector) buildLLMModel(ctx context.Context) model.LLM {
 		}
 	}
 
-	return &vertexGeminiRESTModel{
+	return &agentPlatformGeminiRESTModel{
 		modelName:  "gemini-2.5-flash",
 		endpoint:   endpoint,
 		httpClient: hc,
@@ -514,7 +514,7 @@ func (c *VertexGeminiConnector) buildLLMModel(ctx context.Context) model.LLM {
 	}
 }
 
-type vertexGeminiRESTModel struct {
+type agentPlatformGeminiRESTModel struct {
 	modelName  string
 	endpoint   string
 	httpClient *http.Client
@@ -522,11 +522,11 @@ type vertexGeminiRESTModel struct {
 	useDirect  bool
 }
 
-func (m *vertexGeminiRESTModel) Name() string {
+func (m *agentPlatformGeminiRESTModel) Name() string {
 	return m.modelName
 }
 
-func (m *vertexGeminiRESTModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+func (m *agentPlatformGeminiRESTModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	if !m.useDirect && m.sdkModel != nil {
 		return m.sdkModel.GenerateContent(ctx, req, stream)
 	}
@@ -558,7 +558,7 @@ func (m *vertexGeminiRESTModel) GenerateContent(ctx context.Context, req *model.
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			yield(nil, fmt.Errorf("vertex gemini endpoint returned HTTP %d", resp.StatusCode))
+			yield(nil, fmt.Errorf("agent platform gemini endpoint returned HTTP %d", resp.StatusCode))
 			return
 		}
 		var parsed struct {
@@ -572,7 +572,7 @@ func (m *vertexGeminiRESTModel) GenerateContent(ctx context.Context, req *model.
 			return
 		}
 		if len(parsed.Candidates) == 0 || parsed.Candidates[0].Content == nil {
-			yield(nil, fmt.Errorf("vertex gemini response contained no candidates"))
+			yield(nil, fmt.Errorf("agent platform gemini response contained no candidates"))
 			return
 		}
 		yield(&model.LLMResponse{
@@ -584,9 +584,9 @@ func (m *vertexGeminiRESTModel) GenerateContent(ctx context.Context, req *model.
 }
 
 // SynthesizeTurn runs the ADK Go v2 llmagent over the sanitized turn input and prompt.
-func (c *VertexGeminiConnector) SynthesizeTurn(ctx context.Context, req TurnRequest, sanitizedInput string) (string, error) {
+func (c *AgentPlatformGeminiConnector) SynthesizeTurn(ctx context.Context, req TurnRequest, sanitizedInput string) (string, error) {
 	if c.Provenance() != ProvenanceLive {
-		return "", fmt.Errorf("vertex gemini connector not in LIVE mode")
+		return "", fmt.Errorf("agent platform gemini connector not in LIVE mode")
 	}
 	orchAgent, err := c.BuildOrchestratorAgent(ctx)
 	if err != nil {
@@ -670,11 +670,11 @@ func enrichTurnWithLiveGCPObservabilityAndRegistry(ctx context.Context, r *Runti
 	}
 }
 
-func enrichTurnWithLiveVertexGemini(ctx context.Context, r *Runtime, req TurnRequest, res *TurnResult) {
+func enrichTurnWithLiveAgentPlatformGemini(ctx context.Context, r *Runtime, req TurnRequest, res *TurnResult) {
 	if r == nil || res == nil || res.Outcome != OutcomeDefendedSuccess {
 		return
 	}
-	conn := NewVertexGeminiConnector(r)
+	conn := NewAgentPlatformGeminiConnector(r)
 	if conn.Provenance() != ProvenanceLive {
 		return
 	}

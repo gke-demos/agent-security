@@ -9,7 +9,7 @@
 | Boundary | Security Shield | Google Cloud / Open Protocol Stack | Threat Mitigated |
 | :--- | :--- | :--- | :--- |
 | **B1. Presentation & Generative UI** | `Step-Up Confirmation & A2UI Catalog` | **A2UI v0.9** (`application/json+a2ui`) + ADK Go v2 `toolconfirmation` (`adk_request_confirmation`) | Generative UI XSS (`<script>`, `<iframe>`, `javascript:`) and unapproved state-mutating tool execution |
-| **B2. In-Loop Reasoning & Content** | `Prompt Screen` + `PII Redactor` | **Vertex AI Model Armor** + **Cloud SDP (DLP)** (`IsSdpOnlyBlock` in-flight de-identification) | Indirect prompt injection inside emails/issues and raw customer PII/API key leakage into Gemini or Jira |
+| **B2. In-Loop Reasoning & Content** | `Prompt Screen` + `PII Redactor` | **Model Armor** + **Cloud SDP (DLP)** (`IsSdpOnlyBlock` in-flight de-identification) | Indirect prompt injection inside emails/issues and raw customer PII/API key leakage into Gemini or Jira |
 | **B3. Identity & 3LO Token Broker** | `Token Broker (Per-User 3LO)` | ADK Go v2 `auth.Provider`, `auth/gcp` IAM Connector + Direct OAuth 2.0 3LO via `auth.Transport` | Confused Deputy privilege escalation (`Alice` vs. `Bob`) and raw bearer tokens inside LLM context |
 | **B4. Platform Governance** | `Step-Up Confirmation & A2UI Catalog` | **Agent Registry** (`adk/v2/agentregistry`) + **Agent Gateway** (`AGENT_TO_ANYWHERE`, `roles/iap.egressor` CEL) | Rogue MCP endpoints and destructive tool calls (`container.clusters.delete` vs. `logging.entries.list`) |
 | **B5. Cross-Agent Federation** | `Sandbox Egress MITM` | **A2A v2** (`adk/v2/server/adka2a/v2`) with `withoutCredentialParts` + `SanitizeUserPrompt` | Upstream 3LO credential bleed to peer agents and poisoned peer A2A responses |
@@ -55,7 +55,7 @@ make run
 # Open http://localhost:8080 in your browser
 ```
 
-To configure and run against live External Sources (Vertex AI Gemini `gemini-2.5-flash`, Model Armor + Cloud SDP, GitHub companion target repo `gke-demos/aegis-checkout-target`, Gmail/Jira Cloud 3LO, and Agent Substrate `v0.5.0` gVisor sandbox):
+To configure and run against live External Sources (Gemini on Agent Platform `gemini-2.5-flash`, Model Armor + Cloud SDP, GitHub companion target repo `gke-demos/aegis-checkout-target`, Gmail/Jira Cloud 3LO, and Agent Substrate `v0.5.0` gVisor sandbox):
 
 ```bash
 make setup-live

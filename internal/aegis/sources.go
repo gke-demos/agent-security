@@ -37,7 +37,7 @@ func RuntimeConfigFromEnv() RuntimeConfig {
 		GCPProjectID:               strings.TrimSpace(os.Getenv("GOOGLE_CLOUD_PROJECT")),
 		GCPLocation:                strings.TrimSpace(os.Getenv("GOOGLE_CLOUD_LOCATION")),
 		GKEClusterName:             strings.TrimSpace(os.Getenv("GKE_CLUSTER_NAME")),
-		VertexLiveLLM:              parseBoolEnv(os.Getenv("VERTEX_LIVE_LLM")),
+		AgentPlatformLiveLLM:       parseBoolEnv(os.Getenv("AGENT_PLATFORM_LIVE_LLM")),
 		GeminiEndpoint:             strings.TrimSpace(os.Getenv("GEMINI_ENDPOINT")),
 		GitHubAPIURL:               strings.TrimSpace(os.Getenv("GITHUB_API_URL")),
 		GitHubTargetRepo:           strings.TrimSpace(os.Getenv("GITHUB_TARGET_REPO")),
@@ -98,8 +98,8 @@ func enrichTurnWithLiveGCP(ctx context.Context, r *Runtime, req TurnRequest, res
 	// 1. Live Agent Registry + GCP Observability (Cloud Logging & GKE) for SCENARIO-03 and SCENARIO-05
 	enrichTurnWithLiveGCPObservabilityAndRegistry(ctx, r, req, res)
 
-	// 2. Live ADK Go v2 llmagent (Vertex AI Gemini gemini-2.5-flash) synthesis on defended success turns
-	enrichTurnWithLiveVertexGemini(ctx, r, req, res)
+	// 2. Live ADK Go v2 llmagent (Gemini Enterprise Agent Platform gemini-2.5-flash) synthesis on defended success turns
+	enrichTurnWithLiveAgentPlatformGemini(ctx, r, req, res)
 }
 
 func normalizeTurnResultProvenance(res *TurnResult) {
@@ -123,7 +123,7 @@ func normalizeTurnResultProvenance(res *TurnResult) {
 func (r *Runtime) GetSourcesStatus(_ context.Context) ([]SourceStatus, error) {
 	cfg := r.Config()
 
-	vertexLive := NewVertexGeminiConnector(r).Provenance() == ProvenanceLive
+	agentPlatformLive := NewAgentPlatformGeminiConnector(r).Provenance() == ProvenanceLive
 	modelArmorLive := NewModelArmorSDPConnector(r).Provenance() == ProvenanceLive
 	gcpObsLive := NewGCPObservabilityConnector(r).Provenance() == ProvenanceLive
 	registryLive := NewAgentRegistryConnector(r).Provenance() == ProvenanceLive
@@ -136,13 +136,13 @@ func (r *Runtime) GetSourcesStatus(_ context.Context) ([]SourceStatus, error) {
 
 	return []SourceStatus{
 		buildSourceStatus(
-			SourceVertexGemini,
-			"Vertex AI Gemini (ADK v2)",
+			SourceAgentPlatformGemini,
+			"Gemini on Agent Platform (ADK v2)",
 			BoundaryReasoningGuard,
-			vertexLive,
+			agentPlatformLive,
 			firstNonEmpty(cfg.GeminiEndpoint, "https://aiplatform.googleapis.com/v1 (gemini-2.5-flash)"),
 			"in-memory://adk-v2-fixture-orchestrator",
-			"Live ADK Go v2 llmagent reasoning on Vertex AI gemini-2.5-flash",
+			"Live ADK Go v2 llmagent reasoning on Gemini Enterprise Agent Platform (gemini-2.5-flash)",
 			"Deterministic ADK v2 scenario state machine fallback",
 		),
 		buildSourceStatus(

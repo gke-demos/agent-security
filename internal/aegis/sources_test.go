@@ -86,7 +86,7 @@ func TestGetSourcesStatus_FixtureVsLiveAndHTTPEndpoint(t *testing.T) {
 	}
 
 	wantOrder := []ExternalSourceID{
-		SourceVertexGemini,
+		SourceAgentPlatformGemini,
 		SourceModelArmorSDP,
 		SourceGCPObservability,
 		SourceAgentRegistry,
@@ -112,8 +112,8 @@ func TestGetSourcesStatus_FixtureVsLiveAndHTTPEndpoint(t *testing.T) {
 
 	// 2. Configured Runtime reports LIVE for all 8 External Sources and serves GET /api/sources/status
 	liveRT := NewRuntime(RuntimeConfig{
-		VertexLiveLLM:       true,
-		GeminiEndpoint:      "https://us-central1-aiplatform.googleapis.com",
+		AgentPlatformLiveLLM: true,
+		GeminiEndpoint:       "https://us-central1-aiplatform.googleapis.com",
 		ModelArmorEndpoint:  "https://modelarmor.us-central1.rep.googleapis.com",
 		DLPEndpoint:         "https://dlp.googleapis.com",
 		GCPProjectID:        "demo-sec-project",
@@ -170,7 +170,7 @@ func TestRuntimeConfigFromEnv(t *testing.T) {
 	t.Setenv("GOOGLE_CLOUD_PROJECT", "env-gcp-project")
 	t.Setenv("GOOGLE_CLOUD_LOCATION", "europe-west1")
 	t.Setenv("GKE_CLUSTER_NAME", "env-gke-cluster")
-	t.Setenv("VERTEX_LIVE_LLM", "true")
+	t.Setenv("AGENT_PLATFORM_LIVE_LLM", "true")
 	t.Setenv("GEMINI_ENDPOINT", "https://gemini.env.example")
 	t.Setenv("GITHUB_API_URL", "https://github.env.example")
 	t.Setenv("GITHUB_TARGET_REPO", "gke-demos/aegis-checkout-target")
@@ -200,7 +200,7 @@ func TestRuntimeConfigFromEnv(t *testing.T) {
 		cfg.GCPProjectID != "env-gcp-project" ||
 		cfg.GCPLocation != "europe-west1" ||
 		cfg.GKEClusterName != "env-gke-cluster" ||
-		!cfg.VertexLiveLLM ||
+		!cfg.AgentPlatformLiveLLM ||
 		cfg.GeminiEndpoint != "https://gemini.env.example" ||
 		cfg.GitHubAPIURL != "https://github.env.example" ||
 		cfg.GitHubTargetRepo != "gke-demos/aegis-checkout-target" ||

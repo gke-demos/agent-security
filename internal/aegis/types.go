@@ -71,14 +71,14 @@ const (
 type ExternalSourceID string
 
 const (
-	SourceVertexGemini     ExternalSourceID = "vertex_gemini"
-	SourceModelArmorSDP    ExternalSourceID = "model_armor_sdp"
-	SourceGCPObservability ExternalSourceID = "gcp_observability"
-	SourceAgentRegistry    ExternalSourceID = "agent_registry"
-	SourceGitHub           ExternalSourceID = "github"
-	SourceGoogleGmail      ExternalSourceID = "google_gmail"
-	SourceAtlassianJira    ExternalSourceID = "atlassian_jira"
-	SourceSubstrateSandbox ExternalSourceID = "substrate_sandbox"
+	SourceAgentPlatformGemini ExternalSourceID = "agent_platform_gemini"
+	SourceModelArmorSDP       ExternalSourceID = "model_armor_sdp"
+	SourceGCPObservability    ExternalSourceID = "gcp_observability"
+	SourceAgentRegistry       ExternalSourceID = "agent_registry"
+	SourceGitHub              ExternalSourceID = "github"
+	SourceGoogleGmail         ExternalSourceID = "google_gmail"
+	SourceAtlassianJira       ExternalSourceID = "atlassian_jira"
+	SourceSubstrateSandbox    ExternalSourceID = "substrate_sandbox"
 )
 
 // SourceStatus reports the connection mode and endpoint of an External Source.
@@ -296,7 +296,7 @@ type RuntimeConfig struct {
 	GCPProjectID               string
 	GCPLocation                string
 	GKEClusterName             string
-	VertexLiveLLM              bool
+	AgentPlatformLiveLLM       bool
 	GeminiEndpoint             string
 	GitHubAPIURL               string
 	GitHubTargetRepo           string

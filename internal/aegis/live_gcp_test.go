@@ -273,9 +273,9 @@ func TestLiveGCP_ObservabilityAndAgentRegistry_Scenario03And05(t *testing.T) {
 	}
 }
 
-func TestLiveGCP_ADKLLMAgent_VertexGeminiSynthesis_AndFallback(t *testing.T) {
+func TestLiveGCP_ADKLLMAgent_AgentPlatformGeminiSynthesis_AndFallback(t *testing.T) {
 	ctx := context.Background()
-	t.Setenv("GOOGLE_OAUTH_ACCESS_TOKEN", "adc-test-vertex-gemini-token-789")
+	t.Setenv("GOOGLE_OAUTH_ACCESS_TOKEN", "adc-test-agent-platform-gemini-token-789")
 
 	var (
 		geminiHits int
@@ -312,11 +312,11 @@ func TestLiveGCP_ADKLLMAgent_VertexGeminiSynthesis_AndFallback(t *testing.T) {
 	defer geminiSrv.Close()
 
 	rt := aegis.NewRuntime(aegis.RuntimeConfig{
-		VertexLiveLLM:  true,
-		GeminiEndpoint: geminiSrv.URL + "/v1/projects/demo-sec-proj/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent",
-		GCPProjectID:   "demo-sec-proj",
-		GCPLocation:    "us-central1",
-		HTTPClient:     geminiSrv.Client(),
+		AgentPlatformLiveLLM: true,
+		GeminiEndpoint:       geminiSrv.URL + "/v1/projects/demo-sec-proj/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent",
+		GCPProjectID:         "demo-sec-proj",
+		GCPLocation:          "us-central1",
+		HTTPClient:           geminiSrv.Client(),
 	})
 
 	// 1. Defended success turn runs ADK v2 llmagent over sanitized input and records ProvenanceLive
@@ -337,8 +337,8 @@ func TestLiveGCP_ADKLLMAgent_VertexGeminiSynthesis_AndFallback(t *testing.T) {
 	if geminiHits == 0 {
 		t.Fatalf("expected ADK v2 llmagent to query GeminiEndpoint, got 0 hits")
 	}
-	if geminiAuth != "Bearer adc-test-vertex-gemini-token-789" {
-		t.Errorf("Gemini Authorization = %q, want Bearer adc-test-vertex-gemini-token-789", geminiAuth)
+	if geminiAuth != "Bearer adc-test-agent-platform-gemini-token-789" {
+		t.Errorf("Gemini Authorization = %q, want Bearer adc-test-agent-platform-gemini-token-789", geminiAuth)
 	}
 	if strings.Contains(geminiBody, "123-45-6789") || strings.Contains(geminiBody, "AIzaSyD-CustomerLeakedKey999") {
 		t.Errorf("Gemini request body leaked raw PII/API key: %s", geminiBody)
@@ -389,16 +389,16 @@ func TestLiveGCP_ADKLLMAgent_VertexGeminiSynthesis_AndFallback(t *testing.T) {
 	defer offlineSrv.Close()
 
 	offlineRT := aegis.NewRuntime(aegis.RuntimeConfig{
-		VertexLiveLLM:  true,
-		GeminiEndpoint: offlineSrv.URL + "/v1/models/gemini-2.5-flash:generateContent",
-		HTTPClient:     offlineSrv.Client(),
+		AgentPlatformLiveLLM: true,
+		GeminiEndpoint:       offlineSrv.URL + "/v1/models/gemini-2.5-flash:generateContent",
+		HTTPClient:           offlineSrv.Client(),
 	})
 	fallbackRes, err := offlineRT.ExecuteTurn(ctx, aegis.TurnRequest{
 		SessionID:    "sess-offline-gemini",
 		Persona:      aegis.PersonaAlice,
 		ScenarioID:   aegis.Scenario01PromptInjectionAndPII,
 		Posture:      aegis.AllBluePosture(),
-		Prompt:       "Triage clean customer escalation when Vertex AI is unreachable.",
+		Prompt:       "Triage clean customer escalation when Gemini Enterprise Agent Platform is unreachable.",
 		CleanPIIOnly: true,
 	})
 	if err != nil {

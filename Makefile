@@ -22,7 +22,7 @@ setup-live:
 
 run-live: build
 	@set -a; [ -f .env.local ] && . ./.env.local; set +a; \
-	PORT=$(PORT) LIVE_GITHUB=true LIVE_SUBSTRATE=true VERTEX_LIVE_LLM=true ./bin/aegis-server
+	PORT=$(PORT) LIVE_GITHUB=true LIVE_SUBSTRATE=true AGENT_PLATFORM_LIVE_LLM=true ./bin/aegis-server
 
 deploy-gke:
 	KUBE_CONTEXT="$(KUBE_CONTEXT)" PROJECT_ID="$(PROJECT_ID)" REGION="$(REGION)" ./hack/deploy-gke.sh
