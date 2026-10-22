@@ -123,21 +123,6 @@ func executeA2ASandboxVerificationStep(
 	if req.Posture.SandboxEgressMITMEnabled {
 		// 1. Boundary 5: Attenuated A2A v2 Handoff (strips upstream 3LO credentials)
 		attenuatedParts, strippedCount := withoutCredentialParts(rawA2AParts)
-		trace = append(trace, BoundaryTraceEvent{
-			Order:     traceOrderStart,
-			Boundary:  BoundaryCrossAgentA2A,
-			Shield:    "Attenuated Delegation (A2A v2)",
-			Component: "adk/v2/server/adka2a/v2 (withoutCredentialParts)",
-			Action:    "DelegateToPeer(sandbox-remediator)",
-			Verdict:   VerdictAllowed,
-			Detail:    fmt.Sprintf("Stripped %d upstream 3LO credential part(s) via withoutCredentialParts before A2A handoff (%d safe text part forwarded)", strippedCount, len(attenuatedParts)),
-			Metadata: map[string]string{
-				"credentialsStripped": "true",
-				"strippedPartsCount":  fmt.Sprintf("%d", strippedCount),
-				"peerAgent":           "sandbox-remediator",
-			},
-			Timestamp: time.Now().UTC(),
-		})
 
 		// 2. Boundary 6: Agent Substrate v0.5.0 gVisor Actor + EgressPolicy + atenet Egress MITM
 		actor := substrateActorSpec{
@@ -150,6 +135,54 @@ func executeA2ASandboxVerificationStep(
 			AtenetMITMEnabled: true,
 		}
 
+		execReq := SandboxExecutionRequest{
+			APIVersion:        actor.APIVersion,
+			Kind:              actor.Kind,
+			SessionID:         req.SessionID,
+			Persona:           req.Persona,
+			TargetRepo:        firstNonEmpty(rt.Config().GitHubTargetRepo, "gke-demos/aegis-checkout-target"),
+			SandboxClass:      actor.SandboxClass,
+			PreferredFidelity: actor.PreferredFidelity,
+			ContainerEnv:      actor.ContainerEnv,
+			EgressAllowlist:   actor.AllowedEgress,
+			AtenetMITMEnabled: actor.AtenetMITMEnabled,
+			AttenuatedParts:   attenuatedParts,
+			Command:           []string{"go", "test", "-v", "./..."},
+		}
+
+		liveResp, liveWire, isLive := NewSubstrateSandboxConnector(rt).Execute(ctx, execReq)
+		stepProvenance := ProvenanceFixture
+		workerPool := "aegis-sandbox-workers"
+		sandboxConfig := "gvisor-default"
+		if isLive && liveResp != nil {
+			stepProvenance = ProvenanceLive
+			if liveResp.WorkerPool != "" {
+				workerPool = liveResp.WorkerPool
+			}
+			if liveResp.SandboxConfig != "" {
+				sandboxConfig = liveResp.SandboxConfig
+			}
+			wireRecords = append(wireRecords, liveWire...)
+		}
+
+		trace = append(trace, BoundaryTraceEvent{
+			Order:      traceOrderStart,
+			Boundary:   BoundaryCrossAgentA2A,
+			Shield:     "Attenuated Delegation (A2A v2)",
+			Component:  "adk/v2/server/adka2a/v2 (withoutCredentialParts)",
+			Action:     "DelegateToPeer(sandbox-remediator)",
+			Verdict:    VerdictAllowed,
+			Provenance: stepProvenance,
+			Detail:     fmt.Sprintf("Stripped %d upstream 3LO credential part(s) via withoutCredentialParts before A2A handoff (%d safe text part forwarded)", strippedCount, len(attenuatedParts)),
+			Metadata: map[string]string{
+				"credentialsStripped": "true",
+				"strippedPartsCount":  fmt.Sprintf("%d", strippedCount),
+				"peerAgent":           "sandbox-remediator",
+				"provenance":          string(stepProvenance),
+			},
+			Timestamp: time.Now().UTC(),
+		})
+
 		wireRecords = append(wireRecords,
 			OutboundWireRecord{
 				Provider:          ProviderGitHub,
@@ -159,6 +192,7 @@ func executeA2ASandboxVerificationStep(
 				AuthHeaderPresent: true,
 				AuthPrincipal:     "atenet-egress-mitm:github-installation-token",
 				StatusCode:        http.StatusOK,
+				Provenance:        stepProvenance,
 				Headers: map[string]string{
 					"X-Atenet-Egress-Mitm": "injected-out-of-sandbox",
 				},
@@ -171,6 +205,7 @@ func executeA2ASandboxVerificationStep(
 				AuthHeaderPresent: false,
 				AuthPrincipal:     "none (zero-env-secrets)",
 				StatusCode:        http.StatusForbidden,
+				Provenance:        stepProvenance,
 				Headers: map[string]string{
 					"X-Substrate-Egress-Policy": "DENIED",
 				},
@@ -178,13 +213,14 @@ func executeA2ASandboxVerificationStep(
 		)
 
 		trace = append(trace, BoundaryTraceEvent{
-			Order:     traceOrderStart + 1,
-			Boundary:  BoundarySandboxEgress,
-			Shield:    "Sandbox Egress MITM (Agent Substrate v0.5.0)",
-			Component: "ate.dev/v1alpha1 Actor (gvisor + atenet)",
-			Action:    "ExecuteUntrustedGoTest(checkout-service@v2.4)",
-			Verdict:   VerdictBlocked,
-			Detail:    "Executed in gVisor Actor (SNAPSHOT_FIDELITY_MEMORY) with 0 env secrets; atenet MITM injected GitHub token for api.github.com and EgressPolicy blocked init() exfiltration to https://evil.example.com/exfil",
+			Order:      traceOrderStart + 1,
+			Boundary:   BoundarySandboxEgress,
+			Shield:     "Sandbox Egress MITM (Agent Substrate v0.5.0)",
+			Component:  "ate.dev/v1alpha1 Actor (gvisor + atenet)",
+			Action:     "ExecuteUntrustedGoTest(checkout-service@v2.4)",
+			Verdict:    VerdictBlocked,
+			Provenance: stepProvenance,
+			Detail:     "Executed in gVisor Actor (SNAPSHOT_FIDELITY_MEMORY) with 0 env secrets; atenet MITM injected GitHub token for api.github.com and EgressPolicy blocked init() exfiltration to https://evil.example.com/exfil",
 			Metadata: map[string]string{
 				"apiVersion":          actor.APIVersion,
 				"sandboxClass":        actor.SandboxClass,
@@ -192,6 +228,9 @@ func executeA2ASandboxVerificationStep(
 				"containerEnvSecrets": fmt.Sprintf("%d", len(actor.ContainerEnv)),
 				"allowedEgress":       "api.github.com",
 				"blockedEgress":       "https://evil.example.com/exfil",
+				"workerPool":          workerPool,
+				"sandboxConfig":       sandboxConfig,
+				"provenance":          string(stepProvenance),
 			},
 			Timestamp: time.Now().UTC(),
 		})
@@ -284,6 +323,14 @@ func executeScenario04(ctx context.Context, rt *Runtime, req TurnRequest) (*Turn
 	}
 
 	if req.Posture.SandboxEgressMITMEnabled {
+		sandboxProvenance := string(ProvenanceFixture)
+		for _, ev := range trace {
+			if ev.Boundary == BoundarySandboxEgress && ev.Provenance == ProvenanceLive {
+				sandboxProvenance = string(ProvenanceLive)
+				break
+			}
+		}
+
 		card := A2UICard{
 			SurfaceID: "card-sandbox-s4-blue",
 			MimeType:  "application/json+a2ui",
@@ -294,6 +341,7 @@ func executeScenario04(ctx context.Context, rt *Runtime, req TurnRequest) (*Turn
 			Severity:  "SUCCESS",
 			Body:      "Triage Orchestrator stripped upstream 3LO tokens before A2A delegation. Sandbox Remediator ran go test inside an Agent Substrate v0.5.0 gVisor Actor with zero container env secrets, injected GitHub credentials out-of-sandbox via atenet Egress MITM, blocked init() exfiltration to evil.example.com, and screened the returned peer summary via Model Armor.",
 			Fields: map[string]string{
+				"Provenance":            sandboxProvenance,
 				"sandboxClass":          "gvisor",
 				"preferredFidelity":     "SNAPSHOT_FIDELITY_MEMORY",
 				"containerEnvSecrets":   "0",
