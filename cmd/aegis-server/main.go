@@ -13,11 +13,7 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
-	rt := aegis.NewRuntime(aegis.RuntimeConfig{
-		ModelArmorEndpoint: os.Getenv("MODEL_ARMOR_ENDPOINT"),
-		DLPEndpoint:        os.Getenv("DLP_ENDPOINT"),
-		AgentRegistryURL:   os.Getenv("AGENT_REGISTRY_URL"),
-	})
+	rt := aegis.NewRuntime(aegis.RuntimeConfigFromEnv())
 	srv := &http.Server{
 		Addr:    ":" + port,
 		Handler: aegis.NewHandler(rt),

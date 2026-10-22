@@ -101,6 +101,7 @@
     if (!modal) return;
     modal.hidden = false;
     modal.setAttribute("aria-hidden", "false");
+    loadSourcesStatus();
   }
 
   function closeDemoModal() {
@@ -463,6 +464,14 @@
     return { label: "Exploited (Shield Disabled)", cls: "outcome-exploited" };
   }
 
+  function buildProvenanceBadge(provenance) {
+    const prov = provenance === "LIVE" ? "LIVE" : "FIXTURE";
+    const badge = document.createElement("span");
+    badge.className = "provenance-badge provenance-" + prov;
+    badge.textContent = prov;
+    return badge;
+  }
+
   async function renderTurnInChat(userPromptText, turn) {
     if (!turn) return;
     updateReferenceContainers(turn);
@@ -555,12 +564,20 @@
         left.appendChild(labelSpan);
         left.appendChild(detailSpan);
 
+        const right = document.createElement("div");
+        right.className = "step-row-right";
+
+        const pBadge = buildProvenanceBadge(ev.provenance || "FIXTURE");
+
         const vBadge = document.createElement("span");
         vBadge.className = "b-verdict verdict-" + ev.verdict;
         vBadge.textContent = ev.verdict;
 
+        right.appendChild(pBadge);
+        right.appendChild(vBadge);
+
         stepRow.appendChild(left);
-        stepRow.appendChild(vBadge);
+        stepRow.appendChild(right);
         stepFeed.appendChild(stepRow);
 
         if (streamEl) streamEl.scrollTop = streamEl.scrollHeight;
@@ -628,12 +645,20 @@
       title.className = "trace-step-title";
       title.textContent = "#" + ev.order + " · " + ev.shield + " (" + ev.boundary + ")";
 
+      const badges = document.createElement("div");
+      badges.className = "trace-event-badges";
+
+      const pBadge = buildProvenanceBadge(ev.provenance || "FIXTURE");
+
       const vBadge = document.createElement("span");
       vBadge.className = "b-verdict verdict-" + ev.verdict;
       vBadge.textContent = ev.verdict;
 
+      badges.appendChild(pBadge);
+      badges.appendChild(vBadge);
+
       top.appendChild(title);
-      top.appendChild(vBadge);
+      top.appendChild(badges);
 
       const comp = document.createElement("div");
       comp.className = "trace-component";
@@ -769,6 +794,33 @@
     }
   }
 
+  async function loadSourcesStatus() {
+    const grid = document.getElementById("sources-status-grid");
+    if (!grid) return;
+    try {
+      const resp = await fetch("/api/sources/status");
+      if (!resp.ok) return;
+      const data = await resp.json();
+      grid.replaceChildren();
+      (data.sources || []).forEach(function (src) {
+        const chip = document.createElement("div");
+        chip.className = "source-status-chip";
+        chip.setAttribute("data-source-id", src.id || "");
+        if (src.detail) chip.title = src.detail;
+
+        const nameSpan = document.createElement("span");
+        nameSpan.className = "source-status-name";
+        nameSpan.textContent = src.name || src.id || "";
+
+        chip.appendChild(nameSpan);
+        chip.appendChild(buildProvenanceBadge(src.provenance || "FIXTURE"));
+        grid.appendChild(chip);
+      });
+    } catch (err) {
+      console.error("loadSourcesStatus failed:", err);
+    }
+  }
+
   async function loadScenariosAndInitialState() {
     try {
       const scenResp = await fetch("/api/scenarios");
@@ -785,6 +837,7 @@
         if (snap.posture) state.posture = snap.posture;
         if (snap.grantedProviders) state.grantedProviders = snap.grantedProviders;
       }
+      await loadSourcesStatus();
     } catch (err) {
       console.error("initial load failed:", err);
     }
