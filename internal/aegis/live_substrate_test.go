@@ -168,6 +168,17 @@ func TestLiveSubstrateKubectlBridge_InspectsClusterCRDsAndMarksProvenanceLive(t 
 				"spec": {"runtimeClassName": "gvisor"}
 			}`), nil
 		}
+		if strings.Contains(cmdStr, "get pods") {
+			return []byte(`{
+				"items": [{
+					"metadata": {"name": "aegis-remediator-pool-pod-0", "namespace": "aegis-system"},
+					"status": {"phase": "Running"}
+				}]
+			}`), nil
+		}
+		if strings.Contains(cmdStr, "exec -n aegis-system aegis-remediator-pool-pod-0") {
+			return []byte("PASS\nok  \tgithub.com/gke-demos/aegis-checkout-target\t0.014s\n"), nil
+		}
 		return []byte(`{}`), nil
 	}
 
@@ -292,7 +303,7 @@ func TestSetupLiveSourcesWizardAndMakefileTargets(t *testing.T) {
 		t.Fatalf("ReadFile Makefile: %v", err)
 	}
 	makefileContent := string(makefileBytes)
-	for _, target := range []string{"setup-live:", "./hack/setup-live-sources.sh", "run-live:", "LIVE_SUBSTRATE=true"} {
+	for _, target := range []string{"setup-live:", "./hack/setup-live-sources.sh", "run-live:", "LIVE_SUBSTRATE=true", "seed-live:", "./hack/seed-fixtures.sh --live"} {
 		if !strings.Contains(makefileContent, target) {
 			t.Errorf("Makefile missing %q", target)
 		}

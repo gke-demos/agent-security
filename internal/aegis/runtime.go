@@ -197,6 +197,7 @@ func (r *Runtime) ExecuteTurn(ctx context.Context, req TurnRequest) (*TurnResult
 			}
 		}
 	}
+	enrichTurnWithLiveGCP(ctx, r, req, res)
 	normalizeTurnResultProvenance(res)
 
 	r.UpdateSession(req.SessionID, func(s *SessionSnapshot) {
@@ -261,13 +262,14 @@ func (r *Runtime) executeScenario01(ctx context.Context, req TurnRequest) (*Turn
 	// Boundary 2: Model Armor Prompt Screen + Cloud SDP PII Redactor
 	if inspection.Blocked {
 		trace = append(trace, BoundaryTraceEvent{
-			Order:     2,
-			Boundary:  BoundaryReasoningGuard,
-			Shield:    "Prompt Screen + PII Redactor",
-			Component: "ModelArmor + CloudSDP",
-			Action:    "SanitizeToolOutput(gmail_message)",
-			Verdict:   VerdictBlocked,
-			Detail:    inspection.ThreatReason + " (PII also de-identified before logging)",
+			Order:      2,
+			Boundary:   BoundaryReasoningGuard,
+			Shield:     "Prompt Screen + PII Redactor",
+			Component:  "ModelArmor + CloudSDP",
+			Action:     "SanitizeToolOutput(gmail_message)",
+			Verdict:    VerdictBlocked,
+			Provenance: inspection.Provenance,
+			Detail:     inspection.ThreatReason + " (PII also de-identified before logging)",
 			Metadata: map[string]string{
 				"sdpMatches": stringsJoin(inspection.SDPMatchTypes),
 			},
@@ -306,25 +308,27 @@ func (r *Runtime) executeScenario01(ctx context.Context, req TurnRequest) (*Turn
 
 	if req.Posture.PIIRedactorEnabled && inspection.DeidentifiedInFlight {
 		trace = append(trace, BoundaryTraceEvent{
-			Order:     2,
-			Boundary:  BoundaryReasoningGuard,
-			Shield:    "PII Redactor (Cloud SDP)",
-			Component: "CloudSDP DeidentifyContent (IsSdpOnlyBlock=true)",
-			Action:    "DeidentifyToolOutput(gmail_message)",
-			Verdict:   VerdictRedacted,
-			Detail:    fmt.Sprintf("SDP-only match (%s): masked sensitive tokens in-flight and continued execution", stringsJoin(inspection.SDPMatchTypes)),
-			Timestamp: time.Now().UTC(),
+			Order:      2,
+			Boundary:   BoundaryReasoningGuard,
+			Shield:     "PII Redactor (Cloud SDP)",
+			Component:  "CloudSDP DeidentifyContent (IsSdpOnlyBlock=true)",
+			Action:     "DeidentifyToolOutput(gmail_message)",
+			Verdict:    VerdictRedacted,
+			Provenance: inspection.Provenance,
+			Detail:     fmt.Sprintf("SDP-only match (%s): masked sensitive tokens in-flight and continued execution", stringsJoin(inspection.SDPMatchTypes)),
+			Timestamp:  time.Now().UTC(),
 		})
 	} else {
 		trace = append(trace, BoundaryTraceEvent{
-			Order:     2,
-			Boundary:  BoundaryReasoningGuard,
-			Shield:    "Prompt Screen + PII Redactor",
-			Component: "ModelArmor + CloudSDP",
-			Action:    "SanitizeToolOutput(gmail_message)",
-			Verdict:   VerdictBypassedRed,
-			Detail:    "Prompt Screen and PII Redactor disabled in Red Mode: raw SSN, API key, and hidden prompt injection entered LLM context!",
-			Timestamp: time.Now().UTC(),
+			Order:      2,
+			Boundary:   BoundaryReasoningGuard,
+			Shield:     "Prompt Screen + PII Redactor",
+			Component:  "ModelArmor + CloudSDP",
+			Action:     "SanitizeToolOutput(gmail_message)",
+			Verdict:    VerdictBypassedRed,
+			Provenance: inspection.Provenance,
+			Detail:     "Prompt Screen and PII Redactor disabled in Red Mode: raw SSN, API key, and hidden prompt injection entered LLM context!",
+			Timestamp:  time.Now().UTC(),
 		})
 	}
 

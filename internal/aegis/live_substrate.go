@@ -81,6 +81,18 @@ func NewSubstrateSandboxConnector(rt *Runtime) *SubstrateSandboxConnector {
 	return &SubstrateSandboxConnector{rt: rt}
 }
 
+// Provenance returns ProvenanceLive when LiveSubstrate or SubstrateGatewayURL is configured.
+func (c *SubstrateSandboxConnector) Provenance() SourceProvenance {
+	if c == nil || c.rt == nil {
+		return ProvenanceFixture
+	}
+	cfg := c.rt.Config()
+	if cfg.LiveSubstrate || strings.TrimSpace(cfg.SubstrateGatewayURL) != "" {
+		return ProvenanceLive
+	}
+	return ProvenanceFixture
+}
+
 // Execute dispatches the attenuated SandboxExecutionRequest to SubstrateGatewayURL over HTTP POST,
 // or inspects the active GKE cluster via kubectl when LiveSubstrate is enabled.
 func (c *SubstrateSandboxConnector) Execute(
@@ -237,6 +249,31 @@ func (c *SubstrateSandboxConnector) verifyClusterViaKubectl(
 			"sandboxConfig": sandboxConfigName,
 			"bridgeMode":    "kubectl-ate-v1alpha1",
 		},
+	}
+
+	if podsOut, podsErr := runner(cmdCtx, "kubectl", "get", "pods", "-A", "-l", fmt.Sprintf("ate.dev/pool=%s", poolName), "-o", "json"); podsErr == nil && len(podsOut) > 0 {
+		var podList struct {
+			Items []struct {
+				Metadata struct {
+					Name      string `json:"name"`
+					Namespace string `json:"namespace"`
+				} `json:"metadata"`
+				Status struct {
+					Phase string `json:"phase"`
+				} `json:"status"`
+			} `json:"items"`
+		}
+		if json.Unmarshal(podsOut, &podList) == nil && len(podList.Items) > 0 && podList.Items[0].Metadata.Name != "" {
+			phase := strings.TrimSpace(podList.Items[0].Status.Phase)
+			if phase == "" || strings.EqualFold(phase, "Running") {
+				podName := podList.Items[0].Metadata.Name
+				podNS := firstNonEmpty(podList.Items[0].Metadata.Namespace, "aegis-system")
+				parsed.Metadata["sandboxPod"] = podName
+				if execOut, execErr := runner(cmdCtx, "kubectl", "exec", "-n", podNS, podName, "--", "go", "test", "./..."); execErr == nil && len(execOut) > 0 {
+					parsed.TestOutput = strings.TrimSpace(string(execOut))
+				}
+			}
+		}
 	}
 
 	wire := []OutboundWireRecord{

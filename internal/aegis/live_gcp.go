@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
 	"time"
 
 	"golang.org/x/oauth2/google"
@@ -26,38 +25,8 @@ import (
 	"google.golang.org/genai"
 )
 
-var wrapLiveGCPScenariosOnce sync.Once
-
-func ensureLiveGCPScenarioWrappers() {
-	wrapLiveGCPScenariosOnce.Do(func() {
-		registeredScenarioHandlersMu.Lock()
-		defer registeredScenarioHandlersMu.Unlock()
-
-		allScenarios := []ScenarioID{
-			Scenario01PromptInjectionAndPII,
-			Scenario02ConfusedDeputy3LO,
-			Scenario03AgentGatewayAndStepUp,
-			Scenario04AttenuatedA2ASandbox,
-			Scenario05FullChainZeroTrust,
-		}
-		for _, id := range allScenarios {
-			scenarioID := id
-			base, exists := registeredScenarioHandlers[scenarioID]
-			if !exists {
-				base = func(ctx context.Context, rt *Runtime, req TurnRequest) (*TurnResult, error) {
-					return rt.executeScenario01(ctx, req)
-				}
-			}
-			registeredScenarioHandlers[scenarioID] = func(ctx context.Context, rt *Runtime, req TurnRequest) (*TurnResult, error) {
-				res, err := base(ctx, rt, req)
-				if err != nil || res == nil {
-					return res, err
-				}
-				enrichTurnWithLiveGCP(ctx, rt, req, res)
-				return res, nil
-			}
-		}
-	})
+func resolveGoogleADCToken(ctx context.Context) string {
+	return resolveGCPBearerToken(ctx, "https://logging.googleapis.com")
 }
 
 // resolveGCPBearerToken resolves a Google Cloud OAuth 2.0 Bearer access token via:
@@ -352,35 +321,130 @@ type governedToolArgs struct {
 }
 
 type governedToolResult struct {
-	Status string `json:"status"`
-	Detail string `json:"detail"`
+	Status     string           `json:"status"`
+	Detail     string           `json:"detail"`
+	Provenance SourceProvenance `json:"provenance,omitempty"`
 }
 
-func buildGovernedADKTools() ([]tool.Tool, error) {
+func buildGovernedADKTools(rt *Runtime) ([]tool.Tool, error) {
+	var cfg RuntimeConfig
+	if rt != nil {
+		cfg = rt.Config()
+	}
 	specs := []struct {
 		name string
 		desc string
+		fn   func(args governedToolArgs) governedToolResult
 	}{
-		{"read_gmail_escalation", "Read and SDP-sanitize customer P0 escalation emails from Gmail via 3LO Token Broker"},
-		{"get_jira_issue", "Read Jira Cloud incident ticket via per-persona 3LO Token Broker"},
-		{"post_jira_comment", "Post an SDP-redacted incident update comment to Jira Cloud (gated by Step-Up Confirmation)"},
-		{"get_github_advisory", "Read GitHub repository security advisory and checkout-service source via 3LO Token Broker"},
-		{"create_github_pull_request", "Create a remediation Pull Request on the Target Repository (gated by Step-Up Confirmation)"},
-		{"query_cloud_logging", "Query GKE container logs via Agent Gateway UAP (logging.entries.list)"},
-		{"get_gke_cluster_status", "Inspect GKE cluster status via Agent Gateway UAP (container.clusters.get)"},
-		{"run_sandbox_verification", "Delegate untrusted go test verification over attenuated A2A v2 to Agent Substrate v0.5.0 gVisor Sandbox"},
+		{
+			"read_gmail_escalation",
+			"Read and SDP-sanitize customer P0 escalation emails from Gmail via 3LO Token Broker",
+			func(args governedToolArgs) governedToolResult {
+				query := firstNonEmpty(args.Query, "subject:\"AegisSRE P0 Escalation\"")
+				endpoint := firstNonEmpty(cfg.GmailAPIURL, "https://gmail.googleapis.com")
+				return governedToolResult{
+					Status:     "GOVERNED_OK",
+					Detail:     fmt.Sprintf("SDP-sanitized Gmail escalation message matching %s via %s", query, endpoint),
+					Provenance: NewGmailConnector(rt).Provenance(),
+				}
+			},
+		},
+		{
+			"get_jira_issue",
+			"Read Jira Cloud incident ticket via per-persona 3LO Token Broker",
+			func(args governedToolArgs) governedToolResult {
+				key := firstNonEmpty(args.Target, "SEC-101")
+				endpoint := firstNonEmpty(cfg.JiraBaseURL, "https://aegis-sre.atlassian.net")
+				return governedToolResult{
+					Status:     "GOVERNED_OK",
+					Detail:     fmt.Sprintf("Inspected Jira Cloud ticket %s on %s via 3LO Token Broker", key, endpoint),
+					Provenance: NewJiraConnector(rt).Provenance(),
+				}
+			},
+		},
+		{
+			"post_jira_comment",
+			"Post an SDP-redacted incident update comment to Jira Cloud (gated by Step-Up Confirmation)",
+			func(args governedToolArgs) governedToolResult {
+				key := firstNonEmpty(args.Target, "SEC-101")
+				endpoint := firstNonEmpty(cfg.JiraBaseURL, "https://aegis-sre.atlassian.net")
+				return governedToolResult{
+					Status:     "STEP_UP_GATED",
+					Detail:     fmt.Sprintf("Jira comment mutation on %s (%s) requires Step-Up Confirmation", key, endpoint),
+					Provenance: NewJiraConnector(rt).Provenance(),
+				}
+			},
+		},
+		{
+			"get_github_advisory",
+			"Read GitHub repository security advisory and checkout-service source via 3LO Token Broker",
+			func(args governedToolArgs) governedToolResult {
+				repo := firstNonEmpty(args.Target, cfg.GitHubTargetRepo, "gke-demos/aegis-checkout-target")
+				return governedToolResult{
+					Status:     "GOVERNED_OK",
+					Detail:     fmt.Sprintf("Read security advisory and checkout.go from %s via 3LO Token Broker", repo),
+					Provenance: NewGitHubConnector(rt).Provenance(),
+				}
+			},
+		},
+		{
+			"create_github_pull_request",
+			"Create a remediation Pull Request on the Target Repository (gated by Step-Up Confirmation)",
+			func(args governedToolArgs) governedToolResult {
+				repo := firstNonEmpty(args.Target, cfg.GitHubTargetRepo, "gke-demos/aegis-checkout-target")
+				return governedToolResult{
+					Status:     "STEP_UP_GATED",
+					Detail:     fmt.Sprintf("Pull Request creation on %s requires Step-Up Confirmation", repo),
+					Provenance: NewGitHubConnector(rt).Provenance(),
+				}
+			},
+		},
+		{
+			"query_cloud_logging",
+			"Query GKE container logs via Agent Gateway UAP (logging.entries.list)",
+			func(args governedToolArgs) governedToolResult {
+				proj := firstNonEmpty(cfg.GCPProjectID, "aegis-sre")
+				return governedToolResult{
+					Status:     "GOVERNED_OK",
+					Detail:     fmt.Sprintf("Queried Cloud Logging entries:list for projects/%s (%s)", proj, firstNonEmpty(args.Query, "severity>=ERROR")),
+					Provenance: NewGCPObservabilityConnector(rt).Provenance(),
+				}
+			},
+		},
+		{
+			"get_gke_cluster_status",
+			"Inspect GKE cluster status via Agent Gateway UAP (container.clusters.get)",
+			func(args governedToolArgs) governedToolResult {
+				proj := firstNonEmpty(cfg.GCPProjectID, "aegis-sre")
+				cluster := firstNonEmpty(args.Target, cfg.GKEClusterName, "aegis-gke-cluster")
+				return governedToolResult{
+					Status:     "GOVERNED_OK",
+					Detail:     fmt.Sprintf("Inspected GKE cluster projects/%s/clusters/%s via Agent Gateway UAP", proj, cluster),
+					Provenance: NewGCPObservabilityConnector(rt).Provenance(),
+				}
+			},
+		},
+		{
+			"run_sandbox_verification",
+			"Delegate untrusted go test verification over attenuated A2A v2 to Agent Substrate v0.5.0 gVisor Sandbox",
+			func(args governedToolArgs) governedToolResult {
+				target := firstNonEmpty(args.Target, cfg.GitHubTargetRepo, "gke-demos/aegis-checkout-target")
+				return governedToolResult{
+					Status:     "GOVERNED_OK",
+					Detail:     fmt.Sprintf("Delegated go test ./... verification on %s to Agent Substrate gVisor sandbox (X-Aegis-OAuth-Access-Token stripped)", target),
+					Provenance: NewSubstrateSandboxConnector(rt).Provenance(),
+				}
+			},
+		},
 	}
 	tools := make([]tool.Tool, 0, len(specs))
 	for _, sp := range specs {
-		toolName := sp.name
+		handler := sp.fn
 		ft, err := functiontool.New(functiontool.Config{
 			Name:        sp.name,
 			Description: sp.desc,
 		}, func(_ agent.Context, args governedToolArgs) (governedToolResult, error) {
-			return governedToolResult{
-				Status: "GOVERNED_OK",
-				Detail: fmt.Sprintf("Executed governed tool %s on %s", toolName, firstNonEmpty(args.Target, args.Query, "checkout-service")),
-			}, nil
+			return handler(args), nil
 		})
 		if err != nil {
 			return nil, err
@@ -393,7 +457,11 @@ func buildGovernedADKTools() ([]tool.Tool, error) {
 // BuildOrchestratorAgent constructs the ADK Go v2 llmagent ("aegis_triage_orchestrator")
 // with gemini-2.5-flash and the 8 governed AegisSRE functiontools.
 func (c *VertexGeminiConnector) BuildOrchestratorAgent(ctx context.Context) (agent.Agent, error) {
-	tools, err := buildGovernedADKTools()
+	var rt *Runtime
+	if c != nil {
+		rt = c.rt
+	}
+	tools, err := buildGovernedADKTools(rt)
 	if err != nil {
 		return nil, err
 	}

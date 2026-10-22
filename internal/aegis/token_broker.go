@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -62,21 +63,23 @@ func AuthInvocationFromContext(ctx context.Context) (AuthInvocation, bool) {
 // interfaces with a Persona-partitioned credential vault and dual-backend support
 // (Direct OAuth 2.0 3LO + Google Cloud IAM Connector / Agent Identity via adk/v2/auth/gcp).
 type TokenBroker struct {
-	rt        *Runtime
-	store     auth.CredentialStore
-	mu        sync.RWMutex
-	gcpClient *gcp.Client
-	revoked   map[string]bool
-	nonces    map[string]ConsentChallenge
+	rt               *Runtime
+	store            auth.CredentialStore
+	mu               sync.RWMutex
+	gcpClient        *gcp.Client
+	revoked          map[string]bool
+	nonFixtureGrants map[string]string
+	nonces           map[string]ConsentChallenge
 }
 
 // NewTokenBroker constructs a TokenBroker bound to rt.
 func NewTokenBroker(rt *Runtime) *TokenBroker {
 	b := &TokenBroker{
-		rt:      rt,
-		store:   auth.NewInMemoryCredentialStore(),
-		revoked: make(map[string]bool),
-		nonces:  make(map[string]ConsentChallenge),
+		rt:               rt,
+		store:            auth.NewInMemoryCredentialStore(),
+		revoked:          make(map[string]bool),
+		nonFixtureGrants: make(map[string]string),
+		nonces:           make(map[string]ConsentChallenge),
 	}
 	b.seedConfiguredTokens(context.Background(), "default-session")
 	return b
@@ -87,7 +90,7 @@ func (b *TokenBroker) seedConfiguredTokens(ctx context.Context, sessionID string
 		return
 	}
 	for _, persona := range []PersonaID{PersonaAlice, PersonaBob} {
-		for _, provider := range []ProviderID{ProviderGitHub, ProviderGoogleGmail, ProviderAtlassianJira} {
+		for _, provider := range []ProviderID{ProviderGitHub, ProviderGoogleGmail, ProviderAtlassianJira, ProviderGCPIAM} {
 			if tok := b.configuredPersonaToken(persona, provider); tok != "" {
 				scopes := defaultScopesForProvider(provider)
 				key := b.credentialKey(sessionID, persona, provider, scopes)
@@ -102,6 +105,12 @@ func (b *TokenBroker) configuredPersonaToken(persona PersonaID, provider Provide
 		return ""
 	}
 	cfg := b.rt.Config()
+	if provider == ProviderGCPIAM {
+		if strings.TrimSpace(cfg.GCPProjectID) != "" || parseBoolEnv(os.Getenv("LIVE_GCP")) {
+			return resolveGoogleADCToken(context.Background())
+		}
+		return ""
+	}
 	switch persona {
 	case PersonaAlice:
 		switch provider {
@@ -280,7 +289,13 @@ func (b *TokenBroker) Grant(ctx context.Context, req OAuthGrantRequest) *Session
 	}
 
 	b.mu.Lock()
-	delete(b.revoked, revocationSlot(sessionID, persona, provider))
+	slot := revocationSlot(sessionID, persona, provider)
+	delete(b.revoked, slot)
+	if !isFixture3LOToken(token) {
+		b.nonFixtureGrants[slot] = token
+	} else {
+		delete(b.nonFixtureGrants, slot)
+	}
 	b.mu.Unlock()
 
 	key := b.credentialKey(sessionID, persona, provider, scopes)
@@ -313,7 +328,9 @@ func (b *TokenBroker) Revoke(ctx context.Context, sessionID string, persona Pers
 	}
 
 	b.mu.Lock()
-	b.revoked[revocationSlot(sessionID, persona, provider)] = true
+	slot := revocationSlot(sessionID, persona, provider)
+	b.revoked[slot] = true
+	delete(b.nonFixtureGrants, slot)
 	b.mu.Unlock()
 
 	key := b.credentialKey(sessionID, persona, provider, scopes)
@@ -333,6 +350,30 @@ func (b *TokenBroker) Revoke(ctx context.Context, sessionID string, persona Pers
 		}
 		s.GrantedProviders[persona] = filtered
 	})
+}
+
+// HasNonFixtureGrant returns true when any active session holds a granted non-fixture 3LO token for provider.
+func (b *TokenBroker) HasNonFixtureGrant(provider ProviderID) bool {
+	if b == nil {
+		return false
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	suffix := fmt.Sprintf("|%d:%s", len(provider), provider)
+	for slot, tok := range b.nonFixtureGrants {
+		if strings.HasSuffix(slot, suffix) && !b.revoked[slot] && !isFixture3LOToken(tok) {
+			return true
+		}
+	}
+	return false
+}
+
+func isFixture3LOToken(token string) bool {
+	tok := strings.TrimSpace(token)
+	return tok == "" ||
+		strings.HasPrefix(tok, "3lo-alice-") ||
+		strings.HasPrefix(tok, "3lo-bob-") ||
+		tok == sharedRootServiceToken
 }
 
 func (b *TokenBroker) hasActiveGrant(sessionID string, persona PersonaID, provider ProviderID) bool {
@@ -480,7 +521,7 @@ func executeGmail3LOCheck(ctx context.Context, rt *Runtime, req TurnRequest, car
 				Detail:    fmt.Sprintf("Missing 3LO OAuth grant for persona %q on provider %q; emitted adk_request_credential ConsentChallenge", req.Persona, ProviderGoogleGmail),
 				Timestamp: time.Now().UTC(),
 			}
-			if isGmailLive(rt.Config()) {
+			if isGmailLive(rt) {
 				ev.Provenance = ProvenanceLive
 			}
 			card := buildConsentChallengeCard(cardSurfaceID, req.SessionID, req.Persona, ch)
@@ -499,7 +540,7 @@ func executeGmail3LOCheck(ctx context.Context, rt *Runtime, req TurnRequest, car
 		return nil, BoundaryTraceEvent{}, err
 	}
 
-	if isGmailLive(rt.Config()) {
+	if isGmailLive(rt) {
 		if liveRes, err := fetchLiveGmailEscalation(ctx, rt, req); err != nil {
 			return nil, BoundaryTraceEvent{}, err
 		} else if liveRes != nil && liveRes.Live {

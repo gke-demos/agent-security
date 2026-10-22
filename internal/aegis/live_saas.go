@@ -25,20 +25,97 @@ type liveGmailFetchResult struct {
 	Live        bool
 }
 
-func isGmailLive(cfg RuntimeConfig) bool {
-	return strings.TrimSpace(cfg.GmailAPIURL) != "" ||
-		strings.TrimSpace(cfg.AliceGmailToken) != "" ||
-		strings.TrimSpace(cfg.BobGmailToken) != ""
+// GitHubConnector manages live vs fixture interactions with GitHub REST API v3.
+type GitHubConnector struct {
+	rt *Runtime
 }
 
-func isGitHubLive(cfg RuntimeConfig) bool {
-	return strings.TrimSpace(cfg.GitHubAPIURL) != "" ||
+// NewGitHubConnector constructs a GitHubConnector bound to rt.
+func NewGitHubConnector(rt *Runtime) *GitHubConnector {
+	return &GitHubConnector{rt: rt}
+}
+
+// Provenance returns ProvenanceLive when a GitHub API URL override, persona token,
+// OAuth client ID+secret, or session-granted non-fixture 3LO token is present.
+func (c *GitHubConnector) Provenance() SourceProvenance {
+	if c == nil || c.rt == nil {
+		return ProvenanceFixture
+	}
+	cfg := c.rt.Config()
+	if strings.TrimSpace(cfg.GitHubAPIURL) != "" ||
 		strings.TrimSpace(cfg.AliceGitHubToken) != "" ||
-		strings.TrimSpace(cfg.BobGitHubToken) != ""
+		strings.TrimSpace(cfg.BobGitHubToken) != "" ||
+		(strings.TrimSpace(cfg.GitHubOAuthClientID) != "" && strings.TrimSpace(cfg.GitHubOAuthClientSecret) != "") ||
+		c.rt.TokenBroker().HasNonFixtureGrant(ProviderGitHub) {
+		return ProvenanceLive
+	}
+	return ProvenanceFixture
 }
 
-func isJiraLive(cfg RuntimeConfig) bool {
-	return strings.TrimSpace(cfg.JiraBaseURL) != ""
+// GmailConnector manages live vs fixture interactions with Google Workspace Gmail REST API v1.
+type GmailConnector struct {
+	rt *Runtime
+}
+
+// NewGmailConnector constructs a GmailConnector bound to rt.
+func NewGmailConnector(rt *Runtime) *GmailConnector {
+	return &GmailConnector{rt: rt}
+}
+
+// Provenance returns ProvenanceLive when a Gmail API URL override, persona token,
+// OAuth client ID+secret, or session-granted non-fixture 3LO token is present.
+func (c *GmailConnector) Provenance() SourceProvenance {
+	if c == nil || c.rt == nil {
+		return ProvenanceFixture
+	}
+	cfg := c.rt.Config()
+	if strings.TrimSpace(cfg.GmailAPIURL) != "" ||
+		strings.TrimSpace(cfg.AliceGmailToken) != "" ||
+		strings.TrimSpace(cfg.BobGmailToken) != "" ||
+		(strings.TrimSpace(cfg.GoogleOAuthClientID) != "" && strings.TrimSpace(cfg.GoogleOAuthClientSecret) != "") ||
+		c.rt.TokenBroker().HasNonFixtureGrant(ProviderGoogleGmail) {
+		return ProvenanceLive
+	}
+	return ProvenanceFixture
+}
+
+// JiraConnector manages live vs fixture interactions with Atlassian Jira Cloud REST API v3.
+type JiraConnector struct {
+	rt *Runtime
+}
+
+// NewJiraConnector constructs a JiraConnector bound to rt.
+func NewJiraConnector(rt *Runtime) *JiraConnector {
+	return &JiraConnector{rt: rt}
+}
+
+// Provenance returns ProvenanceLive when a Jira base URL override, persona token,
+// OAuth client ID+secret, or session-granted non-fixture 3LO token is present.
+func (c *JiraConnector) Provenance() SourceProvenance {
+	if c == nil || c.rt == nil {
+		return ProvenanceFixture
+	}
+	cfg := c.rt.Config()
+	if strings.TrimSpace(cfg.JiraBaseURL) != "" ||
+		strings.TrimSpace(cfg.AliceJiraToken) != "" ||
+		strings.TrimSpace(cfg.BobJiraToken) != "" ||
+		(strings.TrimSpace(cfg.JiraOAuthClientID) != "" && strings.TrimSpace(cfg.JiraOAuthClientSecret) != "") ||
+		c.rt.TokenBroker().HasNonFixtureGrant(ProviderAtlassianJira) {
+		return ProvenanceLive
+	}
+	return ProvenanceFixture
+}
+
+func isGmailLive(rt *Runtime) bool {
+	return NewGmailConnector(rt).Provenance() == ProvenanceLive
+}
+
+func isGitHubLive(rt *Runtime) bool {
+	return NewGitHubConnector(rt).Provenance() == ProvenanceLive
+}
+
+func isJiraLive(rt *Runtime) bool {
+	return NewJiraConnector(rt).Provenance() == ProvenanceLive
 }
 
 func liveBaseRoundTripper(cfg RuntimeConfig) http.RoundTripper {
@@ -186,6 +263,11 @@ func fetchLiveGmailEscalation(ctx context.Context, rt *Runtime, req TurnRequest)
 		return nil, err
 	}
 	defer listResp.Body.Close()
+	if listResp.StatusCode < 200 || listResp.StatusCode >= 300 {
+		if strings.TrimSpace(cfg.GmailAPIURL) == "" {
+			return nil, nil
+		}
+	}
 	listBytes, _ := io.ReadAll(io.LimitReader(listResp.Body, 1<<20))
 
 	msgID := "msg-p0-escalation"
@@ -319,6 +401,214 @@ func decodeGmailBase64(s string) string {
 	return s
 }
 
+type live3LOCallSpec struct {
+	Provider             ProviderID
+	ProviderLabel        string
+	Scopes               []string
+	Action               string
+	ResourceRef          string
+	TargetDisplay        string
+	AssistantResource    string
+	ConsentTargetDisplay string
+	BodyTemplate         string
+	TraceOrder           int
+	ConsentSurfaceID     string
+	ACLSurfaceID         string
+	ACLCardTitle         string
+	Treat404AsDenial     bool
+}
+
+func handleLive3LOErrorOrDenial(
+	req TurnRequest,
+	spec live3LOCallSpec,
+	trace []BoundaryTraceEvent,
+	wireRecords []OutboundWireRecord,
+	status int,
+	err error,
+) ([]BoundaryTraceEvent, []OutboundWireRecord, *TurnResult, error) {
+	if err != nil {
+		var consentErr *auth.ConsentRequiredError
+		if errors.As(err, &consentErr) {
+			ch := &ConsentChallenge{
+				Provider:    spec.Provider,
+				Persona:     req.Persona,
+				Scopes:      spec.Scopes,
+				AuthURI:     consentErr.AuthURI,
+				Nonce:       consentErr.Nonce,
+				ResourceRef: spec.ResourceRef,
+			}
+			trace = append(trace, BoundaryTraceEvent{
+				Order:      spec.TraceOrder,
+				Boundary:   BoundaryIdentity3LO,
+				Shield:     "Token Broker (3LO)",
+				Component:  "adk/v2/auth.Transport",
+				Action:     spec.Action,
+				Verdict:    VerdictChallenge,
+				Provenance: ProvenanceLive,
+				Detail:     fmt.Sprintf("Missing 3LO OAuth grant for persona %q on provider %q; emitted adk_request_credential ConsentChallenge", req.Persona, spec.Provider),
+				Timestamp:  time.Now().UTC(),
+			})
+			card := buildConsentChallengeCard(spec.ConsentSurfaceID, req.SessionID, req.Persona, ch)
+			return trace, wireRecords, &TurnResult{
+				SessionID:        req.SessionID,
+				Persona:          req.Persona,
+				ScenarioID:       req.ScenarioID,
+				Posture:          req.Posture,
+				Outcome:          OutcomeConsentRequired,
+				AssistantText:    fmt.Sprintf("Paused tool execution: %s requires per-user 3LO OAuth consent from %s before accessing %s.", spec.Provider, req.Persona, spec.ConsentTargetDisplay),
+				Cards:            []A2UICard{card},
+				BoundaryTrace:    trace,
+				ConsentChallenge: ch,
+				WireRecords:      wireRecords,
+			}, nil
+		}
+	}
+
+	isDenied := status == http.StatusForbidden || status == http.StatusUnauthorized || (spec.Treat404AsDenial && status == http.StatusNotFound)
+	if err != nil && !isDenied {
+		return nil, nil, nil, err
+	}
+
+	if isDenied {
+		trace = append(trace, BoundaryTraceEvent{
+			Order:      spec.TraceOrder,
+			Boundary:   BoundaryIdentity3LO,
+			Shield:     "Token Broker (3LO)",
+			Component:  "adk/v2/auth.Transport",
+			Action:     spec.Action,
+			Verdict:    VerdictBlocked,
+			Provenance: ProvenanceLive,
+			Detail:     fmt.Sprintf("Injected %s's scoped 3LO bearer token on the HTTP wire; %s denied access to %s with %d (Zero Confused Deputy)", req.Persona, spec.ProviderLabel, spec.ResourceRef, status),
+			Metadata: map[string]string{
+				"persona":    string(req.Persona),
+				"provider":   string(spec.Provider),
+				"httpStatus": fmt.Sprintf("%d", status),
+			},
+			Timestamp: time.Now().UTC(),
+		})
+		card := A2UICard{
+			SurfaceID: spec.ACLSurfaceID,
+			MimeType:  "application/json+a2ui",
+			Version:   "0.9",
+			Type:      CardAclDenial,
+			Title:     spec.ACLCardTitle,
+			Subtitle:  fmt.Sprintf("Boundary 3: Per-Persona 3LO Token Broker via auth.Transport (%s)", spec.ProviderLabel),
+			Severity:  "HIGH",
+			Body:      spec.BodyTemplate,
+			Fields: map[string]string{
+				"Active Persona":    string(req.Persona),
+				"Target Resource":   spec.TargetDisplay,
+				"Downstream Status": fmt.Sprintf("%d Forbidden", status),
+			},
+		}
+		return trace, wireRecords, &TurnResult{
+			SessionID:     req.SessionID,
+			Persona:       req.Persona,
+			ScenarioID:    req.ScenarioID,
+			Posture:       req.Posture,
+			Outcome:       OutcomeBlocked,
+			AssistantText: fmt.Sprintf("Access denied (%d): Persona %q is not authorized to read %s.", status, req.Persona, spec.AssistantResource),
+			Cards:         []A2UICard{card},
+			BoundaryTrace: trace,
+			WireRecords:   wireRecords,
+		}, nil
+	}
+
+	return trace, wireRecords, nil, nil
+}
+
+func fetchLiveGitHubRestrictedIssue(
+	ctx context.Context,
+	rt *Runtime,
+	req TurnRequest,
+	targetRepo string,
+	traceOrder int,
+	consentCardSurfaceID string,
+	aclCardSurfaceID string,
+	aclCardTitle string,
+	wireMu *sync.Mutex,
+	wireRecords *[]OutboundWireRecord,
+	trace []BoundaryTraceEvent,
+) ([]BoundaryTraceEvent, []OutboundWireRecord, *TurnResult, error) {
+	cfg := rt.Config()
+	var lastGHStatus int
+	ghClient := buildLiveRecordingClient(rt, ProviderGitHub, "github_get_security_advisory", wireMu, wireRecords, &lastGHStatus)
+	ghScopes := defaultScopesForProvider(ProviderGitHub)
+	ghCtx := WithAuthInvocation(ctx, AuthInvocation{
+		SessionID:             req.SessionID,
+		Persona:               req.Persona,
+		Provider:              ProviderGitHub,
+		Scopes:                ghScopes,
+		BypassBrokerRedMode:   !req.Posture.TokenBrokerEnabled,
+		RequireCold3LOConsent: req.RequireCold3LOConsent,
+	})
+	ghBase := strings.TrimRight(firstNonEmpty(cfg.GitHubAPIURL, "https://api.github.com"), "/")
+	issueURL := fmt.Sprintf("%s/repos/%s/issues/1", ghBase, targetRepo)
+	issueReq, err := http.NewRequestWithContext(ghCtx, http.MethodGet, issueURL, nil)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	issueResp, err := ghClient.Do(issueReq)
+	if issueResp != nil {
+		_ = issueResp.Body.Close()
+	}
+	ghStatus := lastGHStatus
+	if issueResp != nil {
+		ghStatus = issueResp.StatusCode
+	}
+
+	// If /issues/1 returned 404 for a non-Bob persona, also support falling back to /issues/101
+	if err == nil && ghStatus == http.StatusNotFound && req.Persona != PersonaBob {
+		altURL := fmt.Sprintf("%s/repos/%s/issues/101", ghBase, targetRepo)
+		if altReq, reqErr := http.NewRequestWithContext(ghCtx, http.MethodGet, altURL, nil); reqErr == nil {
+			if altResp, doErr := ghClient.Do(altReq); doErr == nil && altResp != nil {
+				_ = altResp.Body.Close()
+				ghStatus = altResp.StatusCode
+			} else if doErr != nil {
+				err = doErr
+			}
+		}
+	}
+
+	spec := live3LOCallSpec{
+		Provider:             ProviderGitHub,
+		ProviderLabel:        "LIVE GitHub",
+		Scopes:               ghScopes,
+		Action:               fmt.Sprintf("github_get_security_advisory(%s#1)", targetRepo),
+		ResourceRef:          targetRepo + "#1",
+		TargetDisplay:        fmt.Sprintf("%s/issues/1 (SEC-101)", targetRepo),
+		AssistantResource:    fmt.Sprintf("restricted GitHub issue %s#1", targetRepo),
+		ConsentTargetDisplay: targetRepo,
+		BodyTemplate:         fmt.Sprintf("Token Broker attached %s's personal 3LO OAuth credential onto the outbound GitHub request instead of the agent's shared identity. GitHub denied access to restricted advisory %s#1.", req.Persona, targetRepo),
+		TraceOrder:           traceOrder,
+		ConsentSurfaceID:     consentCardSurfaceID,
+		ACLSurfaceID:         aclCardSurfaceID,
+		ACLCardTitle:         aclCardTitle,
+		Treat404AsDenial:     req.Persona == PersonaBob,
+	}
+
+	var earlyExit *TurnResult
+	trace, *wireRecords, earlyExit, err = handleLive3LOErrorOrDenial(req, spec, trace, *wireRecords, ghStatus, err)
+	if err != nil || earlyExit != nil {
+		return trace, *wireRecords, earlyExit, err
+	}
+
+	// Also fetch /contents/checkout.go on live GitHub
+	contentsURL := fmt.Sprintf("%s/repos/%s/contents/checkout.go", ghBase, targetRepo)
+	contentsReq, err := http.NewRequestWithContext(ghCtx, http.MethodGet, contentsURL, nil)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	contentsResp, err := ghClient.Do(contentsReq)
+	if contentsResp != nil {
+		_ = contentsResp.Body.Close()
+	}
+	if err != nil && lastGHStatus != http.StatusUnauthorized && lastGHStatus != http.StatusForbidden && lastGHStatus != http.StatusNotFound {
+		return nil, nil, nil, err
+	}
+	return trace, *wireRecords, nil, nil
+}
+
 // executeJiraAndGitHub3LORoundTrip executes the hybrid live/fixture Boundary 3 Atlassian Jira + GitHub
 // 3LO HTTP round-trip via adk/v2/auth.Transport for SCENARIO-02 and SCENARIO-05.
 func executeJiraAndGitHub3LORoundTrip(
@@ -331,8 +621,8 @@ func executeJiraAndGitHub3LORoundTrip(
 	aclCardTitle string,
 ) ([]BoundaryTraceEvent, []OutboundWireRecord, *TurnResult, error) {
 	cfg := rt.Config()
-	jiraLive := isJiraLive(cfg)
-	githubLive := isGitHubLive(cfg)
+	jiraLive := isJiraLive(rt) && strings.TrimSpace(cfg.JiraBaseURL) != ""
+	githubLive := isGitHubLive(rt)
 
 	if !jiraLive && !githubLive {
 		return executeFixtureSecOps3LOTriageStep(ctx, rt, req, traceOrder, consentCardSurfaceID, aclCardSurfaceID, aclCardTitle)
@@ -367,94 +657,29 @@ func executeJiraAndGitHub3LORoundTrip(
 		if jiraResp != nil {
 			_ = jiraResp.Body.Close()
 		}
-		if err != nil {
-			var consentErr *auth.ConsentRequiredError
-			if errors.As(err, &consentErr) {
-				ch := &ConsentChallenge{
-					Provider:    ProviderAtlassianJira,
-					Persona:     req.Persona,
-					Scopes:      jiraScopes,
-					AuthURI:     consentErr.AuthURI,
-					Nonce:       consentErr.Nonce,
-					ResourceRef: issueKey,
-				}
-				trace = append(trace, BoundaryTraceEvent{
-					Order:      traceOrder,
-					Boundary:   BoundaryIdentity3LO,
-					Shield:     "Token Broker (3LO)",
-					Component:  "adk/v2/auth.Transport",
-					Action:     fmt.Sprintf("jira_get_issue(%s)", issueKey),
-					Verdict:    VerdictChallenge,
-					Provenance: ProvenanceLive,
-					Detail:     fmt.Sprintf("Missing 3LO OAuth grant for persona %q on provider %q; emitted adk_request_credential ConsentChallenge", req.Persona, ProviderAtlassianJira),
-					Timestamp:  time.Now().UTC(),
-				})
-				card := buildConsentChallengeCard(consentCardSurfaceID, req.SessionID, req.Persona, ch)
-				return trace, wireRecords, &TurnResult{
-					SessionID:        req.SessionID,
-					Persona:          req.Persona,
-					ScenarioID:       req.ScenarioID,
-					Posture:          req.Posture,
-					Outcome:          OutcomeConsentRequired,
-					AssistantText:    fmt.Sprintf("Paused tool execution: %s requires per-user 3LO OAuth consent from %s before accessing %s.", ProviderAtlassianJira, req.Persona, issueKey),
-					Cards:            []A2UICard{card},
-					BoundaryTrace:    trace,
-					ConsentChallenge: ch,
-					WireRecords:      wireRecords,
-				}, nil
-			}
-			if lastJiraStatus != http.StatusUnauthorized && lastJiraStatus != http.StatusForbidden {
-				return nil, nil, nil, err
-			}
-		}
-
 		status := lastJiraStatus
 		if jiraResp != nil {
 			status = jiraResp.StatusCode
 		}
-		if status == http.StatusForbidden || status == http.StatusUnauthorized {
-			trace = append(trace, BoundaryTraceEvent{
-				Order:      traceOrder,
-				Boundary:   BoundaryIdentity3LO,
-				Shield:     "Token Broker (3LO)",
-				Component:  "adk/v2/auth.Transport",
-				Action:     fmt.Sprintf("jira_get_issue(%s)", issueKey),
-				Verdict:    VerdictBlocked,
-				Provenance: ProvenanceLive,
-				Detail:     fmt.Sprintf("Injected %s's scoped 3LO bearer token on the HTTP wire; live Jira Cloud denied access to %s with %d (Zero Confused Deputy)", req.Persona, issueKey, status),
-				Metadata: map[string]string{
-					"persona":    string(req.Persona),
-					"provider":   string(ProviderAtlassianJira),
-					"httpStatus": fmt.Sprintf("%d", status),
-				},
-				Timestamp: time.Now().UTC(),
-			})
-			card := A2UICard{
-				SurfaceID: aclCardSurfaceID,
-				MimeType:  "application/json+a2ui",
-				Version:   "0.9",
-				Type:      CardAclDenial,
-				Title:     aclCardTitle,
-				Subtitle:  "Boundary 3: Per-Persona 3LO Token Broker via auth.Transport (LIVE Jira Cloud)",
-				Severity:  "HIGH",
-				Body:      fmt.Sprintf("Token Broker attached %s's personal 3LO OAuth credential onto the outbound Jira Cloud request. Jira enforced per-user ACLs and blocked access to restricted issue %s.", req.Persona, issueKey),
-				Fields: map[string]string{
-					"Active Persona":    fmt.Sprintf("%s", req.Persona),
-					"Target Resource":   fmt.Sprintf("Jira Issue %s", issueKey),
-					"Downstream Status": fmt.Sprintf("%d Forbidden", status),
-				},
-			}
-			return trace, wireRecords, &TurnResult{
-				SessionID:     req.SessionID,
-				Persona:       req.Persona,
-				ScenarioID:    req.ScenarioID,
-				Posture:       req.Posture,
-				Outcome:       OutcomeBlocked,
-				AssistantText: fmt.Sprintf("Access denied (%d): Persona %q is not authorized to read restricted SecOps Jira issue %s.", status, req.Persona, issueKey),
-				Cards:         []A2UICard{card},
-				BoundaryTrace: trace,
-				WireRecords:   wireRecords,
-			}, nil
+		jiraSpec := live3LOCallSpec{
+			Provider:             ProviderAtlassianJira,
+			ProviderLabel:        "LIVE Jira Cloud",
+			Scopes:               jiraScopes,
+			Action:               fmt.Sprintf("jira_get_issue(%s)", issueKey),
+			ResourceRef:          issueKey,
+			TargetDisplay:        fmt.Sprintf("Jira Issue %s", issueKey),
+			AssistantResource:    fmt.Sprintf("restricted SecOps Jira issue %s", issueKey),
+			ConsentTargetDisplay: issueKey,
+			BodyTemplate:         fmt.Sprintf("Token Broker attached %s's personal 3LO OAuth credential onto the outbound Jira Cloud request. Jira enforced per-user ACLs and blocked access to restricted issue %s.", req.Persona, issueKey),
+			TraceOrder:           traceOrder,
+			ConsentSurfaceID:     consentCardSurfaceID,
+			ACLSurfaceID:         aclCardSurfaceID,
+			ACLCardTitle:         aclCardTitle,
+		}
+		var earlyExit *TurnResult
+		trace, wireRecords, earlyExit, err = handleLive3LOErrorOrDenial(req, jiraSpec, trace, wireRecords, status, err)
+		if err != nil || earlyExit != nil {
+			return trace, wireRecords, earlyExit, err
 		}
 	} else {
 		// Jira is in fixture mode while GitHub is LIVE: keep fixture Jira record for Alice/Red mode
@@ -480,129 +705,23 @@ func executeJiraAndGitHub3LORoundTrip(
 
 	// 2. GitHub step (LIVE if GitHubAPIURL or Alice/Bob GitHub token is configured)
 	if githubLive {
-		var lastGHStatus int
-		ghClient := buildLiveRecordingClient(rt, ProviderGitHub, "github_get_security_advisory", &wireMu, &wireRecords, &lastGHStatus)
-		ghScopes := defaultScopesForProvider(ProviderGitHub)
-		ghCtx := WithAuthInvocation(ctx, AuthInvocation{
-			SessionID:             req.SessionID,
-			Persona:               req.Persona,
-			Provider:              ProviderGitHub,
-			Scopes:                ghScopes,
-			BypassBrokerRedMode:   !req.Posture.TokenBrokerEnabled,
-			RequireCold3LOConsent: req.RequireCold3LOConsent,
-		})
-		ghBase := strings.TrimRight(firstNonEmpty(cfg.GitHubAPIURL, "https://api.github.com"), "/")
-		issueURL := fmt.Sprintf("%s/repos/%s/issues/1", ghBase, targetRepo)
-		issueReq, err := http.NewRequestWithContext(ghCtx, http.MethodGet, issueURL, nil)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		issueResp, err := ghClient.Do(issueReq)
-		if issueResp != nil {
-			_ = issueResp.Body.Close()
-		}
-		if err != nil {
-			var consentErr *auth.ConsentRequiredError
-			if errors.As(err, &consentErr) {
-				ch := &ConsentChallenge{
-					Provider:    ProviderGitHub,
-					Persona:     req.Persona,
-					Scopes:      ghScopes,
-					AuthURI:     consentErr.AuthURI,
-					Nonce:       consentErr.Nonce,
-					ResourceRef: targetRepo + "#1",
-				}
-				trace = append(trace, BoundaryTraceEvent{
-					Order:      traceOrder,
-					Boundary:   BoundaryIdentity3LO,
-					Shield:     "Token Broker (3LO)",
-					Component:  "adk/v2/auth.Transport",
-					Action:     fmt.Sprintf("github_get_security_advisory(%s#1)", targetRepo),
-					Verdict:    VerdictChallenge,
-					Provenance: ProvenanceLive,
-					Detail:     fmt.Sprintf("Missing 3LO OAuth grant for persona %q on provider %q; emitted adk_request_credential ConsentChallenge", req.Persona, ProviderGitHub),
-					Timestamp:  time.Now().UTC(),
-				})
-				card := buildConsentChallengeCard(consentCardSurfaceID, req.SessionID, req.Persona, ch)
-				return trace, wireRecords, &TurnResult{
-					SessionID:        req.SessionID,
-					Persona:          req.Persona,
-					ScenarioID:       req.ScenarioID,
-					Posture:          req.Posture,
-					Outcome:          OutcomeConsentRequired,
-					AssistantText:    fmt.Sprintf("Paused tool execution: %s requires per-user 3LO OAuth consent from %s before accessing %s.", ProviderGitHub, req.Persona, targetRepo),
-					Cards:            []A2UICard{card},
-					BoundaryTrace:    trace,
-					ConsentChallenge: ch,
-					WireRecords:      wireRecords,
-				}, nil
-			}
-			if lastGHStatus != http.StatusUnauthorized && lastGHStatus != http.StatusForbidden {
-				return nil, nil, nil, err
-			}
-		}
-
-		ghStatus := lastGHStatus
-		if issueResp != nil {
-			ghStatus = issueResp.StatusCode
-		}
-		if ghStatus == http.StatusForbidden || ghStatus == http.StatusUnauthorized {
-			trace = append(trace, BoundaryTraceEvent{
-				Order:      traceOrder,
-				Boundary:   BoundaryIdentity3LO,
-				Shield:     "Token Broker (3LO)",
-				Component:  "adk/v2/auth.Transport",
-				Action:     fmt.Sprintf("github_get_security_advisory(%s#1)", targetRepo),
-				Verdict:    VerdictBlocked,
-				Provenance: ProvenanceLive,
-				Detail:     fmt.Sprintf("Injected %s's scoped 3LO bearer token on the HTTP wire; GitHub denied access to %s/issues/1 with %d (Zero Confused Deputy)", req.Persona, targetRepo, ghStatus),
-				Metadata: map[string]string{
-					"persona":    string(req.Persona),
-					"provider":   string(ProviderGitHub),
-					"httpStatus": fmt.Sprintf("%d", ghStatus),
-				},
-				Timestamp: time.Now().UTC(),
-			})
-			card := A2UICard{
-				SurfaceID: aclCardSurfaceID,
-				MimeType:  "application/json+a2ui",
-				Version:   "0.9",
-				Type:      CardAclDenial,
-				Title:     aclCardTitle,
-				Subtitle:  "Boundary 3: Per-Persona 3LO Token Broker via auth.Transport (LIVE GitHub)",
-				Severity:  "HIGH",
-				Body:      fmt.Sprintf("Token Broker attached %s's personal 3LO OAuth credential onto the outbound GitHub request instead of the agent's shared identity. GitHub denied access to restricted advisory %s#1.", req.Persona, targetRepo),
-				Fields: map[string]string{
-					"Active Persona":    fmt.Sprintf("%s", req.Persona),
-					"Target Resource":   fmt.Sprintf("%s/issues/1 (SEC-101)", targetRepo),
-					"Downstream Status": fmt.Sprintf("%d Forbidden", ghStatus),
-				},
-			}
-			return trace, wireRecords, &TurnResult{
-				SessionID:     req.SessionID,
-				Persona:       req.Persona,
-				ScenarioID:    req.ScenarioID,
-				Posture:       req.Posture,
-				Outcome:       OutcomeBlocked,
-				AssistantText: fmt.Sprintf("Access denied (%d): Persona %q is not authorized to read restricted GitHub issue %s#1.", ghStatus, req.Persona, targetRepo),
-				Cards:         []A2UICard{card},
-				BoundaryTrace: trace,
-				WireRecords:   wireRecords,
-			}, nil
-		}
-
-		// Also fetch /contents/checkout.go on live GitHub
-		contentsURL := fmt.Sprintf("%s/repos/%s/contents/checkout.go", ghBase, targetRepo)
-		contentsReq, err := http.NewRequestWithContext(ghCtx, http.MethodGet, contentsURL, nil)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		contentsResp, err := ghClient.Do(contentsReq)
-		if contentsResp != nil {
-			_ = contentsResp.Body.Close()
-		}
-		if err != nil && lastGHStatus != http.StatusUnauthorized && lastGHStatus != http.StatusForbidden {
-			return nil, nil, nil, err
+		var earlyExit *TurnResult
+		var err error
+		trace, wireRecords, earlyExit, err = fetchLiveGitHubRestrictedIssue(
+			ctx,
+			rt,
+			req,
+			targetRepo,
+			traceOrder,
+			consentCardSurfaceID,
+			aclCardSurfaceID,
+			aclCardTitle,
+			&wireMu,
+			&wireRecords,
+			trace,
+		)
+		if err != nil || earlyExit != nil {
+			return trace, wireRecords, earlyExit, err
 		}
 	} else {
 		// GitHub is in fixture mode while Jira was LIVE
@@ -683,9 +802,14 @@ func executeLiveGitHubPullRequest(
 		Scopes:    defaultScopesForProvider(ProviderGitHub),
 	})
 
+	headBranch := "untrusted/pr-fix-token-cache"
+	if createdBranch := prepareLiveGitHubRemediationBranch(ghCtx, client, ghBase, targetRepo); createdBranch != "" {
+		headBranch = createdBranch
+	}
+
 	prCreatePayload := map[string]string{
 		"title": "fix(checkout): guard nil RetryPolicy on v2.4 rollout",
-		"head":  "untrusted/pr-fix-token-cache",
+		"head":  headBranch,
 		"base":  "main",
 		"body":  "Automated zero-trust remediation PR approved via ADK Step-Up Confirmation (`adk_request_confirmation`).",
 	}
@@ -720,7 +844,7 @@ func executeLiveGitHubPullRequest(
 		if parts := strings.Split(targetRepo, "/"); len(parts) == 2 && parts[0] != "" {
 			owner = parts[0]
 		}
-		listURL := fmt.Sprintf("%s/repos/%s/pulls?head=%s:untrusted/pr-fix-token-cache&state=open", ghBase, targetRepo, owner)
+		listURL := fmt.Sprintf("%s/repos/%s/pulls?head=%s:%s&state=open", ghBase, targetRepo, owner, headBranch)
 		listReq, reqErr := http.NewRequestWithContext(ghCtx, http.MethodGet, listURL, nil)
 		if reqErr == nil {
 			if listResp, doErr := client.Do(listReq); doErr == nil && listResp != nil {
@@ -742,6 +866,97 @@ func executeLiveGitHubPullRequest(
 	return prHTMLURL, wireRecords, nil
 }
 
+func prepareLiveGitHubRemediationBranch(ctx context.Context, client *http.Client, ghBase, targetRepo string) string {
+	refURL := fmt.Sprintf("%s/repos/%s/git/ref/heads/main", ghBase, targetRepo)
+	refReq, err := http.NewRequestWithContext(ctx, http.MethodGet, refURL, nil)
+	if err != nil {
+		return ""
+	}
+	refResp, err := client.Do(refReq)
+	if err != nil || refResp == nil {
+		return ""
+	}
+	refBytes, _ := io.ReadAll(io.LimitReader(refResp.Body, 1<<20))
+	_ = refResp.Body.Close()
+	if refResp.StatusCode != http.StatusOK {
+		return ""
+	}
+
+	var refPayload struct {
+		Object struct {
+			SHA string `json:"sha"`
+		} `json:"object"`
+		SHA string `json:"sha"`
+	}
+	if err := json.Unmarshal(refBytes, &refPayload); err != nil {
+		return ""
+	}
+	baseSHA := firstNonEmpty(refPayload.Object.SHA, refPayload.SHA)
+	if baseSHA == "" {
+		return ""
+	}
+
+	branchName := fmt.Sprintf("fix/aegis-checkout-502-%d", time.Now().UTC().Unix())
+	createRefBody, _ := json.Marshal(map[string]string{
+		"ref": "refs/heads/" + branchName,
+		"sha": baseSHA,
+	})
+	refsURL := fmt.Sprintf("%s/repos/%s/git/refs", ghBase, targetRepo)
+	createRefReq, err := http.NewRequestWithContext(ctx, http.MethodPost, refsURL, bytes.NewReader(createRefBody))
+	if err != nil {
+		return ""
+	}
+	createRefReq.Header.Set("Content-Type", "application/json")
+	createRefResp, err := client.Do(createRefReq)
+	if err != nil || createRefResp == nil {
+		return ""
+	}
+	_ = createRefResp.Body.Close()
+	if createRefResp.StatusCode != http.StatusCreated && createRefResp.StatusCode != http.StatusOK && createRefResp.StatusCode != http.StatusUnprocessableEntity {
+		return ""
+	}
+
+	// Optional: check existing checkout.go SHA on the branch
+	var existingFileSHA string
+	contentsURL := fmt.Sprintf("%s/repos/%s/contents/checkout.go", ghBase, targetRepo)
+	if getFileReq, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, contentsURL+"?ref="+branchName, nil); reqErr == nil {
+		if getFileResp, doErr := client.Do(getFileReq); doErr == nil && getFileResp != nil {
+			fileBytes, _ := io.ReadAll(io.LimitReader(getFileResp.Body, 1<<20))
+			_ = getFileResp.Body.Close()
+			var fileObj struct {
+				SHA string `json:"sha"`
+			}
+			if json.Unmarshal(fileBytes, &fileObj) == nil {
+				existingFileSHA = strings.TrimSpace(fileObj.SHA)
+			}
+		}
+	}
+
+	putPayload := map[string]string{
+		"message": "fix(checkout): guard nil RetryPolicy on v2.4 rollout",
+		"content": base64.StdEncoding.EncodeToString([]byte("package checkout\n\n// Guard nil RetryPolicy on v2.4 rollout\n")),
+		"branch":  branchName,
+	}
+	if existingFileSHA != "" {
+		putPayload["sha"] = existingFileSHA
+	}
+	putBody, _ := json.Marshal(putPayload)
+	putReq, err := http.NewRequestWithContext(ctx, http.MethodPut, contentsURL, bytes.NewReader(putBody))
+	if err != nil {
+		return ""
+	}
+	putReq.Header.Set("Content-Type", "application/json")
+	putResp, err := client.Do(putReq)
+	if err != nil || putResp == nil {
+		return ""
+	}
+	_ = putResp.Body.Close()
+	if putResp.StatusCode != http.StatusOK && putResp.StatusCode != http.StatusCreated {
+		return ""
+	}
+	return branchName
+}
+
 // executeLiveJiraComment posts an SDP-sanitized incident comment to Jira Cloud via adk/v2/auth.Transport
 // when a Step-Up Confirmation is approved and JiraBaseURL is configured.
 func executeLiveJiraComment(
@@ -753,6 +968,9 @@ func executeLiveJiraComment(
 	lastTurn *TurnResult,
 ) ([]OutboundWireRecord, error) {
 	cfg := rt.Config()
+	if strings.TrimSpace(cfg.JiraBaseURL) == "" {
+		return nil, nil
+	}
 	issueKey := firstNonEmpty(cfg.JiraRestrictedKey, "SEC-101")
 	commentText := "Created remediation PR after Operator step-up approval."
 	if lastTurn != nil && strings.TrimSpace(lastTurn.OutboundCommentPreview) != "" {

@@ -222,10 +222,17 @@ write_env VERTEX_LIVE_LLM "true"
 stage "Google Cloud Model Armor & Cloud SDP (DLP)"
 say "Configure live Model Armor prompt screening and Cloud SDP in-flight de-identification."
 open_url "https://console.cloud.google.com/security/model-armor"
-step "Copy your Model Armor template sanitizeUserPrompt endpoint URL (or press Enter to keep local policy engine fallback)."
+note "Tip: run 'gcloud model-armor templates create aegis-prompt-screen --location=${GOOGLE_CLOUD_LOCATION}' or 'make seed-live' to provision the template automatically."
+step "Copy your Model Armor template sanitizeUserPrompt endpoint URL (or press Enter to auto-derive from GOOGLE_CLOUD_PROJECT)."
 ask MODEL_ARMOR_ENDPOINT "Model Armor Endpoint URL (optional):"
-step "Copy your Cloud SDP projects.content.deidentify endpoint URL (or press Enter for default)."
+if [[ -z "${MODEL_ARMOR_ENDPOINT:-}" && -n "${GOOGLE_CLOUD_PROJECT:-}" ]]; then
+  MODEL_ARMOR_ENDPOINT="https://modelarmor.${GOOGLE_CLOUD_LOCATION}.rep.googleapis.com/v1/projects/${GOOGLE_CLOUD_PROJECT}/locations/${GOOGLE_CLOUD_LOCATION}/templates/aegis-prompt-screen:sanitizeUserPrompt"
+fi
+step "Copy your Cloud SDP projects.content.deidentify endpoint URL (or press Enter to auto-derive from GOOGLE_CLOUD_PROJECT)."
 ask DLP_ENDPOINT "Cloud SDP / DLP Endpoint URL (optional):"
+if [[ -z "${DLP_ENDPOINT:-}" && -n "${GOOGLE_CLOUD_PROJECT:-}" ]]; then
+  DLP_ENDPOINT="https://dlp.googleapis.com/v2/projects/${GOOGLE_CLOUD_PROJECT}/locations/global/content:deidentify"
+fi
 [[ -n "${MODEL_ARMOR_ENDPOINT:-}" ]] && write_env MODEL_ARMOR_ENDPOINT "$MODEL_ARMOR_ENDPOINT"
 [[ -n "${DLP_ENDPOINT:-}" ]] && write_env DLP_ENDPOINT "$DLP_ENDPOINT"
 

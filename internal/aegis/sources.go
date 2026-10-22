@@ -94,21 +94,11 @@ func enrichTurnWithLiveGCP(ctx context.Context, r *Runtime, req TurnRequest, res
 	if r == nil || res == nil {
 		return
 	}
-	cfg := r.Config()
 
-	// 1. Model Armor + Cloud SDP provenance on BoundaryReasoningGuard trace events
-	if strings.TrimSpace(cfg.ModelArmorEndpoint) != "" || strings.TrimSpace(cfg.DLPEndpoint) != "" {
-		for i := range res.BoundaryTrace {
-			if res.BoundaryTrace[i].Boundary == BoundaryReasoningGuard {
-				res.BoundaryTrace[i].Provenance = ProvenanceLive
-			}
-		}
-	}
-
-	// 2. Live Agent Registry + GCP Observability (Cloud Logging & GKE) for SCENARIO-03 and SCENARIO-05
+	// 1. Live Agent Registry + GCP Observability (Cloud Logging & GKE) for SCENARIO-03 and SCENARIO-05
 	enrichTurnWithLiveGCPObservabilityAndRegistry(ctx, r, req, res)
 
-	// 3. Live ADK Go v2 llmagent (Vertex AI Gemini gemini-2.5-flash) synthesis on defended success turns
+	// 2. Live ADK Go v2 llmagent (Vertex AI Gemini gemini-2.5-flash) synthesis on defended success turns
 	enrichTurnWithLiveVertexGemini(ctx, r, req, res)
 }
 
@@ -133,23 +123,14 @@ func normalizeTurnResultProvenance(res *TurnResult) {
 func (r *Runtime) GetSourcesStatus(_ context.Context) ([]SourceStatus, error) {
 	cfg := r.Config()
 
-	vertexLive := cfg.VertexLiveLLM || strings.TrimSpace(cfg.GeminiEndpoint) != ""
-	modelArmorLive := strings.TrimSpace(cfg.ModelArmorEndpoint) != "" || strings.TrimSpace(cfg.DLPEndpoint) != ""
-	gcpObsLive := strings.TrimSpace(cfg.GCPProjectID) != "" && strings.TrimSpace(cfg.GKEClusterName) != ""
-	registryLive := strings.TrimSpace(cfg.AgentRegistryURL) != ""
-	githubLive := strings.TrimSpace(cfg.GitHubAPIURL) != "" ||
-		strings.TrimSpace(cfg.AliceGitHubToken) != "" ||
-		strings.TrimSpace(cfg.BobGitHubToken) != "" ||
-		(strings.TrimSpace(cfg.GitHubOAuthClientID) != "" && strings.TrimSpace(cfg.GitHubOAuthClientSecret) != "")
-	gmailLive := strings.TrimSpace(cfg.GmailAPIURL) != "" ||
-		strings.TrimSpace(cfg.AliceGmailToken) != "" ||
-		strings.TrimSpace(cfg.BobGmailToken) != "" ||
-		(strings.TrimSpace(cfg.GoogleOAuthClientID) != "" && strings.TrimSpace(cfg.GoogleOAuthClientSecret) != "")
-	jiraLive := strings.TrimSpace(cfg.JiraBaseURL) != "" &&
-		(strings.TrimSpace(cfg.AliceJiraToken) != "" ||
-			strings.TrimSpace(cfg.BobJiraToken) != "" ||
-			(strings.TrimSpace(cfg.JiraOAuthClientID) != "" && strings.TrimSpace(cfg.JiraOAuthClientSecret) != ""))
-	substrateLive := cfg.LiveSubstrate || strings.TrimSpace(cfg.SubstrateGatewayURL) != ""
+	vertexLive := NewVertexGeminiConnector(r).Provenance() == ProvenanceLive
+	modelArmorLive := NewModelArmorSDPConnector(r).Provenance() == ProvenanceLive
+	gcpObsLive := NewGCPObservabilityConnector(r).Provenance() == ProvenanceLive
+	registryLive := NewAgentRegistryConnector(r).Provenance() == ProvenanceLive
+	githubLive := isGitHubLive(r)
+	gmailLive := isGmailLive(r)
+	jiraLive := isJiraLive(r)
+	substrateLive := NewSubstrateSandboxConnector(r).Provenance() == ProvenanceLive
 
 	targetRepo := firstNonEmpty(cfg.GitHubTargetRepo, "gke-demos/aegis-checkout-target")
 

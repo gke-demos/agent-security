@@ -242,6 +242,7 @@ func TestTokenBroker_EnvPersonaSeedingAndLiveOAuthCallbackExchange(t *testing.T)
 	defer oauthSrv.Close()
 
 	rt := NewRuntime(RuntimeConfig{
+		GCPProjectID:               "demo-sec-project",
 		AliceGitHubToken:           "gho_seeded_alice_111",
 		BobGitHubToken:             "gho_seeded_bob_222",
 		AliceGmailToken:            "gmail_tok_seeded_alice_333",
@@ -254,7 +255,9 @@ func TestTokenBroker_EnvPersonaSeedingAndLiveOAuthCallbackExchange(t *testing.T)
 		HTTPClient:                 oauthSrv.Client(),
 	})
 
-	// 1. Verify pre-seeded Alice and Bob tokens are returned by TokenBroker.Credential
+	// 1. Verify pre-seeded Alice and Bob tokens (including ProviderGCPIAM ADC token) are returned by TokenBroker.Credential
+	t.Setenv("GOOGLE_OAUTH_ACCESS_TOKEN", "adc-seeded-gcp-iam-token-999")
+	rt = NewRuntime(rt.Config())
 	cases := []struct {
 		persona   PersonaID
 		provider  ProviderID
@@ -266,6 +269,7 @@ func TestTokenBroker_EnvPersonaSeedingAndLiveOAuthCallbackExchange(t *testing.T)
 		{PersonaBob, ProviderGoogleGmail, "Bearer gmail_tok_seeded_bob_444"},
 		{PersonaAlice, ProviderAtlassianJira, "Bearer jira_seeded_alice_555"},
 		{PersonaBob, ProviderAtlassianJira, "Bearer jira_seeded_bob_666"},
+		{PersonaAlice, ProviderGCPIAM, "Bearer adc-seeded-gcp-iam-token-999"},
 	}
 
 	for _, tc := range cases {
@@ -317,5 +321,26 @@ func TestTokenBroker_EnvPersonaSeedingAndLiveOAuthCallbackExchange(t *testing.T)
 	_ = exchangedCred.Apply(hdr)
 	if got := hdr.Get("Authorization"); got != "Bearer gho_exchanged_live_oauth_token_777" {
 		t.Errorf("Exchanged Authorization = %q, want %q", got, "Bearer gho_exchanged_live_oauth_token_777")
+	}
+
+	// 3. Verify dynamic non-fixture 3LO grant promotes SaaS connector and GetSourcesStatus to ProvenanceLive even without Alice*Token env vars
+	dynamicRT := NewRuntime(RuntimeConfig{})
+	dynamicRT.TokenBroker().Grant(ctx, OAuthGrantRequest{
+		SessionID: "dyn-sess",
+		Persona:   PersonaAlice,
+		Provider:  ProviderGitHub,
+		Token:     "gho_dynamic_live_grant_token",
+	})
+	if got := NewGitHubConnector(dynamicRT).Provenance(); got != ProvenanceLive {
+		t.Errorf("NewGitHubConnector(dynamicRT).Provenance() = %q, want %q", got, ProvenanceLive)
+	}
+	dynStatuses, err := dynamicRT.GetSourcesStatus(ctx)
+	if err != nil {
+		t.Fatalf("dynamicRT.GetSourcesStatus error: %v", err)
+	}
+	for _, st := range dynStatuses {
+		if st.ID == SourceGitHub && st.Provenance != ProvenanceLive {
+			t.Errorf("dynamicRT SourceGitHub Provenance = %q, want %q", st.Provenance, ProvenanceLive)
+		}
 	}
 }

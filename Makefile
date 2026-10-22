@@ -3,7 +3,7 @@ PROJECT_ID ?= $(shell gcloud config get-value project 2>/dev/null)
 REGION ?= us-central1
 PORT ?= 8080
 
-.PHONY: test evals build run setup-live run-live deploy-gke seed-fixtures register-gemini-enterprise
+.PHONY: test evals build run setup-live run-live deploy-gke seed-fixtures seed-live register-gemini-enterprise
 
 test:
 	go test -race ./...
@@ -29,6 +29,9 @@ deploy-gke:
 
 seed-fixtures:
 	KUBE_CONTEXT="$(KUBE_CONTEXT)" ./hack/seed-fixtures.sh
+
+seed-live:
+	KUBE_CONTEXT="$(KUBE_CONTEXT)" ./hack/seed-fixtures.sh --live
 
 register-gemini-enterprise:
 	PROJECT_ID="$(PROJECT_ID)" REGION="$(REGION)" ./hack/register-gemini-enterprise.sh

@@ -97,6 +97,34 @@ func TestLiveGCP_ModelArmorAndCloudSDP_ADCAndProvenance(t *testing.T) {
 	if fixtureInsp.Provenance != aegis.ProvenanceFixture && !strings.EqualFold(string(fixtureInsp.Provenance), string(aegis.ProvenanceFixture)) {
 		t.Errorf("fixture inspection.Provenance = %q, want %q", fixtureInsp.Provenance, aegis.ProvenanceFixture)
 	}
+
+	// Verify configured but unreachable ModelArmorEndpoint falls back to local policy engine and records ProvenanceFixture on BoundaryReasoningGuard trace events
+	failSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "upstream unavailable", http.StatusBadGateway)
+	}))
+	defer failSrv.Close()
+
+	fallbackGuardRT := aegis.NewRuntime(aegis.RuntimeConfig{
+		ModelArmorEndpoint: failSrv.URL + "/v1/projects/demo-proj/locations/us-central1/templates/aegis:sanitizeUserPrompt",
+		DLPEndpoint:        failSrv.URL + "/v2/projects/demo-proj/content:deidentify",
+		HTTPClient:         failSrv.Client(),
+	})
+	fallbackTurnRes, err := fallbackGuardRT.ExecuteTurn(ctx, aegis.TurnRequest{
+		SessionID:    "sess-fallback-ma-sdp",
+		Persona:      aegis.PersonaAlice,
+		ScenarioID:   aegis.Scenario01PromptInjectionAndPII,
+		Posture:      aegis.AllBluePosture(),
+		Prompt:       "Triage customer escalation when Model Armor endpoint returns 502.",
+		CleanPIIOnly: true,
+	})
+	if err != nil {
+		t.Fatalf("fallbackGuardRT.ExecuteTurn() error = %v", err)
+	}
+	for _, ev := range fallbackTurnRes.BoundaryTrace {
+		if ev.Boundary == aegis.BoundaryReasoningGuard && ev.Provenance != aegis.ProvenanceFixture {
+			t.Errorf("unreachable ModelArmor/DLP fallback BoundaryReasoningGuard trace Provenance = %q, want %q", ev.Provenance, aegis.ProvenanceFixture)
+		}
+	}
 }
 
 func TestLiveGCP_ObservabilityAndAgentRegistry_Scenario03And05(t *testing.T) {

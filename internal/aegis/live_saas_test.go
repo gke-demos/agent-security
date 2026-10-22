@@ -182,8 +182,13 @@ func TestLiveGitHubConnector_Scenario02AndStepUpPR(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 
-		// Enforce Persona ACLs on live GitHub: Alice token allowed, Bob token denied with 403 Forbidden
+		// Enforce Persona ACLs on live GitHub: Alice token allowed, Bob token denied with 404 Not Found on private issues or 403 Forbidden
 		if strings.Contains(authHeader, "gho_bob_restricted") {
+			if strings.HasPrefix(r.URL.Path, "/repos/gke-demos/aegis-checkout-target/issues/") {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+				return
+			}
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = w.Write([]byte(`{"message":"Resource not accessible by contractor token"}`))
 			return
@@ -202,10 +207,19 @@ func TestLiveGitHubConnector_Scenario02AndStepUpPR(t *testing.T) {
 				"state": "open",
 				"html_url": "https://github.com/gke-demos/aegis-checkout-target/issues/1"
 			}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/gke-demos/aegis-checkout-target/git/ref/heads/main":
+			_, _ = w.Write([]byte(`{"ref":"refs/heads/main","object":{"sha":"abc123def456"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/gke-demos/aegis-checkout-target/git/refs":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"ref":"refs/heads/fix/aegis-checkout-502"}`))
+		case r.Method == http.MethodPut && r.URL.Path == "/repos/gke-demos/aegis-checkout-target/contents/checkout.go":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"content":{"path":"checkout.go"}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/gke-demos/aegis-checkout-target/contents/checkout.go":
 			_, _ = w.Write([]byte(`{
 				"name": "checkout.go",
 				"path": "checkout.go",
+				"sha": "sha999checkout",
 				"encoding": "base64",
 				"content": "cGFja2FnZSBjaGVja291dAo="
 			}`))

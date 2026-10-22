@@ -135,12 +135,13 @@ func executeA2ASandboxVerificationStep(
 			AtenetMITMEnabled: true,
 		}
 
+		targetRepo := firstNonEmpty(rt.Config().GitHubTargetRepo, "gke-demos/aegis-checkout-target")
 		execReq := SandboxExecutionRequest{
 			APIVersion:        actor.APIVersion,
 			Kind:              actor.Kind,
 			SessionID:         req.SessionID,
 			Persona:           req.Persona,
-			TargetRepo:        firstNonEmpty(rt.Config().GitHubTargetRepo, "gke-demos/aegis-checkout-target"),
+			TargetRepo:        targetRepo,
 			SandboxClass:      actor.SandboxClass,
 			PreferredFidelity: actor.PreferredFidelity,
 			ContainerEnv:      actor.ContainerEnv,
@@ -188,7 +189,7 @@ func executeA2ASandboxVerificationStep(
 				Provider:          ProviderGitHub,
 				ToolName:          "substrate.atenet.github_archive_fetch",
 				Method:            http.MethodGet,
-				URL:               "https://api.github.com/repos/acme-corp/checkout-service/tarball/v2.4",
+				URL:               fmt.Sprintf("https://api.github.com/repos/%s/tarball/main", targetRepo),
 				AuthHeaderPresent: true,
 				AuthPrincipal:     "atenet-egress-mitm:github-installation-token",
 				StatusCode:        http.StatusOK,
@@ -285,13 +286,14 @@ func executeA2ASandboxVerificationStep(
 	if req.Posture.PromptScreenEnabled {
 		cleanPeerSummary = "PASS: TestCheckoutHotfix (0.04s) [poisoned peer instruction stripped by Model Armor SanitizeUserPrompt]"
 		trace = append(trace, BoundaryTraceEvent{
-			Order:     traceOrderStart + 2,
-			Boundary:  BoundaryReasoningGuard,
-			Shield:    "Prompt Screen (Peer A2A Response Guard)",
-			Component: "ModelArmor SanitizeUserPrompt",
-			Action:    "SanitizeUserPrompt(a2a_peer_response)",
-			Verdict:   VerdictAllowed,
-			Detail:    fmt.Sprintf("Screened inbound Sandbox Remediator A2A response (%s) and neutralized embedded prompt injection before updating Triage Orchestrator state", peerInspection.ThreatReason),
+			Order:      traceOrderStart + 2,
+			Boundary:   BoundaryReasoningGuard,
+			Shield:     "Prompt Screen (Peer A2A Response Guard)",
+			Component:  "ModelArmor SanitizeUserPrompt",
+			Action:     "SanitizeUserPrompt(a2a_peer_response)",
+			Verdict:    VerdictAllowed,
+			Provenance: peerInspection.Provenance,
+			Detail:     fmt.Sprintf("Screened inbound Sandbox Remediator A2A response (%s) and neutralized embedded prompt injection before updating Triage Orchestrator state", peerInspection.ThreatReason),
 			Metadata: map[string]string{
 				"peerThreatIntercepted": fmt.Sprintf("%v", peerInspection.Blocked),
 				"threatReason":          peerInspection.ThreatReason,
@@ -300,14 +302,15 @@ func executeA2ASandboxVerificationStep(
 		})
 	} else {
 		trace = append(trace, BoundaryTraceEvent{
-			Order:     traceOrderStart + 2,
-			Boundary:  BoundaryReasoningGuard,
-			Shield:    "Prompt Screen (Peer A2A Response Guard)",
-			Component: "ModelArmor SanitizeUserPrompt",
-			Action:    "SanitizeUserPrompt(a2a_peer_response)",
-			Verdict:   VerdictBypassedRed,
-			Detail:    "Prompt Screen disabled: inbound Sandbox Remediator A2A response was not screened by Model Armor SanitizeUserPrompt",
-			Timestamp: time.Now().UTC(),
+			Order:      traceOrderStart + 2,
+			Boundary:   BoundaryReasoningGuard,
+			Shield:     "Prompt Screen (Peer A2A Response Guard)",
+			Component:  "ModelArmor SanitizeUserPrompt",
+			Action:     "SanitizeUserPrompt(a2a_peer_response)",
+			Verdict:    VerdictBypassedRed,
+			Provenance: peerInspection.Provenance,
+			Detail:     "Prompt Screen disabled: inbound Sandbox Remediator A2A response was not screened by Model Armor SanitizeUserPrompt",
+			Timestamp:  time.Now().UTC(),
 		})
 	}
 

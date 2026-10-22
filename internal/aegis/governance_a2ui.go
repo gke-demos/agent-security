@@ -676,9 +676,8 @@ func (r *Runtime) ResolveConfirmation(ctx context.Context, req ConfirmationResol
 
 	var res *TurnResult
 	if req.Confirmed {
-		cfg := r.Config()
-		githubLive := isGitHubLive(cfg)
-		jiraLive := isJiraLive(cfg)
+		githubLive := isGitHubLive(r)
+		jiraLive := isJiraLive(r)
 
 		prURL := "https://github.com/gke-demos/checkout-service/pull/42"
 		b1Provenance := ProvenanceFixture

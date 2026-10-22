@@ -58,7 +58,6 @@ type ContentGuard struct {
 // NewContentGuard creates a ContentGuard backed by optional live Model Armor / DLP endpoints
 // and the deterministic policy engine.
 func NewContentGuard(cfg RuntimeConfig) *ContentGuard {
-	ensureLiveGCPScenarioWrappers()
 	hc := cfg.HTTPClient
 	if hc == nil {
 		hc = &http.Client{Timeout: 5 * time.Second}
