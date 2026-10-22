@@ -480,6 +480,9 @@ func executeGmail3LOCheck(ctx context.Context, rt *Runtime, req TurnRequest, car
 				Detail:    fmt.Sprintf("Missing 3LO OAuth grant for persona %q on provider %q; emitted adk_request_credential ConsentChallenge", req.Persona, ProviderGoogleGmail),
 				Timestamp: time.Now().UTC(),
 			}
+			if isGmailLive(rt.Config()) {
+				ev.Provenance = ProvenanceLive
+			}
 			card := buildConsentChallengeCard(cardSurfaceID, req.SessionID, req.Persona, ch)
 			return &TurnResult{
 				SessionID:        req.SessionID,
@@ -494,6 +497,14 @@ func executeGmail3LOCheck(ctx context.Context, rt *Runtime, req TurnRequest, car
 			}, ev, nil
 		}
 		return nil, BoundaryTraceEvent{}, err
+	}
+
+	if isGmailLive(rt.Config()) {
+		if liveRes, err := fetchLiveGmailEscalation(ctx, rt, req); err != nil {
+			return nil, BoundaryTraceEvent{}, err
+		} else if liveRes != nil && liveRes.Live {
+			return nil, liveRes.TraceEvent, nil
+		}
 	}
 
 	return nil, BoundaryTraceEvent{
@@ -511,6 +522,18 @@ func executeGmail3LOCheck(ctx context.Context, rt *Runtime, req TurnRequest, car
 // executeSecOps3LOTriageStep performs the shared Boundary 3 Atlassian Jira (SEC-101) + GitHub (GHSA-sec-101)
 // 3LO HTTP round-trip via adk/v2/auth.Transport for both SCENARIO-02 and SCENARIO-05.
 func executeSecOps3LOTriageStep(
+	ctx context.Context,
+	rt *Runtime,
+	req TurnRequest,
+	traceOrder int,
+	consentCardSurfaceID string,
+	aclCardSurfaceID string,
+	aclCardTitle string,
+) ([]BoundaryTraceEvent, []OutboundWireRecord, *TurnResult, error) {
+	return executeJiraAndGitHub3LORoundTrip(ctx, rt, req, traceOrder, consentCardSurfaceID, aclCardSurfaceID, aclCardTitle)
+}
+
+func executeFixtureSecOps3LOTriageStep(
 	ctx context.Context,
 	rt *Runtime,
 	req TurnRequest,
