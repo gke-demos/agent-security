@@ -20,6 +20,18 @@ _Avoid_: Main agent, root bot, controller
 A peer agent that executes untrusted repository code and verification suites inside an isolated kernel and network boundary.
 _Avoid_: Worker bot, code runner, child process
 
+**External Source**:
+An upstream SaaS or cloud system (`Gmail`, `Jira Cloud`, `GitHub`, `Cloud Logging`, `GKE`, `Model Armor`, `Agent Registry`, or `Agent Substrate`) queried or mutated by an agent through a governed tool boundary.
+_Avoid_: Plugin, backend, third-party integration
+
+**Source Provenance**:
+An indicator attached to each tool call and boundary trace event (`LIVE` or `FIXTURE`) that records whether the operation executed against a real external cloud/SaaS endpoint or the deterministic local fixture fallback.
+_Avoid_: Mock flag, simulation status, test mode
+
+**Target Repository**:
+A dedicated companion GitHub repository (`gke-demos/aegis-checkout-target`) containing the sample `checkout-service` codebase, seeded issues, and verification tests against which the agent reads advisories and opens remediation pull requests.
+_Avoid_: Dummy repo, test repo, scratch branch
+
 ## Security Boundaries & Defenses
 
 **Security Shield**:
