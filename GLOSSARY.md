@@ -12,6 +12,10 @@ _Avoid_: End user, client, caller
 A named Operator identity profile (`Alice` for privileged SecOps, `Bob` for restricted contractor) with an isolated third-party 3LO credential partition used to verify per-user authorization boundaries and prevent Confused Deputy access.
 _Avoid_: Mock user, role account, test user
 
+**Persona Session Partition**:
+An isolated conversation history key scoped to both a session identifier and the active Persona (`SessionID:Persona`) when the Token Broker shield is enabled, preventing cross-persona context leakage of prior tool outputs across multi-turn follow-ups.
+_Avoid_: Shared transcript, global chat memory
+
 **Triage Orchestrator**:
 The primary reasoning agent that coordinates incident analysis across mail, issue trackers, and observability tools on behalf of the invoking Operator.
 _Avoid_: Main agent, root bot, controller
