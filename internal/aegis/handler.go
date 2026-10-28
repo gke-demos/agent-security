@@ -75,9 +75,9 @@ func NewHandler(rt *Runtime) http.Handler {
 		}
 	})
 
-	registeredScenarioHandlersMu.RLock()
+	registeredHTTPRoutesMu.RLock()
 	routes := append([]HTTPRouteRegistrar(nil), registeredHTTPRoutes...)
-	registeredScenarioHandlersMu.RUnlock()
+	registeredHTTPRoutesMu.RUnlock()
 	for _, register := range routes {
 		register(mux, rt)
 	}

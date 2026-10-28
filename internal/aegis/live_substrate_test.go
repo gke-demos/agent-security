@@ -370,19 +370,61 @@ func TestRemediatorActorHandler_HealthzAndSandboxExecute(t *testing.T) {
 		t.Errorf("Expected wire records from gateway execution")
 	}
 
-	// 3. Verify leaked secret in os.Environ sets zeroEnvSecretsVerified = "false"
+	// 3. Verify leaked secret in os.Environ sets zeroEnvSecretsVerified = "false" and Verified = false
 	t.Run("DetectsLeakedEnvSecret", func(t *testing.T) {
-		t.Setenv("ALICE_GITHUB_TOKEN", "gho_leaked_in_env")
-		leakedResp, _, ok := aegis.NewSubstrateSandboxConnector(rt).Execute(context.Background(), aegis.SandboxExecutionRequest{
+		for _, envKey := range []string{"ALICE_GITHUB_TOKEN", "GITHUB_PAT", "GOOGLE_APPLICATION_CREDENTIALS", "JIRA_API_TOKEN"} {
+			t.Run(envKey, func(t *testing.T) {
+				t.Setenv(envKey, "secret_leaked_in_env")
+				leakedResp, _, ok := aegis.NewSubstrateSandboxConnector(rt).Execute(context.Background(), aegis.SandboxExecutionRequest{
+					SandboxClass:      "gvisor",
+					PreferredFidelity: "SNAPSHOT_FIDELITY_MEMORY",
+					AtenetMITMEnabled: true,
+				})
+				if !ok || leakedResp == nil {
+					t.Fatalf("Execute failed")
+				}
+				if leakedResp.Metadata["zeroEnvSecretsVerified"] != "false" {
+					t.Errorf("Metadata[zeroEnvSecretsVerified] = %q, want false when %s is present", leakedResp.Metadata["zeroEnvSecretsVerified"], envKey)
+				}
+				if leakedResp.Verified {
+					t.Errorf("leakedResp.Verified = true, want false when %s is present", envKey)
+				}
+			})
+		}
+	})
+
+	// 4. Verify when evil.example.com/exfil returns 200 OK despite AtenetMITMEnabled=true, Verified is false and BlockedEgress is empty
+	t.Run("DetectsUnblockedEvilEgress", func(t *testing.T) {
+		unblockedProbeClient := &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+					Request:    req,
+				}, nil
+			}),
+		}
+		unblockedSrv := httptest.NewServer(aegis.NewRemediatorActorHandler(unblockedProbeClient))
+		defer unblockedSrv.Close()
+
+		unblockedRT := aegis.NewRuntime(aegis.RuntimeConfig{
+			SubstrateGatewayURL: unblockedSrv.URL + "/sandbox/execute",
+			HTTPClient:          unblockedSrv.Client(),
+		})
+		unblockedResp, _, ok := aegis.NewSubstrateSandboxConnector(unblockedRT).Execute(context.Background(), aegis.SandboxExecutionRequest{
 			SandboxClass:      "gvisor",
 			PreferredFidelity: "SNAPSHOT_FIDELITY_MEMORY",
 			AtenetMITMEnabled: true,
 		})
-		if !ok || leakedResp == nil {
+		if !ok || unblockedResp == nil {
 			t.Fatalf("Execute failed")
 		}
-		if leakedResp.Metadata["zeroEnvSecretsVerified"] != "false" {
-			t.Errorf("Metadata[zeroEnvSecretsVerified] = %q, want false when ALICE_GITHUB_TOKEN is present", leakedResp.Metadata["zeroEnvSecretsVerified"])
+		if unblockedResp.Verified {
+			t.Errorf("unblockedResp.Verified = true, want false when evil.example.com returns 200 OK")
+		}
+		if unblockedResp.BlockedEgress != "" {
+			t.Errorf("unblockedResp.BlockedEgress = %q, want empty string when evil.example.com is not blocked", unblockedResp.BlockedEgress)
 		}
 	})
 }

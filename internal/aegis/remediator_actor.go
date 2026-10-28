@@ -38,26 +38,7 @@ func NewRemediatorActorHandler(probeClient *http.Client) http.Handler {
 		}
 
 		// 1. Inspect os.Environ() to verify zero sensitive 3LO/API credential env vars exist in guest.
-		zeroEnvSecrets := true
-		for _, kv := range os.Environ() {
-			parts := strings.SplitN(kv, "=", 2)
-			key := strings.TrimSpace(parts[0])
-			val := ""
-			if len(parts) > 1 {
-				val = strings.TrimSpace(parts[1])
-			}
-			if val == "" {
-				continue
-			}
-			if strings.HasPrefix(key, "ALICE_") ||
-				strings.HasPrefix(key, "BOB_") ||
-				key == "GITHUB_TOKEN" ||
-				strings.HasPrefix(key, "GOOGLE_OAUTH_") ||
-				strings.HasPrefix(key, "JIRA_") {
-				zeroEnvSecrets = false
-				break
-			}
-		}
+		zeroEnvSecrets := !hasLeakedCredentialEnvVars(os.Environ())
 
 		// 2. Read /proc/version (falling back to runtime.GOOS/GOARCH if unreadable).
 		kernelSig := runtime.GOOS + "/" + runtime.GOARCH
@@ -89,9 +70,10 @@ func NewRemediatorActorHandler(probeClient *http.Client) http.Handler {
 
 		sandboxClass := firstNonEmpty(execReq.SandboxClass, "gvisor")
 		preferredFidelity := firstNonEmpty(execReq.PreferredFidelity, "SNAPSHOT_FIDELITY_MEMORY")
+		evilBlocked := execReq.AtenetMITMEnabled && !strings.HasPrefix(evilStatus, "http:2")
 
 		resp := SandboxExecutionResponse{
-			Verified:          true,
+			Verified:          zeroEnvSecrets && (!execReq.AtenetMITMEnabled || evilBlocked),
 			SandboxClass:      sandboxClass,
 			PreferredFidelity: preferredFidelity,
 			WorkerPool:        "aegis-remediator-pool",
@@ -106,7 +88,9 @@ func NewRemediatorActorHandler(probeClient *http.Client) http.Handler {
 		}
 
 		if execReq.AtenetMITMEnabled {
-			resp.BlockedEgress = "https://evil.example.com/exfil"
+			if evilBlocked {
+				resp.BlockedEgress = "https://evil.example.com/exfil"
+			}
 			resp.AllowedEgress = "api.github.com"
 			resp.TestOutput = "=== RUN   TestNullCurrencyGuard\n--- PASS: TestNullCurrencyGuard (0.01s)\nPASS\nok  \tgithub.com/gke-demos/aegis-checkout-target\t0.014s [gVisor Actor Verified]"
 		}
@@ -115,4 +99,29 @@ func NewRemediatorActorHandler(probeClient *http.Client) http.Handler {
 	})
 
 	return mux
+}
+
+func hasLeakedCredentialEnvVars(environ []string) bool {
+	for _, kv := range environ {
+		parts := strings.SplitN(kv, "=", 2)
+		key := strings.TrimSpace(parts[0])
+		val := ""
+		if len(parts) > 1 {
+			val = strings.TrimSpace(parts[1])
+		}
+		if val == "" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(key, "ALICE_"), strings.HasPrefix(key, "BOB_"):
+			return true
+		case strings.HasPrefix(key, "GITHUB_") && key != "GITHUB_TARGET_REPO" && key != "GITHUB_API_URL" && key != "GITHUB_ACTIONS":
+			return true
+		case strings.HasPrefix(key, "GOOGLE_") && key != "GOOGLE_CLOUD_PROJECT" && key != "GOOGLE_CLOUD_LOCATION" && key != "GOOGLE_AUTH_WEBAUTHN_PLUGIN":
+			return true
+		case strings.HasPrefix(key, "JIRA_") && key != "JIRA_BASE_URL":
+			return true
+		}
+	}
+	return false
 }

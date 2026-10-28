@@ -787,3 +787,40 @@ func TestLiveEndToEndArenaEvals(t *testing.T) {
 	}
 }
 
+func TestValidateTurnStreamInvariants_WireRecordAndTextDelta(t *testing.T) {
+	t.Run("RejectsMissingWireRecordFrame", func(t *testing.T) {
+		events := []aegis.TurnStreamEvent{
+			{Type: aegis.TurnStreamEventStarted},
+			{Type: aegis.TurnStreamEventTextDelta, Delta: "Hello"},
+			{
+				Type: aegis.TurnStreamEventCompleted,
+				Turn: &aegis.TurnResult{
+					AssistantText: "Hello",
+					WireRecords: []aegis.OutboundWireRecord{
+						{Provider: aegis.ProviderGCPIAM, ToolName: "logging.entries.list"},
+					},
+				},
+			},
+		}
+		if _, err := evals.ValidateTurnStreamInvariants(events); err == nil {
+			t.Fatalf("ValidateTurnStreamInvariants() succeeded, want error when wire.record count != len(Turn.WireRecords)")
+		}
+	})
+
+	t.Run("RejectsMissingTextDeltaWhenAssistantTextNonEmpty", func(t *testing.T) {
+		events := []aegis.TurnStreamEvent{
+			{Type: aegis.TurnStreamEventStarted},
+			{
+				Type: aegis.TurnStreamEventCompleted,
+				Turn: &aegis.TurnResult{
+					AssistantText: "Non-empty assistant response",
+				},
+			},
+		}
+		if _, err := evals.ValidateTurnStreamInvariants(events); err == nil {
+			t.Fatalf("ValidateTurnStreamInvariants() succeeded, want error when text.delta count == 0 and AssistantText is non-empty")
+		}
+	})
+}
+
+

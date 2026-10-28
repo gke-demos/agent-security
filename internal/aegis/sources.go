@@ -141,18 +141,6 @@ func resolveGitHubCLIToken() string {
 	return strings.TrimSpace(string(out))
 }
 
-func enrichTurnWithLiveGCP(ctx context.Context, r *Runtime, req TurnRequest, res *TurnResult) {
-	if r == nil || res == nil {
-		return
-	}
-
-	// 1. Live Agent Registry + GCP Observability (Cloud Logging & GKE) for SCENARIO-03 and SCENARIO-05
-	enrichTurnWithLiveGCPObservabilityAndRegistry(ctx, r, req, res)
-
-	// 2. Live ADK Go v2 llmagent (Gemini Enterprise Agent Platform gemini-2.5-flash) synthesis on defended success turns
-	enrichTurnWithLiveAgentPlatformGemini(ctx, r, req, res)
-}
-
 func normalizeTurnResultProvenance(res *TurnResult) {
 	if res == nil {
 		return

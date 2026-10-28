@@ -140,10 +140,6 @@ func (tc *adkActiveTurnContext) addStep(ev BoundaryTraceEvent) {
 	})
 }
 
-func (tc *adkActiveTurnContext) appendTrace(ev BoundaryTraceEvent) {
-	tc.addStep(ev)
-}
-
 func (tc *adkActiveTurnContext) addWire(records ...OutboundWireRecord) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
@@ -161,10 +157,6 @@ func (tc *adkActiveTurnContext) addWire(records ...OutboundWireRecord) {
 			Record:     &recCopy,
 		})
 	}
-}
-
-func (tc *adkActiveTurnContext) appendWire(records ...OutboundWireRecord) {
-	tc.addWire(records...)
 }
 
 func (tc *adkActiveTurnContext) addCard(cards ...A2UICard) {
@@ -263,6 +255,21 @@ func (r *Runtime) registerActiveTurn(adkSessionID string, tc *adkActiveTurnConte
 	reg.byADKSession[adkSessionID] = tc
 }
 
+type activeTurnContextKey struct{}
+
+func withActiveTurnContext(ctx context.Context, tc *adkActiveTurnContext) context.Context {
+	return context.WithValue(ctx, activeTurnContextKey{}, tc)
+}
+
+func (r *Runtime) lookupActiveTurnFromContext(ctx context.Context, adkSessionID string) *adkActiveTurnContext {
+	if ctx != nil {
+		if tc, ok := ctx.Value(activeTurnContextKey{}).(*adkActiveTurnContext); ok && tc != nil {
+			return tc
+		}
+	}
+	return r.lookupActiveTurn(adkSessionID)
+}
+
 func (r *Runtime) lookupActiveTurn(adkSessionID string) *adkActiveTurnContext {
 	reg := r.turnRegistry()
 	reg.mu.RLock()
@@ -358,7 +365,7 @@ func (r *Runtime) initADKRunner() {
 	}
 	r.governedToolNames = names
 
-	llmModel := newDualTriageOrchestratorLLM(r)
+	llmModel := NewGeminiAgentPlatformLLM(r)
 	triageAgent, err := llmagent.New(llmagent.Config{
 		Name:        adkOrchestratorName,
 		Description: "AegisSRE Zero-Trust Incident Triage Orchestrator on GKE",
@@ -406,7 +413,7 @@ func buildUnifiedGovernedADKTools(r *Runtime) ([]tool.Tool, []string, error) {
 			name: "read_gmail_escalation",
 			desc: "Read customer P0 escalation emails from Google Workspace Gmail via 3LO Token Broker",
 			fn: func(tctx agent.Context, args governedToolInput) (map[string]any, error) {
-				tc := r.lookupActiveTurn(tctx.SessionID())
+				tc := r.lookupActiveTurnFromContext(tctx, tctx.SessionID())
 				if tc == nil {
 					return map[string]any{"status": "NO_ACTIVE_TURN"}, nil
 				}
@@ -423,13 +430,13 @@ func buildUnifiedGovernedADKTools(r *Runtime) ([]tool.Tool, []string, error) {
 							rawEmail = liveRes.RawEmail
 						}
 						prov = ProvenanceLive
-						tc.appendWire(liveRes.WireRecords...)
-						tc.appendTrace(liveRes.TraceEvent)
+						tc.addWire(liveRes.WireRecords...)
+						tc.addStep(liveRes.TraceEvent)
 					}
 				}
 				if prov == ProvenanceFixture && tc.req.ScenarioID != Scenario05FullChainZeroTrust {
 					if tc.req.Posture.TokenBrokerEnabled {
-						tc.appendTrace(BoundaryTraceEvent{
+						tc.addStep(BoundaryTraceEvent{
 							Boundary:   BoundaryIdentity3LO,
 							Shield:     "Token Broker (3LO)",
 							Component:  "adk/v2/auth.Transport",
@@ -439,7 +446,7 @@ func buildUnifiedGovernedADKTools(r *Runtime) ([]tool.Tool, []string, error) {
 							Detail:     fmt.Sprintf("Resolved %s 3LO token for google_gmail (scope: gmail.readonly) via auth.Transport", tc.req.Persona),
 						})
 					} else {
-						tc.appendTrace(BoundaryTraceEvent{
+						tc.addStep(BoundaryTraceEvent{
 							Boundary:   BoundaryIdentity3LO,
 							Shield:     "Token Broker (3LO)",
 							Component:  "adk/v2/auth.Transport",
@@ -462,7 +469,7 @@ func buildUnifiedGovernedADKTools(r *Runtime) ([]tool.Tool, []string, error) {
 			name: "query_cloud_logging",
 			desc: "Query Cloud Logging entries (logging.entries.list) via governed Agent Gateway MCP",
 			fn: func(tctx agent.Context, args governedToolInput) (map[string]any, error) {
-				tc := r.lookupActiveTurn(tctx.SessionID())
+				tc := r.lookupActiveTurnFromContext(tctx, tctx.SessionID())
 				if tc == nil {
 					return map[string]any{"status": "NO_ACTIVE_TURN"}, nil
 				}
@@ -471,7 +478,7 @@ func buildUnifiedGovernedADKTools(r *Runtime) ([]tool.Tool, []string, error) {
 				obsConn := NewGCPObservabilityConnector(r)
 				if obsConn.Provenance() == ProvenanceLive {
 					if rec, err := obsConn.QueryCloudLogging(tctx, tc.req.Persona); err == nil && rec != nil {
-						tc.appendWire(*rec)
+						tc.addWire(*rec)
 						tc.markGovernanceLive()
 						return map[string]any{
 							"status":     "OK",
@@ -481,7 +488,7 @@ func buildUnifiedGovernedADKTools(r *Runtime) ([]tool.Tool, []string, error) {
 						}, nil
 					}
 				}
-				tc.appendWire(OutboundWireRecord{
+				tc.addWire(OutboundWireRecord{
 					Provider:          ProviderGCPIAM,
 					ToolName:          "logging.entries.list",
 					Method:            http.MethodPost,
@@ -503,7 +510,7 @@ func buildUnifiedGovernedADKTools(r *Runtime) ([]tool.Tool, []string, error) {
 			name: "get_gke_cluster",
 			desc: "Get GKE cluster metadata and node pool status (container.clusters.get) via governed Agent Gateway MCP",
 			fn: func(tctx agent.Context, args governedToolInput) (map[string]any, error) {
-				tc := r.lookupActiveTurn(tctx.SessionID())
+				tc := r.lookupActiveTurnFromContext(tctx, tctx.SessionID())
 				if tc == nil {
 					return map[string]any{"status": "NO_ACTIVE_TURN"}, nil
 				}
@@ -512,7 +519,7 @@ func buildUnifiedGovernedADKTools(r *Runtime) ([]tool.Tool, []string, error) {
 				obsConn := NewGCPObservabilityConnector(r)
 				if obsConn.Provenance() == ProvenanceLive {
 					if rec, err := obsConn.GetGKECluster(tctx, tc.req.Persona); err == nil && rec != nil {
-						tc.appendWire(*rec)
+						tc.addWire(*rec)
 						tc.markGovernanceLive()
 						return map[string]any{
 							"status":     "OK",
@@ -522,7 +529,7 @@ func buildUnifiedGovernedADKTools(r *Runtime) ([]tool.Tool, []string, error) {
 						}, nil
 					}
 				}
-				tc.appendWire(OutboundWireRecord{
+				tc.addWire(OutboundWireRecord{
 					Provider:          ProviderGCPIAM,
 					ToolName:          "container.clusters.get",
 					Method:            http.MethodPost,
@@ -544,7 +551,7 @@ func buildUnifiedGovernedADKTools(r *Runtime) ([]tool.Tool, []string, error) {
 			name: "delete_gke_cluster",
 			desc: "Delete an entire GKE cluster (container.clusters.delete) — destructive tool governed by Agent Gateway UAP",
 			fn: func(tctx agent.Context, args governedToolInput) (map[string]any, error) {
-				tc := r.lookupActiveTurn(tctx.SessionID())
+				tc := r.lookupActiveTurnFromContext(tctx, tctx.SessionID())
 				if tc != nil {
 					tc.appendExecutedTool("delete_gke_cluster")
 				}
@@ -559,7 +566,7 @@ func buildUnifiedGovernedADKTools(r *Runtime) ([]tool.Tool, []string, error) {
 			name: "fetch_jira_issue",
 			desc: "Fetch an Atlassian Jira Cloud issue (e.g. SEC-101 or PUB-202) via per-persona 3LO Token Broker",
 			fn: func(tctx agent.Context, args governedToolInput) (map[string]any, error) {
-				tc := r.lookupActiveTurn(tctx.SessionID())
+				tc := r.lookupActiveTurnFromContext(tctx, tctx.SessionID())
 				if tc == nil {
 					return map[string]any{"status": "NO_ACTIVE_TURN"}, nil
 				}
@@ -571,7 +578,7 @@ func buildUnifiedGovernedADKTools(r *Runtime) ([]tool.Tool, []string, error) {
 			name: "fetch_github_advisory",
 			desc: "Fetch a GitHub security advisory or repository issue via per-persona 3LO Token Broker",
 			fn: func(tctx agent.Context, args governedToolInput) (map[string]any, error) {
-				tc := r.lookupActiveTurn(tctx.SessionID())
+				tc := r.lookupActiveTurnFromContext(tctx, tctx.SessionID())
 				if tc == nil {
 					return map[string]any{"status": "NO_ACTIVE_TURN"}, nil
 				}
@@ -583,7 +590,7 @@ func buildUnifiedGovernedADKTools(r *Runtime) ([]tool.Tool, []string, error) {
 			name: "delegate_sandbox_test",
 			desc: "Delegate untrusted go test verification over attenuated A2A v2 to Agent Substrate v0.5.0 gVisor Sandbox Remediator",
 			fn: func(tctx agent.Context, args governedToolInput) (map[string]any, error) {
-				tc := r.lookupActiveTurn(tctx.SessionID())
+				tc := r.lookupActiveTurnFromContext(tctx, tctx.SessionID())
 				if tc == nil {
 					return map[string]any{"status": "NO_ACTIVE_TURN"}, nil
 				}
@@ -595,7 +602,7 @@ func buildUnifiedGovernedADKTools(r *Runtime) ([]tool.Tool, []string, error) {
 			name: "create_github_pull_request",
 			desc: "Create a remediation GitHub Pull Request and Jira update comment (requires Step-Up Confirmation in Blue Mode)",
 			fn: func(tctx agent.Context, args governedToolInput) (map[string]any, error) {
-				tc := r.lookupActiveTurn(tctx.SessionID())
+				tc := r.lookupActiveTurnFromContext(tctx, tctx.SessionID())
 				if tc == nil {
 					return map[string]any{"status": "NO_ACTIVE_TURN"}, nil
 				}
@@ -647,7 +654,7 @@ func executeGovernedJiraFetchTool(ctx context.Context, r *Runtime, tc *adkActive
 			if !tc.req.Posture.TokenBrokerEnabled {
 				principal = "shared-service-account-root-token (Confused Deputy)"
 			}
-			tc.appendWire(OutboundWireRecord{
+			tc.addWire(OutboundWireRecord{
 				Provider:          ProviderAtlassianJira,
 				ToolName:          "jira_get_issue",
 				Method:            http.MethodGet,
@@ -696,7 +703,7 @@ func executeGovernedJiraFetchTool(ctx context.Context, r *Runtime, tc *adkActive
 		if jiraResp != nil {
 			status = jiraResp.StatusCode
 		}
-		tc.appendWire(wireRecords...)
+		tc.addWire(wireRecords...)
 		if status == http.StatusForbidden || status == http.StatusUnauthorized {
 			return map[string]any{
 				"status":        "ACL_DENIED",
@@ -784,7 +791,7 @@ func executeGovernedJiraFetchTool(ctx context.Context, r *Runtime, tc *adkActive
 		return nil, err
 	}
 	_ = resp.Body.Close()
-	tc.appendWire(wireRecords...)
+	tc.addWire(wireRecords...)
 
 	if resp.StatusCode == http.StatusForbidden {
 		return map[string]any{
@@ -846,7 +853,7 @@ func executeGovernedGitHubAdvisoryTool(ctx context.Context, r *Runtime, tc *adkA
 			&wireRecords,
 			trace,
 		)
-		tc.appendWire(wireOut...)
+		tc.addWire(wireOut...)
 		if err != nil {
 			return nil, err
 		}
@@ -932,7 +939,7 @@ func executeGovernedGitHubAdvisoryTool(ctx context.Context, r *Runtime, tc *adkA
 		return nil, err
 	}
 	_ = ghResp.Body.Close()
-	tc.appendWire(wireRecords...)
+	tc.addWire(wireRecords...)
 
 	if ghResp.StatusCode == http.StatusForbidden {
 		return map[string]any{
@@ -971,7 +978,7 @@ func record3LOTraceAfterSuccess(tc *adkActiveTurnContext, issueKey, targetRepo s
 		if prov == ProvenanceLive {
 			detail = fmt.Sprintf("Injected %s's per-provider 3LO OAuth tokens on HTTP transport outside LLM context window; verified live 200 OK", tc.req.Persona)
 		}
-		tc.appendTrace(BoundaryTraceEvent{
+		tc.addStep(BoundaryTraceEvent{
 			Boundary:   BoundaryIdentity3LO,
 			Shield:     "Token Broker (3LO)",
 			Component:  "adk/v2/auth.Transport",
@@ -981,7 +988,7 @@ func record3LOTraceAfterSuccess(tc *adkActiveTurnContext, issueKey, targetRepo s
 			Detail:     detail,
 		})
 	} else {
-		tc.appendTrace(BoundaryTraceEvent{
+		tc.addStep(BoundaryTraceEvent{
 			Boundary:   BoundaryIdentity3LO,
 			Shield:     "Token Broker (3LO)",
 			Component:  "StaticToken(shared-service-account-root-token)",
@@ -1045,7 +1052,7 @@ func executeGovernedSandboxDelegationTool(ctx context.Context, r *Runtime, tc *a
 		}
 
 		liveResp, liveWire, isLive := NewSubstrateSandboxConnector(r).Execute(ctx, execReq)
-		workerPool := "aegis-sandbox-workers"
+		workerPool := "aegis-remediator-pool"
 		sandboxConfig := "gvisor-default"
 		if isLive && liveResp != nil {
 			stepProvenance = ProvenanceLive
@@ -1055,10 +1062,10 @@ func executeGovernedSandboxDelegationTool(ctx context.Context, r *Runtime, tc *a
 			if liveResp.SandboxConfig != "" {
 				sandboxConfig = liveResp.SandboxConfig
 			}
-			tc.appendWire(liveWire...)
+			tc.addWire(liveWire...)
 		}
 
-		tc.appendTrace(BoundaryTraceEvent{
+		tc.addStep(BoundaryTraceEvent{
 			Boundary:   BoundaryCrossAgentA2A,
 			Shield:     "Attenuated Delegation (A2A v2)",
 			Component:  "adk/v2/server/adka2a/v2 (withoutCredentialParts)",
@@ -1074,7 +1081,7 @@ func executeGovernedSandboxDelegationTool(ctx context.Context, r *Runtime, tc *a
 			},
 		})
 
-		tc.appendWire(
+		tc.addWire(
 			OutboundWireRecord{
 				Provider:          ProviderGitHub,
 				ToolName:          "substrate.atenet.github_archive_fetch",
@@ -1103,7 +1110,7 @@ func executeGovernedSandboxDelegationTool(ctx context.Context, r *Runtime, tc *a
 			},
 		)
 
-		tc.appendTrace(BoundaryTraceEvent{
+		tc.addStep(BoundaryTraceEvent{
 			Boundary:   BoundarySandboxEgress,
 			Shield:     "Sandbox Egress MITM (Agent Substrate v0.5.0)",
 			Component:  "ate.dev/v1alpha1 Actor (gvisor + atenet)",
@@ -1124,7 +1131,7 @@ func executeGovernedSandboxDelegationTool(ctx context.Context, r *Runtime, tc *a
 			},
 		})
 	} else {
-		tc.appendTrace(BoundaryTraceEvent{
+		tc.addStep(BoundaryTraceEvent{
 			Boundary:   BoundaryCrossAgentA2A,
 			Shield:     "Attenuated Delegation (A2A v2)",
 			Component:  "adk/v2/server/adka2a/v2",
@@ -1137,7 +1144,7 @@ func executeGovernedSandboxDelegationTool(ctx context.Context, r *Runtime, tc *a
 				"leakedBearerToken":   upstreamToken,
 			},
 		})
-		tc.appendTrace(BoundaryTraceEvent{
+		tc.addStep(BoundaryTraceEvent{
 			Boundary:   BoundarySandboxEgress,
 			Shield:     "Sandbox Egress MITM (Agent Substrate v0.5.0)",
 			Component:  "Unisolated Runner (No EgressPolicy)",
@@ -1150,7 +1157,7 @@ func executeGovernedSandboxDelegationTool(ctx context.Context, r *Runtime, tc *a
 				"exfiltratedTo":       "https://evil.example.com/exfil",
 			},
 		})
-		tc.appendWire(OutboundWireRecord{
+		tc.addWire(OutboundWireRecord{
 			Provider:          ProviderGitHub,
 			ToolName:          "untrusted_go_test.init_exfil",
 			Method:            http.MethodPost,
@@ -1203,9 +1210,9 @@ func executeGovernedCreatePRTool(ctx context.Context, r *Runtime, tc *adkActiveT
 		if livePRURL != "" {
 			prURL = livePRURL
 		}
-		tc.appendWire(ghWires...)
+		tc.addWire(ghWires...)
 	} else {
-		tc.appendWire(OutboundWireRecord{
+		tc.addWire(OutboundWireRecord{
 			Provider:          ProviderGitHub,
 			ToolName:          targetTool,
 			Method:            http.MethodPost,
@@ -1223,7 +1230,7 @@ func executeGovernedCreatePRTool(ctx context.Context, r *Runtime, tc *adkActiveT
 		if err != nil {
 			return nil, err
 		}
-		tc.appendWire(jiraWires...)
+		tc.addWire(jiraWires...)
 	}
 
 	return map[string]any{
@@ -1237,7 +1244,7 @@ func buildAegisSecurityPlugin(r *Runtime) (*plugin.Plugin, error) {
 	return plugin.New(plugin.Config{
 		Name: adkSecurityPluginName,
 		BeforeRunCallback: func(ctx agent.InvocationContext) (*genai.Content, error) {
-			tc := r.lookupActiveTurn(ctx.Session().ID())
+			tc := r.lookupActiveTurnFromContext(ctx, ctx.Session().ID())
 			if tc == nil {
 				return nil, nil
 			}
@@ -1257,7 +1264,7 @@ func buildAegisSecurityPlugin(r *Runtime) (*plugin.Plugin, error) {
 			return nil, nil
 		},
 		BeforeModelCallback: func(ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
-			tc := r.lookupActiveTurn(ctx.SessionID())
+			tc := r.lookupActiveTurnFromContext(ctx, ctx.SessionID())
 			if tc == nil {
 				return nil, nil
 			}
@@ -1281,7 +1288,7 @@ func buildAegisSecurityPlugin(r *Runtime) (*plugin.Plugin, error) {
 				if strings.TrimSpace(userText) != "" {
 					insp := r.Guard().InspectAndSanitize(ctx, userText, tc.req.Posture)
 					if insp.Blocked {
-						tc.appendTrace(BoundaryTraceEvent{
+						tc.addStep(BoundaryTraceEvent{
 							Boundary:   BoundaryReasoningGuard,
 							Shield:     "Prompt Screen + PII Redactor",
 							Component:  "ModelArmor + CloudSDP (BeforeModelCallback)",
@@ -1328,7 +1335,7 @@ func buildAegisSecurityPlugin(r *Runtime) (*plugin.Plugin, error) {
 						}
 						tc.mu.Unlock()
 						if !tc.hasSubsequentTool("read_gmail_escalation") {
-							tc.appendTrace(BoundaryTraceEvent{
+							tc.addStep(BoundaryTraceEvent{
 								Boundary:   BoundaryReasoningGuard,
 								Shield:     "PII Redactor (Cloud SDP)",
 								Component:  "CloudSDP DeidentifyContent (BeforeModelCallback)",
@@ -1346,7 +1353,7 @@ func buildAegisSecurityPlugin(r *Runtime) (*plugin.Plugin, error) {
 			return nil, nil
 		},
 		BeforeToolCallback: func(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
-			tc := r.lookupActiveTurn(ctx.SessionID())
+			tc := r.lookupActiveTurnFromContext(ctx, ctx.SessionID())
 			if tc == nil {
 				return nil, nil
 			}
@@ -1360,7 +1367,7 @@ func buildAegisSecurityPlugin(r *Runtime) (*plugin.Plugin, error) {
 				}
 				if toolName == "delete_gke_cluster" && tc.req.Posture.StepUpAndA2UICatalogEnabled {
 					uapDelete := EvaluateAgentGatewayUAP("container.clusters.delete", false, tc.req.Posture)
-					tc.appendTrace(BoundaryTraceEvent{
+					tc.addStep(BoundaryTraceEvent{
 						Boundary:   BoundaryPlatformGovernance,
 						Shield:     "Agent Gateway UAP (roles/iap.egressor)",
 						Component:  "AGENT_TO_ANYWHERE CEL Enforcer",
@@ -1423,7 +1430,7 @@ func buildAegisSecurityPlugin(r *Runtime) (*plugin.Plugin, error) {
 			if err != nil {
 				return result, nil
 			}
-			tc := r.lookupActiveTurn(ctx.SessionID())
+			tc := r.lookupActiveTurnFromContext(ctx, ctx.SessionID())
 			if tc == nil {
 				return result, nil
 			}
@@ -1444,7 +1451,7 @@ func buildAegisSecurityPlugin(r *Runtime) (*plugin.Plugin, error) {
 			}
 		},
 		AfterModelCallback: func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
-			tc := r.lookupActiveTurn(ctx.SessionID())
+			tc := r.lookupActiveTurnFromContext(ctx, ctx.SessionID())
 			if tc == nil {
 				return nil, nil
 			}
@@ -1453,7 +1460,7 @@ func buildAegisSecurityPlugin(r *Runtime) (*plugin.Plugin, error) {
 			return nil, nil
 		},
 		OnEventCallback: func(ctx agent.InvocationContext, event *session.Event) (*session.Event, error) {
-			tc := r.lookupActiveTurn(ctx.Session().ID())
+			tc := r.lookupActiveTurnFromContext(ctx, ctx.Session().ID())
 			if tc == nil || event == nil {
 				return nil, nil
 			}
@@ -1503,7 +1510,7 @@ func enforceBoundary4BeforeTool(ctx agent.Context, r *Runtime, tc *adkActiveTurn
 			regLive = true
 		}
 		if tc.req.Posture.StepUpAndA2UICatalogEnabled && tc.req.ScenarioID != Scenario05FullChainZeroTrust {
-			tc.appendTrace(BoundaryTraceEvent{
+			tc.addStep(BoundaryTraceEvent{
 				Boundary:   BoundaryPlatformGovernance,
 				Shield:     "Agent Registry + Agent Gateway UAP",
 				Component:  "adk/v2/agentregistry",
@@ -1531,7 +1538,7 @@ func enforceBoundary4BeforeTool(ctx agent.Context, r *Runtime, tc *adkActiveTurn
 					catCountServers = len(catalog.MCPServers)
 					catCountAgents = len(catalog.Agents)
 				}
-				tc.appendTrace(BoundaryTraceEvent{
+				tc.addStep(BoundaryTraceEvent{
 					Boundary:   BoundaryPlatformGovernance,
 					Shield:     "Agent Registry + Agent Gateway UAP (roles/iap.egressor)",
 					Component:  "adk/v2/agentregistry + AGENT_TO_ANYWHERE CEL Enforcer",
@@ -1544,7 +1551,7 @@ func enforceBoundary4BeforeTool(ctx agent.Context, r *Runtime, tc *adkActiveTurn
 					},
 				})
 			} else {
-				tc.appendTrace(BoundaryTraceEvent{
+				tc.addStep(BoundaryTraceEvent{
 					Boundary:   BoundaryPlatformGovernance,
 					Shield:     "Agent Gateway UAP (roles/iap.egressor)",
 					Component:  "AGENT_TO_ANYWHERE CEL Enforcer",
@@ -1566,7 +1573,7 @@ func enforceBoundary4BeforeTool(ctx agent.Context, r *Runtime, tc *adkActiveTurn
 		if tc.req.ScenarioID == Scenario03AgentGatewayAndStepUp {
 			detail = "Agent Gateway UAP disabled in Red Mode: destructive tool container.clusters.delete and unverified MCP calls executed without CEL policy checks!"
 		}
-		tc.appendTrace(BoundaryTraceEvent{
+		tc.addStep(BoundaryTraceEvent{
 			Boundary:   BoundaryPlatformGovernance,
 			Shield:     "Agent Registry + Agent Gateway UAP",
 			Component:  "AGENT_TO_ANYWHERE CEL Enforcer",
@@ -1648,7 +1655,7 @@ func check3LOConsentBeforeTool(ctx agent.Context, r *Runtime, tc *adkActiveTurnC
 				Nonce:       consentErr.Nonce,
 				ResourceRef: resourceRef,
 			}
-			tc.appendTrace(BoundaryTraceEvent{
+			tc.addStep(BoundaryTraceEvent{
 				Boundary:   BoundaryIdentity3LO,
 				Shield:     "Token Broker (3LO)",
 				Component:  "adk/v2/auth.Transport",
@@ -1681,7 +1688,7 @@ func check3LOConsentBeforeTool(ctx agent.Context, r *Runtime, tc *adkActiveTurnC
 
 func enforceStepUpBeforeTool(ctx agent.Context, tc *adkActiveTurnContext) (map[string]any, error) {
 	if !tc.req.Posture.StepUpAndA2UICatalogEnabled {
-		tc.appendTrace(BoundaryTraceEvent{
+		tc.addStep(BoundaryTraceEvent{
 			Boundary:   BoundaryGenerativeUI,
 			Shield:     "Step-Up Confirmation + A2UI v0.9 Catalog",
 			Component:  "adk/v2/tool/toolconfirmation + A2UIValidator",
@@ -1794,7 +1801,7 @@ func enforceStepUpBeforeTool(ctx agent.Context, tc *adkActiveTurnContext) (map[s
 				return nil, err
 			}
 
-			tc.appendTrace(BoundaryTraceEvent{
+			tc.addStep(BoundaryTraceEvent{
 				Boundary:   BoundaryGenerativeUI,
 				Shield:     "Step-Up Confirmation + A2UI v0.9 Catalog",
 				Component:  "adk/v2/tool/toolconfirmation + A2UIValidator",
@@ -1857,7 +1864,7 @@ func enforceStepUpBeforeTool(ctx agent.Context, tc *adkActiveTurnContext) (map[s
 				return nil, err
 			}
 
-			tc.appendTrace(BoundaryTraceEvent{
+			tc.addStep(BoundaryTraceEvent{
 				Boundary:   BoundaryGenerativeUI,
 				Shield:     "Step-Up Confirmation + A2UI v0.9 Catalog",
 				Component:  "adk/v2/tool/toolconfirmation + A2UIValidator",
@@ -1890,7 +1897,7 @@ func enforceStepUpBeforeTool(ctx agent.Context, tc *adkActiveTurnContext) (map[s
 			confID = tc.resolvedStepUp.ConfirmationID
 			targetTool = tc.resolvedStepUp.TargetTool
 		}
-		tc.appendTrace(BoundaryTraceEvent{
+		tc.addStep(BoundaryTraceEvent{
 			Boundary:   BoundaryGenerativeUI,
 			Shield:     "Step-Up Confirmation + A2UI v0.9 Catalog",
 			Component:  "adk/v2/tool/toolconfirmation",
@@ -1946,7 +1953,7 @@ func enforceAfterGmailTool(ctx agent.Context, r *Runtime, tc *adkActiveTurnConte
 	tc.mu.Unlock()
 
 	if inspection.Blocked {
-		tc.appendTrace(BoundaryTraceEvent{
+		tc.addStep(BoundaryTraceEvent{
 			Boundary:   BoundaryReasoningGuard,
 			Shield:     "Prompt Screen + PII Redactor",
 			Component:  "ModelArmor + CloudSDP",
@@ -1992,7 +1999,7 @@ func enforceAfterGmailTool(ctx agent.Context, r *Runtime, tc *adkActiveTurnConte
 		if tc.req.ScenarioID == Scenario05FullChainZeroTrust {
 			detail = fmt.Sprintf("SDP-only match (%s): masked customer SSN, API key, email, and phone in-flight before Gemini reasoning", stringsJoin(inspection.SDPMatchTypes))
 		}
-		tc.appendTrace(BoundaryTraceEvent{
+		tc.addStep(BoundaryTraceEvent{
 			Boundary:   BoundaryReasoningGuard,
 			Shield:     "PII Redactor (Cloud SDP)",
 			Component:  "CloudSDP DeidentifyContent (IsSdpOnlyBlock=true)",
@@ -2012,7 +2019,7 @@ func enforceAfterGmailTool(ctx agent.Context, r *Runtime, tc *adkActiveTurnConte
 		return sanitizedMap, nil
 	}
 
-	tc.appendTrace(BoundaryTraceEvent{
+	tc.addStep(BoundaryTraceEvent{
 		Boundary:   BoundaryReasoningGuard,
 		Shield:     "Prompt Screen + PII Redactor",
 		Component:  "ModelArmor + CloudSDP",
@@ -2053,7 +2060,7 @@ func enforceAfter3LOTool(ctx agent.Context, r *Runtime, tc *adkActiveTurnContext
 		if prov == ProvenanceFixture {
 			detail = fmt.Sprintf("Injected %s's scoped 3LO bearer token on the HTTP wire; Atlassian Jira denied access to SEC-101 with 403 Forbidden (Zero Confused Deputy)", tc.req.Persona)
 		}
-		tc.appendTrace(BoundaryTraceEvent{
+		tc.addStep(BoundaryTraceEvent{
 			Boundary:   BoundaryIdentity3LO,
 			Shield:     "Token Broker (3LO)",
 			Component:  "adk/v2/auth.Transport",
@@ -2142,7 +2149,7 @@ func enforceAfterSandboxTool(ctx agent.Context, r *Runtime, tc *adkActiveTurnCon
 	cleanPeerSummary := rawPeer
 	if tc.req.Posture.PromptScreenEnabled {
 		cleanPeerSummary = "PASS: TestCheckoutHotfix (0.04s) [poisoned peer instruction stripped by Model Armor SanitizeUserPrompt]"
-		tc.appendTrace(BoundaryTraceEvent{
+		tc.addStep(BoundaryTraceEvent{
 			Boundary:   BoundaryReasoningGuard,
 			Shield:     "Prompt Screen (Peer A2A Response Guard)",
 			Component:  "ModelArmor SanitizeUserPrompt",
@@ -2156,7 +2163,7 @@ func enforceAfterSandboxTool(ctx agent.Context, r *Runtime, tc *adkActiveTurnCon
 			},
 		})
 	} else {
-		tc.appendTrace(BoundaryTraceEvent{
+		tc.addStep(BoundaryTraceEvent{
 			Boundary:   BoundaryReasoningGuard,
 			Shield:     "Prompt Screen (Peer A2A Response Guard)",
 			Component:  "ModelArmor SanitizeUserPrompt",
@@ -2202,7 +2209,7 @@ func enforceAfterCreatePRTool(_ agent.Context, tc *adkActiveTurnContext, result 
 		targetTool = tc.resolvedStepUp.TargetTool
 	}
 
-	tc.appendTrace(BoundaryTraceEvent{
+	tc.addStep(BoundaryTraceEvent{
 		Boundary:   BoundaryGenerativeUI,
 		Shield:     "Step-Up Confirmation + A2UI v0.9 Catalog",
 		Component:  "adk/v2/tool/toolconfirmation",
@@ -2242,73 +2249,150 @@ func enforceAfterCreatePRTool(_ agent.Context, tc *adkActiveTurnContext, result 
 	return result, nil
 }
 
-// dualTriageOrchestratorLLM implements model.LLM with a dual seam:
-// - ScriptedToolPlannerLLM emits deterministic sequential FunctionCall steps for the 8 governed tools
-//   and offline synthesis text.
-// - GeminiAgentPlatformLLM executes live synthesis against Gemini Enterprise Agent Platform (gemini-2.5-flash)
-//   once all planned tools have finished and been SDP-sanitized by AfterToolCallback.
-type dualTriageOrchestratorLLM struct {
+// ScriptedToolPlannerLLM implements model.LLM for deterministic offline and CI eval runs,
+// emitting sequential FunctionCall steps for the 8 governed tools and deterministic synthesis text.
+type ScriptedToolPlannerLLM struct {
 	rt *Runtime
 }
 
-func newDualTriageOrchestratorLLM(r *Runtime) model.LLM {
-	return &dualTriageOrchestratorLLM{rt: r}
+// NewScriptedToolPlannerLLM constructs a ScriptedToolPlannerLLM for r.
+func NewScriptedToolPlannerLLM(r *Runtime) *ScriptedToolPlannerLLM {
+	return &ScriptedToolPlannerLLM{rt: r}
 }
 
-func (m *dualTriageOrchestratorLLM) Name() string {
+// Name returns the model identifier ("gemini-2.5-flash").
+func (m *ScriptedToolPlannerLLM) Name() string {
 	return "gemini-2.5-flash"
 }
 
-func (m *dualTriageOrchestratorLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+// GenerateContent implements model.LLM using deterministic scripted tool planning and synthesis.
+func (m *ScriptedToolPlannerLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
-		tc := m.resolveTurnContextFromContents(ctx, req)
+		tc := resolveTurnContextFromContents(ctx, m.rt, req)
 		if tc != nil {
 			tc.mu.Lock()
 			tc.modelCallCount++
 			sessionID := tc.req.SessionID
 			tc.mu.Unlock()
-			m.recordObservedLLMInputs(sessionID, req)
+			recordObservedLLMInputs(m.rt, sessionID, req)
 		}
 
-		// Step 1: If planned tools remain and the turn is not halted, emit the next FunctionCall via ScriptedToolPlannerLLM
 		if tc != nil && !tc.halted && !tc.isConfirmationResume && tc.nextToolIdx < len(tc.plannedTools) {
-			tc.mu.Lock()
-			planned := tc.plannedTools[tc.nextToolIdx]
-			tc.nextToolIdx++
-			callID := fmt.Sprintf("call-%s-%d-%s", tc.req.SessionID, tc.nextToolIdx, planned.Name)
-			tc.mu.Unlock()
+			m.emitNextPlannedTool(tc, yield)
+			return
+		}
 
-			argsMap := map[string]any{}
-			if planned.Args.Target != "" {
-				argsMap["target"] = planned.Args.Target
+		if tc != nil {
+			pendingCards := finalizeTurnOutcomeAndCards(m.rt, tc)
+			if len(pendingCards) > 0 || !tc.textDeltaEmitted {
+				tc.emitTextDelta(tc.assistantText)
+				if len(pendingCards) > 0 {
+					tc.addCard(pendingCards...)
+				}
 			}
-			if planned.Args.Query != "" {
-				argsMap["query"] = planned.Args.Query
-			}
-			if planned.Args.IssueKey != "" {
-				argsMap["issueKey"] = planned.Args.IssueKey
-			}
-			if planned.Args.Cluster != "" {
-				argsMap["cluster"] = planned.Args.Cluster
-			}
-			if planned.Args.Repo != "" {
-				argsMap["repo"] = planned.Args.Repo
-			}
-
 			yield(&model.LLMResponse{
-				Content: &genai.Content{
-					Role: string(genai.RoleModel),
-					Parts: []*genai.Part{
-						{
-							FunctionCall: &genai.FunctionCall{
-								ID:   callID,
-								Name: planned.Name,
-								Args: argsMap,
-							},
-						},
-					},
-				},
+				Content:      genai.NewContentFromText(firstNonEmpty(tc.assistantText, "Completed AegisSRE turn."), genai.RoleModel),
+				FinishReason: genai.FinishReasonStop,
+				TurnComplete: true,
 			}, nil)
+			return
+		}
+
+		yield(&model.LLMResponse{
+			Content:      genai.NewContentFromText("Completed AegisSRE turn.", genai.RoleModel),
+			FinishReason: genai.FinishReasonStop,
+			TurnComplete: true,
+		}, nil)
+	}
+}
+
+func (m *ScriptedToolPlannerLLM) emitNextPlannedTool(tc *adkActiveTurnContext, yield func(*model.LLMResponse, error) bool) {
+	tc.mu.Lock()
+	planned := tc.plannedTools[tc.nextToolIdx]
+	tc.nextToolIdx++
+	callID := fmt.Sprintf("call-%s-%d-%s", tc.req.SessionID, tc.nextToolIdx, planned.Name)
+	tc.mu.Unlock()
+
+	argsMap := map[string]any{}
+	if planned.Args.Target != "" {
+		argsMap["target"] = planned.Args.Target
+	}
+	if planned.Args.Query != "" {
+		argsMap["query"] = planned.Args.Query
+	}
+	if planned.Args.IssueKey != "" {
+		argsMap["issueKey"] = planned.Args.IssueKey
+	}
+	if planned.Args.Cluster != "" {
+		argsMap["cluster"] = planned.Args.Cluster
+	}
+	if planned.Args.Repo != "" {
+		argsMap["repo"] = planned.Args.Repo
+	}
+
+	fcPart := genai.NewPartFromFunctionCall(planned.Name, argsMap)
+	if fcPart.FunctionCall != nil {
+		fcPart.FunctionCall.ID = callID
+	}
+
+	yield(&model.LLMResponse{
+		Content: &genai.Content{
+			Role:  string(genai.RoleModel),
+			Parts: []*genai.Part{fcPart},
+		},
+	}, nil)
+}
+
+// GeminiAgentPlatformLLM implements model.LLM backed by Gemini Enterprise Agent Platform (gemini-2.5-flash)
+// with live tool-declaration forwarding and automatic fallback to ScriptedToolPlannerLLM when offline.
+type GeminiAgentPlatformLLM struct {
+	rt       *Runtime
+	scripted *ScriptedToolPlannerLLM
+}
+
+// NewGeminiAgentPlatformLLM constructs a GeminiAgentPlatformLLM for r with ScriptedToolPlannerLLM fallback.
+func NewGeminiAgentPlatformLLM(r *Runtime) *GeminiAgentPlatformLLM {
+	return &GeminiAgentPlatformLLM{
+		rt:       r,
+		scripted: NewScriptedToolPlannerLLM(r),
+	}
+}
+
+// Name returns the model identifier ("gemini-2.5-flash").
+func (m *GeminiAgentPlatformLLM) Name() string {
+	return "gemini-2.5-flash"
+}
+
+// GenerateContent implements model.LLM with live Gemini Enterprise Agent Platform tool calling and synthesis,
+// falling back seamlessly to ScriptedToolPlannerLLM when offline or when running canonical deterministic scenarios.
+func (m *GeminiAgentPlatformLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		tc := resolveTurnContextFromContents(ctx, m.rt, req)
+		var callNumber int
+		if tc != nil {
+			tc.mu.Lock()
+			tc.modelCallCount++
+			callNumber = tc.modelCallCount
+			sessionID := tc.req.SessionID
+			tc.mu.Unlock()
+			recordObservedLLMInputs(m.rt, sessionID, req)
+		}
+
+		geminiConn := NewAgentPlatformGeminiConnector(m.rt)
+		liveActive := geminiConn.Provenance() == ProvenanceLive
+
+		// Step 1: Tool planning step
+		if tc != nil && !tc.halted && !tc.isConfirmationResume && tc.nextToolIdx < len(tc.plannedTools) {
+			// On a free-form turn (tc.rawScenarioID == "") at step 0 (callNumber == 1) with live Gemini enabled,
+			// query the live Gemini endpoint with tool declarations first. If it returns a valid governed FunctionCall,
+			// emit that live FunctionCall; otherwise fall back to ScriptedToolPlannerLLM.
+			if liveActive && tc.rawScenarioID == "" && callNumber == 1 {
+				if liveResp := m.tryLiveToolCall(ctx, geminiConn, tc, req, stream); liveResp != nil {
+					yield(liveResp, nil)
+					return
+				}
+			}
+			m.scripted.emitNextPlannedTool(tc, yield)
 			return
 		}
 
@@ -2316,10 +2400,7 @@ func (m *dualTriageOrchestratorLLM) GenerateContent(ctx context.Context, req *mo
 		if tc != nil {
 			pendingCards := finalizeTurnOutcomeAndCards(m.rt, tc)
 
-			// When AgentPlatformGeminiConnector is in LIVE mode and the turn succeeded in Blue Mode,
-			// execute live synthesis via Gemini on Agent Platform over the SDP-redacted llmRequest.Contents.
-			geminiConn := NewAgentPlatformGeminiConnector(m.rt)
-			if !tc.isConfirmationResume && tc.outcome == OutcomeDefendedSuccess && geminiConn.Provenance() == ProvenanceLive {
+			if !tc.isConfirmationResume && tc.outcome == OutcomeDefendedSuccess && liveActive {
 				restModel := geminiConn.buildLLMModel(ctx)
 				var liveText string
 				var liveErr error
@@ -2342,7 +2423,7 @@ func (m *dualTriageOrchestratorLLM) GenerateContent(ctx context.Context, req *mo
 						tc.mu.Lock()
 						tc.assistantText = guarded.SanitizedText
 						tc.mu.Unlock()
-						tc.appendTrace(BoundaryTraceEvent{
+						tc.addStep(BoundaryTraceEvent{
 							Boundary:   BoundaryReasoningGuard,
 							Shield:     "ADK v2 Reasoning Orchestrator",
 							Component:  "ADK v2 llmagent (gemini-2.5-flash)",
@@ -2378,25 +2459,75 @@ func (m *dualTriageOrchestratorLLM) GenerateContent(ctx context.Context, req *mo
 	}
 }
 
-func (m *dualTriageOrchestratorLLM) resolveTurnContextFromContents(ctx context.Context, _ *model.LLMRequest) *adkActiveTurnContext {
-	if s, ok := ctx.(interface{ SessionID() string }); ok {
-		if tc := m.rt.lookupActiveTurn(s.SessionID()); tc != nil {
+func (m *GeminiAgentPlatformLLM) tryLiveToolCall(
+	ctx context.Context,
+	geminiConn *AgentPlatformGeminiConnector,
+	tc *adkActiveTurnContext,
+	req *model.LLMRequest,
+	stream bool,
+) *model.LLMResponse {
+	restModel := geminiConn.buildLLMModel(ctx)
+	for resp, err := range restModel.GenerateContent(ctx, req, stream) {
+		if err != nil || resp == nil || resp.Content == nil {
+			return nil
+		}
+		var validParts []*genai.Part
+		for idx, p := range resp.Content.Parts {
+			if p != nil && p.FunctionCall != nil && m.isGovernedTool(p.FunctionCall.Name) {
+				fcPart := genai.NewPartFromFunctionCall(p.FunctionCall.Name, p.FunctionCall.Args)
+				callID := p.FunctionCall.ID
+				if callID == "" {
+					callID = fmt.Sprintf("call-%s-live-%d-%s", tc.req.SessionID, idx+1, p.FunctionCall.Name)
+				}
+				if fcPart.FunctionCall != nil {
+					fcPart.FunctionCall.ID = callID
+				}
+				validParts = append(validParts, fcPart)
+			}
+		}
+		if len(validParts) > 0 {
+			tc.mu.Lock()
+			tc.nextToolIdx = len(tc.plannedTools)
+			tc.mu.Unlock()
+			return &model.LLMResponse{
+				Content: &genai.Content{
+					Role:  string(genai.RoleModel),
+					Parts: validParts,
+				},
+			}
+		}
+	}
+	return nil
+}
+
+func (m *GeminiAgentPlatformLLM) isGovernedTool(name string) bool {
+	if m == nil || m.rt == nil {
+		return false
+	}
+	for _, t := range m.rt.governedToolNames {
+		if t == name {
+			return true
+		}
+	}
+	return false
+}
+
+func resolveTurnContextFromContents(ctx context.Context, r *Runtime, _ *model.LLMRequest) *adkActiveTurnContext {
+	if ctx != nil {
+		if tc, ok := ctx.Value(activeTurnContextKey{}).(*adkActiveTurnContext); ok && tc != nil {
 			return tc
 		}
 	}
-	reg := m.rt.turnRegistry()
-	reg.mu.RLock()
-	defer reg.mu.RUnlock()
-	for _, tc := range reg.byADKSession {
-		if tc != nil {
+	if s, ok := ctx.(interface{ SessionID() string }); ok && r != nil {
+		if tc := r.lookupActiveTurn(s.SessionID()); tc != nil {
 			return tc
 		}
 	}
 	return nil
 }
 
-func (m *dualTriageOrchestratorLLM) recordObservedLLMInputs(sessionID string, req *model.LLMRequest) {
-	if req == nil {
+func recordObservedLLMInputs(r *Runtime, sessionID string, req *model.LLMRequest) {
+	if r == nil || req == nil {
 		return
 	}
 	for _, c := range req.Contents {
@@ -2408,10 +2539,10 @@ func (m *dualTriageOrchestratorLLM) recordObservedLLMInputs(sessionID string, re
 				continue
 			}
 			if c.Role == string(genai.RoleUser) && strings.TrimSpace(p.Text) != "" {
-				m.rt.recordLLMUserPrompt(sessionID, p.Text)
+				r.recordLLMUserPrompt(sessionID, p.Text)
 			}
 			if p.FunctionResponse != nil && p.FunctionResponse.Response != nil {
-				m.rt.recordLLMToolOutput(sessionID, p.FunctionResponse.Name, p.FunctionResponse.Response)
+				r.recordLLMToolOutput(sessionID, p.FunctionResponse.Name, p.FunctionResponse.Response)
 			}
 		}
 	}
@@ -2778,8 +2909,9 @@ func (r *Runtime) executeTurnViaADKRunner(ctx context.Context, req TurnRequest, 
 		promptText = fmt.Sprintf("Execute %s as %s", req.ScenarioID, req.Persona)
 	}
 	userMsg := genai.NewContentFromText(promptText, genai.RoleUser)
+	runCtx := withActiveTurnContext(ctx, tc)
 
-	for _, runErr := range r.adkRunner.Run(ctx, adkUserID, adkSessionID, userMsg, agent.RunConfig{}) {
+	for _, runErr := range r.adkRunner.Run(runCtx, adkUserID, adkSessionID, userMsg, agent.RunConfig{}) {
 		if runErr != nil {
 			return nil, runErr
 		}
@@ -2827,7 +2959,7 @@ func (r *Runtime) resolveConfirmationViaADKRunner(ctx context.Context, req Confi
 	}
 
 	tc := &adkActiveTurnContext{
-		rt: isNonNilRuntime(r),
+		rt: r,
 		req: TurnRequest{
 			SessionID:  req.SessionID,
 			Persona:    snap.ActivePersona,
@@ -2875,8 +3007,9 @@ func (r *Runtime) resolveConfirmationViaADKRunner(ctx context.Context, req Confi
 			},
 		},
 	}
+	runCtx := withActiveTurnContext(ctx, tc)
 
-	for _, runErr := range r.adkRunner.Run(ctx, adkUserID, adkSessionID, resumeContent, agent.RunConfig{}) {
+	for _, runErr := range r.adkRunner.Run(runCtx, adkUserID, adkSessionID, resumeContent, agent.RunConfig{}) {
 		if runErr != nil {
 			return nil, runErr
 		}
@@ -2897,10 +3030,6 @@ func (r *Runtime) resolveConfirmationViaADKRunner(ctx context.Context, req Confi
 		Turn:       res,
 	})
 	return res, nil
-}
-
-func isNonNilRuntime(r *Runtime) *Runtime {
-	return r
 }
 
 func (tc *adkActiveTurnContext) buildTurnResult() *TurnResult {

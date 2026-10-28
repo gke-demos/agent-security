@@ -359,9 +359,5 @@ type RuntimeConfig struct {
 	HTTPClient                 *http.Client
 }
 
-// ScenarioHandlerFunc allows modular vertical slices (Tickets 2, 3, 4, 6) to register
-// scenario and route handlers onto Runtime without modifying core files simultaneously.
-type ScenarioHandlerFunc func(ctx context.Context, rt *Runtime, req TurnRequest) (*TurnResult, error)
-
 // HTTPRouteRegistrar registers additional HTTP routes onto the Aegis server mux.
 type HTTPRouteRegistrar func(mux *http.ServeMux, rt *Runtime)

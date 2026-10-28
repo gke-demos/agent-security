@@ -2,10 +2,15 @@ package aegis_test
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gke-demos/agent-security/internal/aegis"
+	"google.golang.org/adk/v2/model"
 )
 
 func TestAegisSecurityPlugin_BeforeModelCallback_DirectPromptScreenAndInPlacePIIRedaction(t *testing.T) {
@@ -557,4 +562,127 @@ func TestExecuteTurnStream_And_ResolveConfirmationStream_EventSequence(t *testin
 		t.Errorf("confirmCards = %d, want len(approvedRes.Cards) = %d", confirmCards, len(approvedRes.Cards))
 	}
 }
+
+func TestGeminiAgentPlatformLLM_And_ScriptedToolPlannerLLM_LiveToolCallingAndFallback(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("GOOGLE_OAUTH_ACCESS_TOKEN", "adc-test-live-tool-planner-token")
+
+	// Compile-time and runtime verification that both exported types implement model.LLM
+	var _ model.LLM = (*aegis.ScriptedToolPlannerLLM)(nil)
+	var _ model.LLM = (*aegis.GeminiAgentPlatformLLM)(nil)
+
+	t.Run("GeminiAgentPlatformLLM sends functionDeclarations and executes live functionCall on free-form turn when AGENT_PLATFORM_LIVE_LLM=true", func(t *testing.T) {
+		var callCount atomic.Int32
+		var firstReqBody string
+
+		geminiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			idx := callCount.Add(1)
+			raw, _ := io.ReadAll(r.Body)
+			w.Header().Set("Content-Type", "application/json")
+			if idx == 1 {
+				firstReqBody = string(raw)
+				// Return a live functionCall choosing get_gke_cluster
+				_, _ = w.Write([]byte(`{
+					"candidates": [
+						{
+							"content": {
+								"role": "model",
+								"parts": [
+									{
+										"functionCall": {
+											"name": "get_gke_cluster",
+											"args": {
+												"cluster": "prod-checkout-us-central1"
+											}
+										}
+									}
+								]
+							},
+							"finishReason": "STOP"
+						}
+					]
+				}`))
+				return
+			}
+			// Second call: final synthesis after FunctionResponse
+			_, _ = w.Write([]byte(`{
+				"candidates": [
+					{
+						"content": {
+							"role": "model",
+							"parts": [
+								{
+									"text": "Live Gemini function calling verified cluster prod-checkout-us-central1 is RUNNING."
+								}
+							]
+						},
+						"finishReason": "STOP"
+					}
+				]
+			}`))
+		}))
+		defer geminiSrv.Close()
+
+		rt := aegis.NewRuntime(aegis.RuntimeConfig{
+			AgentPlatformLiveLLM: true,
+			GeminiEndpoint:       geminiSrv.URL + "/v1/projects/demo-sec-proj/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent",
+			GCPProjectID:         "demo-sec-proj",
+			GCPLocation:          "us-central1",
+			HTTPClient:           geminiSrv.Client(),
+		})
+
+		// Use a prompt that would default to query_cloud_logging in ScriptedToolPlannerLLM,
+		// so we prove that the live Gemini functionCall ("get_gke_cluster") was honored!
+		res, err := rt.ExecuteTurn(ctx, aegis.TurnRequest{
+			SessionID:  "sess-live-fn-call",
+			Persona:    aegis.PersonaAlice,
+			ScenarioID: "",
+			Posture:    aegis.AllBluePosture(),
+			Prompt:     "Summarize the current production status for me.",
+		})
+		if err != nil {
+			t.Fatalf("ExecuteTurn() error = %v", err)
+		}
+		if !strings.Contains(firstReqBody, `"functionDeclarations"`) || !strings.Contains(firstReqBody, `"get_gke_cluster"`) {
+			t.Errorf("first Gemini request body did not include functionDeclarations for governed tools: %s", firstReqBody)
+		}
+		if len(res.ExecutedTools) != 1 || res.ExecutedTools[0] != "get_gke_cluster" {
+			t.Errorf("ExecutedTools = %v, want [get_gke_cluster] chosen by live Gemini functionCall", res.ExecutedTools)
+		}
+		if !strings.Contains(res.AssistantText, "Live Gemini function calling verified cluster") {
+			t.Errorf("AssistantText = %q, want live Gemini synthesis text", res.AssistantText)
+		}
+	})
+
+	t.Run("GeminiAgentPlatformLLM falls back to ScriptedToolPlannerLLM when live endpoint errors on step 0", func(t *testing.T) {
+		failSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		}))
+		defer failSrv.Close()
+
+		rt := aegis.NewRuntime(aegis.RuntimeConfig{
+			AgentPlatformLiveLLM: true,
+			GeminiEndpoint:       failSrv.URL + "/v1/models/gemini-2.5-flash:generateContent",
+			HTTPClient:           failSrv.Client(),
+		})
+
+		res, err := rt.ExecuteTurn(ctx, aegis.TurnRequest{
+			SessionID:  "sess-live-fn-fallback",
+			Persona:    aegis.PersonaAlice,
+			ScenarioID: "",
+			Posture:    aegis.AllBluePosture(),
+			Prompt:     "Inspect GKE cluster health.",
+		})
+		if err != nil {
+			t.Fatalf("ExecuteTurn() error = %v", err)
+		}
+		if res.Outcome != aegis.OutcomeDefendedSuccess {
+			t.Fatalf("Outcome = %q, want %q", res.Outcome, aegis.OutcomeDefendedSuccess)
+		}
+		if len(res.ExecutedTools) != 1 || res.ExecutedTools[0] != "get_gke_cluster" {
+			t.Errorf("ExecutedTools = %v, want [get_gke_cluster] via ScriptedToolPlannerLLM fallback", res.ExecutedTools)
+		}
+	})
+}
+
 

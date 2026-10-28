@@ -171,7 +171,7 @@ func (c *SubstrateSandboxConnector) dispatchGatewayHTTP(
 	if parsed.AllowedEgress == "" {
 		parsed.AllowedEgress = "api.github.com"
 	}
-	if parsed.BlockedEgress == "" {
+	if parsed.BlockedEgress == "" && parsed.Verified && execReq.AtenetMITMEnabled && !strings.HasPrefix(parsed.Metadata["evilExfilProbe"], "http:2") {
 		parsed.BlockedEgress = "https://evil.example.com/exfil"
 	}
 	parsed.Provenance = ProvenanceLive

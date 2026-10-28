@@ -46,7 +46,9 @@ func ParseSSEStream(raw string) ([]aegis.TurnStreamEvent, error) {
 // 1. First event is turn.started
 // 2. Final event is turn.completed with non-nil Turn
 // 3. Number of boundary.step events equals len(turn.BoundaryTrace)
-// 4. Number of a2ui.card events equals len(turn.Cards)
+// 4. Number of wire.record events equals len(turn.WireRecords)
+// 5. Number of a2ui.card events equals len(turn.Cards)
+// 6. At least one text.delta event is emitted whenever turn.AssistantText is non-empty
 func ValidateTurnStreamInvariants(events []aegis.TurnStreamEvent) (*aegis.TurnResult, error) {
 	if len(events) < 2 {
 		return nil, fmt.Errorf("expected at least 2 SSE events (turn.started and turn.completed), got %d", len(events))
@@ -59,7 +61,7 @@ func ValidateTurnStreamInvariants(events []aegis.TurnStreamEvent) (*aegis.TurnRe
 		return nil, fmt.Errorf("last SSE event = %q (Turn=%v), want %q with non-nil Turn", last.Type, last.Turn != nil, aegis.TurnStreamEventCompleted)
 	}
 
-	var stepCount, cardCount int
+	var stepCount, wireCount, cardCount, deltaCount int
 	for _, ev := range events {
 		switch ev.Type {
 		case aegis.TurnStreamEventBoundaryStep:
@@ -67,19 +69,35 @@ func ValidateTurnStreamInvariants(events []aegis.TurnStreamEvent) (*aegis.TurnRe
 				return nil, fmt.Errorf("boundary.step frame has nil Step")
 			}
 			stepCount++
+		case aegis.TurnStreamEventWireRecord:
+			if ev.Record == nil {
+				return nil, fmt.Errorf("wire.record frame has nil Record")
+			}
+			wireCount++
 		case aegis.TurnStreamEventA2UICard:
 			if ev.Card == nil {
 				return nil, fmt.Errorf("a2ui.card frame has nil Card")
 			}
 			cardCount++
+		case aegis.TurnStreamEventTextDelta:
+			if strings.TrimSpace(ev.Delta) == "" {
+				return nil, fmt.Errorf("text.delta frame has empty Delta")
+			}
+			deltaCount++
 		}
 	}
 
 	if stepCount != len(last.Turn.BoundaryTrace) {
 		return nil, fmt.Errorf("streamed boundary.step count = %d, want len(BoundaryTrace) = %d", stepCount, len(last.Turn.BoundaryTrace))
 	}
+	if wireCount != len(last.Turn.WireRecords) {
+		return nil, fmt.Errorf("streamed wire.record count = %d, want len(WireRecords) = %d", wireCount, len(last.Turn.WireRecords))
+	}
 	if cardCount != len(last.Turn.Cards) {
 		return nil, fmt.Errorf("streamed a2ui.card count = %d, want len(Cards) = %d", cardCount, len(last.Turn.Cards))
+	}
+	if strings.TrimSpace(last.Turn.AssistantText) != "" && deltaCount < 1 {
+		return nil, fmt.Errorf("streamed text.delta count = %d, want >= 1 for non-empty AssistantText", deltaCount)
 	}
 	return last.Turn, nil
 }
