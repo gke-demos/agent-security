@@ -52,6 +52,7 @@ type GuardInspectionResult struct {
 type ContentGuard struct {
 	modelArmorEndpoint string
 	dlpEndpoint        string
+	gcpProjectID       string
 	httpClient         *http.Client
 }
 
@@ -65,6 +66,7 @@ func NewContentGuard(cfg RuntimeConfig) *ContentGuard {
 	return &ContentGuard{
 		modelArmorEndpoint: strings.TrimSpace(cfg.ModelArmorEndpoint),
 		dlpEndpoint:        strings.TrimSpace(cfg.DLPEndpoint),
+		gcpProjectID:       strings.TrimSpace(cfg.GCPProjectID),
 		httpClient:         hc,
 	}
 }
@@ -148,6 +150,9 @@ func (g *ContentGuard) InspectAndSanitize(ctx context.Context, text string, post
 		if liveDLPSanitized != "" {
 			redacted = liveDLPSanitized
 		}
+		redacted = strings.ReplaceAll(redacted, "[US_SOCIAL_SECURITY_NUMBER]", "[REDACTED_SSN]")
+		redacted = strings.ReplaceAll(redacted, "[EMAIL_ADDRESS]", "[REDACTED_EMAIL]")
+		redacted = strings.ReplaceAll(redacted, "[PHONE_NUMBER]", "[REDACTED_PHONE]")
 		redacted = ssnRegex.ReplaceAllString(redacted, "[REDACTED_SSN]")
 		redacted = apiKeyRegex.ReplaceAllString(redacted, "[REDACTED_API_KEY]")
 		redacted = emailRegex.ReplaceAllString(redacted, "[REDACTED_EMAIL]")
@@ -172,9 +177,20 @@ func (g *ContentGuard) queryLiveCloudDLP(ctx context.Context, text string) (Guar
 		"inspectConfig": map[string]any{
 			"infoTypes": []map[string]string{
 				{"name": "US_SOCIAL_SECURITY_NUMBER"},
-				{"name": "GCP_API_KEY"},
 				{"name": "EMAIL_ADDRESS"},
 				{"name": "PHONE_NUMBER"},
+				{"name": "CREDIT_CARD_NUMBER"},
+			},
+		},
+		"deidentifyConfig": map[string]any{
+			"infoTypeTransformations": map[string]any{
+				"transformations": []map[string]any{
+					{
+						"primitiveTransformation": map[string]any{
+							"replaceWithInfoTypeConfig": map[string]any{},
+						},
+					},
+				},
 			},
 		},
 	}
@@ -189,6 +205,9 @@ func (g *ContentGuard) queryLiveCloudDLP(ctx context.Context, text string) (Guar
 	req.Header.Set("Content-Type", "application/json")
 	if tok := resolveGCPBearerToken(ctx, g.dlpEndpoint); tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	if g.gcpProjectID != "" {
+		req.Header.Set("x-goog-user-project", g.gcpProjectID)
 	}
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
@@ -255,6 +274,9 @@ func (g *ContentGuard) queryLiveModelArmor(ctx context.Context, text string) (Gu
 	req.Header.Set("Content-Type", "application/json")
 	if tok := resolveGCPBearerToken(ctx, g.modelArmorEndpoint); tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	if g.gcpProjectID != "" {
+		req.Header.Set("x-goog-user-project", g.gcpProjectID)
 	}
 	resp, err := g.httpClient.Do(req)
 	if err != nil {

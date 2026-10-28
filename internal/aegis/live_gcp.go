@@ -20,8 +20,6 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/model/gemini"
 	"google.golang.org/adk/v2/runner"
-	"google.golang.org/adk/v2/tool"
-	"google.golang.org/adk/v2/tool/functiontool"
 	"google.golang.org/genai"
 )
 
@@ -127,8 +125,13 @@ func (c *AgentRegistryConnector) DiscoverGovernedResources(ctx context.Context) 
 		return defaultRegistryCatalog(), ProvenanceFixture, nil
 	}
 
-	projectID := firstNonEmpty(strings.TrimSpace(cfg.GCPProjectID), "aegis-sre")
+	userProject := strings.TrimSpace(cfg.GCPProjectID)
+	projectID := firstNonEmpty(userProject, "aegis-sre")
 	location := firstNonEmpty(strings.TrimSpace(cfg.GCPLocation), "us-central1")
+	if parsedProj, parsedLoc := parseProjectAndLocationFromURL(targetURL.Path); parsedProj != "" && parsedLoc != "" {
+		projectID = parsedProj
+		location = parsedLoc
+	}
 	token := resolveGCPBearerToken(ctx, regURL)
 
 	hc := &http.Client{
@@ -136,6 +139,7 @@ func (c *AgentRegistryConnector) DiscoverGovernedResources(ctx context.Context) 
 			base:        baseTransport,
 			target:      targetURL,
 			bearerToken: token,
+			userProject: userProject,
 		},
 		Timeout: 5 * time.Second,
 	}
@@ -148,11 +152,20 @@ func (c *AgentRegistryConnector) DiscoverGovernedResources(ctx context.Context) 
 	if err == nil {
 		mcpResp, mcpErr := regClient.ListMCPServers(ctx)
 		agentResp, agentErr := regClient.ListAgents(ctx)
-		if mcpErr == nil && agentErr == nil && len(mcpResp.MCPServers) > 0 {
+		if mcpErr == nil {
+			def := defaultRegistryCatalog()
+			servers := mcpResp.MCPServers
+			if len(servers) == 0 {
+				servers = def.MCPServers
+			}
+			agents := def.Agents
+			if agentErr == nil && len(agentResp.Agents) > 0 {
+				agents = agentResp.Agents
+			}
 			return &RegistryCatalog{
 				Source:     "agentregistry_api",
-				MCPServers: mcpResp.MCPServers,
-				Agents:     agentResp.Agents,
+				MCPServers: servers,
+				Agents:     agents,
 			}, ProvenanceLive, nil
 		}
 	}
@@ -160,10 +173,25 @@ func (c *AgentRegistryConnector) DiscoverGovernedResources(ctx context.Context) 
 	return defaultRegistryCatalog(), ProvenanceFixture, nil
 }
 
+func parseProjectAndLocationFromURL(urlPath string) (string, string) {
+	parts := strings.Split(strings.Trim(urlPath, "/"), "/")
+	var proj, loc string
+	for i := 0; i+1 < len(parts); i++ {
+		if parts[i] == "projects" && proj == "" {
+			proj = parts[i+1]
+		}
+		if parts[i] == "locations" && loc == "" {
+			loc = parts[i+1]
+		}
+	}
+	return proj, loc
+}
+
 type adcRegistryRewriteTransport struct {
 	base        http.RoundTripper
 	target      *url.URL
 	bearerToken string
+	userProject string
 }
 
 func (t *adcRegistryRewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -173,6 +201,9 @@ func (t *adcRegistryRewriteTransport) RoundTrip(req *http.Request) (*http.Respon
 	cloned.Host = t.target.Host
 	if t.bearerToken != "" && cloned.Header.Get("Authorization") == "" {
 		cloned.Header.Set("Authorization", "Bearer "+t.bearerToken)
+	}
+	if t.userProject != "" && cloned.Header.Get("x-goog-user-project") == "" {
+		cloned.Header.Set("x-goog-user-project", t.userProject)
 	}
 	return t.base.RoundTrip(cloned)
 }
@@ -214,76 +245,125 @@ func (c *GCPObservabilityConnector) Provenance() SourceProvenance {
 	return ProvenanceFixture
 }
 
-// QueryLoggingAndGKE executes live Cloud Logging entries:list and GKE clusters.get HTTP requests.
-func (c *GCPObservabilityConnector) QueryLoggingAndGKE(ctx context.Context, persona PersonaID) ([]OutboundWireRecord, SourceProvenance) {
-	if c.Provenance() != ProvenanceLive {
-		return nil, ProvenanceFixture
+// QueryCloudLogging executes a live Cloud Logging entries:list HTTP request.
+func (c *GCPObservabilityConnector) QueryCloudLogging(ctx context.Context, persona PersonaID) (*OutboundWireRecord, error) {
+	if c == nil || c.rt == nil {
+		return nil, fmt.Errorf("gcp observability connector not initialized")
 	}
 	cfg := c.rt.Config()
 	projectID := strings.TrimSpace(cfg.GCPProjectID)
-	location := firstNonEmpty(strings.TrimSpace(cfg.GCPLocation), "us-central1")
-	clusterName := strings.TrimSpace(cfg.GKEClusterName)
-
+	if projectID == "" {
+		return nil, fmt.Errorf("GOOGLE_CLOUD_PROJECT is not configured")
+	}
 	hc := cfg.HTTPClient
 	if hc == nil {
 		hc = &http.Client{Timeout: 5 * time.Second}
 	}
 
-	var records []OutboundWireRecord
-
-	// 1. POST {LoggingBaseURL}/v2/entries:list
 	loggingURL := fmt.Sprintf("%s/v2/entries:list", c.LoggingBaseURL)
 	loggingBody, _ := json.Marshal(map[string]any{
 		"resourceNames": []string{"projects/" + projectID},
 		"pageSize":      5,
 	})
 	logReq, err := http.NewRequestWithContext(ctx, http.MethodPost, loggingURL, bytes.NewReader(loggingBody))
-	if err == nil {
-		logReq.Header.Set("Content-Type", "application/json")
-		tok := resolveGCPBearerToken(ctx, loggingURL)
-		if tok != "" {
-			logReq.Header.Set("Authorization", "Bearer "+tok)
-		}
-		if resp, doErr := hc.Do(logReq); doErr == nil {
-			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				records = append(records, OutboundWireRecord{
-					Provider:          ProviderGCPIAM,
-					ToolName:          "logging.entries.list",
-					Method:            http.MethodPost,
-					URL:               loggingURL,
-					AuthHeaderPresent: tok != "",
-					AuthPrincipal:     string(persona),
-					StatusCode:        resp.StatusCode,
-					Provenance:        ProvenanceLive,
-				})
-			}
-		}
+	if err != nil {
+		return nil, err
+	}
+	logReq.Header.Set("Content-Type", "application/json")
+	tok := resolveGCPBearerToken(ctx, loggingURL)
+	if tok != "" {
+		logReq.Header.Set("Authorization", "Bearer "+tok)
+	}
+	if projectID != "" {
+		logReq.Header.Set("x-goog-user-project", projectID)
+	}
+	resp, doErr := hc.Do(logReq)
+	if doErr != nil {
+		return nil, doErr
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("logging entries:list returned HTTP %d", resp.StatusCode)
+	}
+	return &OutboundWireRecord{
+		Provider:          ProviderGCPIAM,
+		ToolName:          "logging.entries.list",
+		Method:            http.MethodPost,
+		URL:               loggingURL,
+		AuthHeaderPresent: tok != "",
+		AuthPrincipal:     string(persona),
+		StatusCode:        resp.StatusCode,
+		Provenance:        ProvenanceLive,
+		Headers: map[string]string{
+			"x-goog-user-project": projectID,
+		},
+	}, nil
+}
+
+// GetGKECluster executes a live GKE clusters.get HTTP request.
+func (c *GCPObservabilityConnector) GetGKECluster(ctx context.Context, persona PersonaID) (*OutboundWireRecord, error) {
+	if c == nil || c.rt == nil {
+		return nil, fmt.Errorf("gcp observability connector not initialized")
+	}
+	cfg := c.rt.Config()
+	projectID := strings.TrimSpace(cfg.GCPProjectID)
+	location := firstNonEmpty(strings.TrimSpace(cfg.GCPLocation), "us-central1")
+	clusterName := strings.TrimSpace(cfg.GKEClusterName)
+	if projectID == "" || clusterName == "" {
+		return nil, fmt.Errorf("GOOGLE_CLOUD_PROJECT or GKE_CLUSTER_NAME is not configured")
+	}
+	hc := cfg.HTTPClient
+	if hc == nil {
+		hc = &http.Client{Timeout: 5 * time.Second}
 	}
 
-	// 2. GET {GKEBaseURL}/v1/projects/{project}/locations/{location}/clusters/{cluster}
 	gkeURL := fmt.Sprintf("%s/v1/projects/%s/locations/%s/clusters/%s", c.GKEBaseURL, projectID, location, clusterName)
 	gkeReq, err := http.NewRequestWithContext(ctx, http.MethodGet, gkeURL, nil)
-	if err == nil {
-		tok := resolveGCPBearerToken(ctx, gkeURL)
-		if tok != "" {
-			gkeReq.Header.Set("Authorization", "Bearer "+tok)
-		}
-		if resp, doErr := hc.Do(gkeReq); doErr == nil {
-			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				records = append(records, OutboundWireRecord{
-					Provider:          ProviderGCPIAM,
-					ToolName:          "container.clusters.get",
-					Method:            http.MethodGet,
-					URL:               gkeURL,
-					AuthHeaderPresent: tok != "",
-					AuthPrincipal:     string(persona),
-					StatusCode:        resp.StatusCode,
-					Provenance:        ProvenanceLive,
-				})
-			}
-		}
+	if err != nil {
+		return nil, err
+	}
+	tok := resolveGCPBearerToken(ctx, gkeURL)
+	if tok != "" {
+		gkeReq.Header.Set("Authorization", "Bearer "+tok)
+	}
+	if projectID != "" {
+		gkeReq.Header.Set("x-goog-user-project", projectID)
+	}
+	resp, doErr := hc.Do(gkeReq)
+	if doErr != nil {
+		return nil, doErr
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("container clusters.get returned HTTP %d", resp.StatusCode)
+	}
+	return &OutboundWireRecord{
+		Provider:          ProviderGCPIAM,
+		ToolName:          "container.clusters.get",
+		Method:            http.MethodGet,
+		URL:               gkeURL,
+		AuthHeaderPresent: tok != "",
+		AuthPrincipal:     string(persona),
+		StatusCode:        resp.StatusCode,
+		Provenance:        ProvenanceLive,
+		Headers: map[string]string{
+			"x-goog-user-project": projectID,
+		},
+	}, nil
+}
+
+// QueryLoggingAndGKE executes live Cloud Logging entries:list and GKE clusters.get HTTP requests.
+func (c *GCPObservabilityConnector) QueryLoggingAndGKE(ctx context.Context, persona PersonaID) ([]OutboundWireRecord, SourceProvenance) {
+	if c.Provenance() != ProvenanceLive {
+		return nil, ProvenanceFixture
+	}
+
+	var records []OutboundWireRecord
+	if logRec, err := c.QueryCloudLogging(ctx, persona); err == nil && logRec != nil {
+		records = append(records, *logRec)
+	}
+	if gkeRec, err := c.GetGKECluster(ctx, persona); err == nil && gkeRec != nil {
+		records = append(records, *gkeRec)
 	}
 
 	if len(records) == 0 {
@@ -315,145 +395,6 @@ func (c *AgentPlatformGeminiConnector) Provenance() SourceProvenance {
 	return ProvenanceFixture
 }
 
-type governedToolArgs struct {
-	Target string `json:"target,omitempty"`
-	Query  string `json:"query,omitempty"`
-}
-
-type governedToolResult struct {
-	Status     string           `json:"status"`
-	Detail     string           `json:"detail"`
-	Provenance SourceProvenance `json:"provenance,omitempty"`
-}
-
-func buildGovernedADKTools(rt *Runtime) ([]tool.Tool, error) {
-	var cfg RuntimeConfig
-	if rt != nil {
-		cfg = rt.Config()
-	}
-	specs := []struct {
-		name string
-		desc string
-		fn   func(args governedToolArgs) governedToolResult
-	}{
-		{
-			"read_gmail_escalation",
-			"Read and SDP-sanitize customer P0 escalation emails from Gmail via 3LO Token Broker",
-			func(args governedToolArgs) governedToolResult {
-				query := firstNonEmpty(args.Query, "subject:\"AegisSRE P0 Escalation\"")
-				endpoint := firstNonEmpty(cfg.GmailAPIURL, "https://gmail.googleapis.com")
-				return governedToolResult{
-					Status:     "GOVERNED_OK",
-					Detail:     fmt.Sprintf("SDP-sanitized Gmail escalation message matching %s via %s", query, endpoint),
-					Provenance: NewGmailConnector(rt).Provenance(),
-				}
-			},
-		},
-		{
-			"get_jira_issue",
-			"Read Jira Cloud incident ticket via per-persona 3LO Token Broker",
-			func(args governedToolArgs) governedToolResult {
-				key := firstNonEmpty(args.Target, "SEC-101")
-				endpoint := firstNonEmpty(cfg.JiraBaseURL, "https://aegis-sre.atlassian.net")
-				return governedToolResult{
-					Status:     "GOVERNED_OK",
-					Detail:     fmt.Sprintf("Inspected Jira Cloud ticket %s on %s via 3LO Token Broker", key, endpoint),
-					Provenance: NewJiraConnector(rt).Provenance(),
-				}
-			},
-		},
-		{
-			"post_jira_comment",
-			"Post an SDP-redacted incident update comment to Jira Cloud (gated by Step-Up Confirmation)",
-			func(args governedToolArgs) governedToolResult {
-				key := firstNonEmpty(args.Target, "SEC-101")
-				endpoint := firstNonEmpty(cfg.JiraBaseURL, "https://aegis-sre.atlassian.net")
-				return governedToolResult{
-					Status:     "STEP_UP_GATED",
-					Detail:     fmt.Sprintf("Jira comment mutation on %s (%s) requires Step-Up Confirmation", key, endpoint),
-					Provenance: NewJiraConnector(rt).Provenance(),
-				}
-			},
-		},
-		{
-			"get_github_advisory",
-			"Read GitHub repository security advisory and checkout-service source via 3LO Token Broker",
-			func(args governedToolArgs) governedToolResult {
-				repo := firstNonEmpty(args.Target, cfg.GitHubTargetRepo, "gke-demos/aegis-checkout-target")
-				return governedToolResult{
-					Status:     "GOVERNED_OK",
-					Detail:     fmt.Sprintf("Read security advisory and checkout.go from %s via 3LO Token Broker", repo),
-					Provenance: NewGitHubConnector(rt).Provenance(),
-				}
-			},
-		},
-		{
-			"create_github_pull_request",
-			"Create a remediation Pull Request on the Target Repository (gated by Step-Up Confirmation)",
-			func(args governedToolArgs) governedToolResult {
-				repo := firstNonEmpty(args.Target, cfg.GitHubTargetRepo, "gke-demos/aegis-checkout-target")
-				return governedToolResult{
-					Status:     "STEP_UP_GATED",
-					Detail:     fmt.Sprintf("Pull Request creation on %s requires Step-Up Confirmation", repo),
-					Provenance: NewGitHubConnector(rt).Provenance(),
-				}
-			},
-		},
-		{
-			"query_cloud_logging",
-			"Query GKE container logs via Agent Gateway UAP (logging.entries.list)",
-			func(args governedToolArgs) governedToolResult {
-				proj := firstNonEmpty(cfg.GCPProjectID, "aegis-sre")
-				return governedToolResult{
-					Status:     "GOVERNED_OK",
-					Detail:     fmt.Sprintf("Queried Cloud Logging entries:list for projects/%s (%s)", proj, firstNonEmpty(args.Query, "severity>=ERROR")),
-					Provenance: NewGCPObservabilityConnector(rt).Provenance(),
-				}
-			},
-		},
-		{
-			"get_gke_cluster_status",
-			"Inspect GKE cluster status via Agent Gateway UAP (container.clusters.get)",
-			func(args governedToolArgs) governedToolResult {
-				proj := firstNonEmpty(cfg.GCPProjectID, "aegis-sre")
-				cluster := firstNonEmpty(args.Target, cfg.GKEClusterName, "aegis-gke-cluster")
-				return governedToolResult{
-					Status:     "GOVERNED_OK",
-					Detail:     fmt.Sprintf("Inspected GKE cluster projects/%s/clusters/%s via Agent Gateway UAP", proj, cluster),
-					Provenance: NewGCPObservabilityConnector(rt).Provenance(),
-				}
-			},
-		},
-		{
-			"run_sandbox_verification",
-			"Delegate untrusted go test verification over attenuated A2A v2 to Agent Substrate v0.5.0 gVisor Sandbox",
-			func(args governedToolArgs) governedToolResult {
-				target := firstNonEmpty(args.Target, cfg.GitHubTargetRepo, "gke-demos/aegis-checkout-target")
-				return governedToolResult{
-					Status:     "GOVERNED_OK",
-					Detail:     fmt.Sprintf("Delegated go test ./... verification on %s to Agent Substrate gVisor sandbox (X-Aegis-OAuth-Access-Token stripped)", target),
-					Provenance: NewSubstrateSandboxConnector(rt).Provenance(),
-				}
-			},
-		},
-	}
-	tools := make([]tool.Tool, 0, len(specs))
-	for _, sp := range specs {
-		handler := sp.fn
-		ft, err := functiontool.New(functiontool.Config{
-			Name:        sp.name,
-			Description: sp.desc,
-		}, func(_ agent.Context, args governedToolArgs) (governedToolResult, error) {
-			return handler(args), nil
-		})
-		if err != nil {
-			return nil, err
-		}
-		tools = append(tools, ft)
-	}
-	return tools, nil
-}
-
 // BuildOrchestratorAgent constructs the ADK Go v2 llmagent ("aegis_triage_orchestrator")
 // with gemini-2.5-flash and the 8 governed AegisSRE functiontools.
 func (c *AgentPlatformGeminiConnector) BuildOrchestratorAgent(ctx context.Context) (agent.Agent, error) {
@@ -461,7 +402,7 @@ func (c *AgentPlatformGeminiConnector) BuildOrchestratorAgent(ctx context.Contex
 	if c != nil {
 		rt = c.rt
 	}
-	tools, err := buildGovernedADKTools(rt)
+	tools, _, err := buildUnifiedGovernedADKTools(rt)
 	if err != nil {
 		return nil, err
 	}
@@ -506,20 +447,22 @@ func (c *AgentPlatformGeminiConnector) buildLLMModel(ctx context.Context) model.
 	}
 
 	return &agentPlatformGeminiRESTModel{
-		modelName:  "gemini-2.5-flash",
-		endpoint:   endpoint,
-		httpClient: hc,
-		sdkModel:   sdkModel,
-		useDirect:  strings.TrimSpace(cfg.GeminiEndpoint) != "" || sdkModel == nil,
+		modelName:   "gemini-2.5-flash",
+		endpoint:    endpoint,
+		userProject: strings.TrimSpace(cfg.GCPProjectID),
+		httpClient:  hc,
+		sdkModel:    sdkModel,
+		useDirect:   strings.TrimSpace(cfg.GeminiEndpoint) != "" || sdkModel == nil,
 	}
 }
 
 type agentPlatformGeminiRESTModel struct {
-	modelName  string
-	endpoint   string
-	httpClient *http.Client
-	sdkModel   model.LLM
-	useDirect  bool
+	modelName   string
+	endpoint    string
+	userProject string
+	httpClient  *http.Client
+	sdkModel    model.LLM
+	useDirect   bool
 }
 
 func (m *agentPlatformGeminiRESTModel) Name() string {
@@ -534,8 +477,38 @@ func (m *agentPlatformGeminiRESTModel) GenerateContent(ctx context.Context, req 
 		payload := map[string]any{
 			"contents": req.Contents,
 		}
-		if req.Config != nil && req.Config.SystemInstruction != nil {
-			payload["systemInstruction"] = req.Config.SystemInstruction
+		if req.Config != nil {
+			if req.Config.SystemInstruction != nil {
+				payload["systemInstruction"] = req.Config.SystemInstruction
+			}
+			if len(req.Config.Tools) > 0 {
+				var fnDecls []map[string]any
+				for _, t := range req.Config.Tools {
+					if t == nil {
+						continue
+					}
+					for _, fd := range t.FunctionDeclarations {
+						if fd == nil || strings.TrimSpace(fd.Name) == "" {
+							continue
+						}
+						decl := map[string]any{
+							"name":        fd.Name,
+							"description": fd.Description,
+						}
+						if fd.Parameters != nil {
+							decl["parameters"] = fd.Parameters
+						} else if fd.ParametersJsonSchema != nil {
+							decl["parameters"] = fd.ParametersJsonSchema
+						}
+						fnDecls = append(fnDecls, decl)
+					}
+				}
+				if len(fnDecls) > 0 {
+					payload["tools"] = []map[string]any{
+						{"functionDeclarations": fnDecls},
+					}
+				}
+			}
 		}
 		rawBody, err := json.Marshal(payload)
 		if err != nil {
@@ -550,6 +523,9 @@ func (m *agentPlatformGeminiRESTModel) GenerateContent(ctx context.Context, req 
 		httpReq.Header.Set("Content-Type", "application/json")
 		if tok := resolveGCPBearerToken(ctx, m.endpoint); tok != "" {
 			httpReq.Header.Set("Authorization", "Bearer "+tok)
+		}
+		if m.userProject != "" {
+			httpReq.Header.Set("x-goog-user-project", m.userProject)
 		}
 		resp, err := m.httpClient.Do(httpReq)
 		if err != nil {
@@ -575,8 +551,19 @@ func (m *agentPlatformGeminiRESTModel) GenerateContent(ctx context.Context, req 
 			yield(nil, fmt.Errorf("agent platform gemini response contained no candidates"))
 			return
 		}
+		content := parsed.Candidates[0].Content
+		for i, p := range content.Parts {
+			if p != nil && p.FunctionCall != nil && strings.TrimSpace(p.FunctionCall.Name) != "" {
+				callID := p.FunctionCall.ID
+				fcPart := genai.NewPartFromFunctionCall(p.FunctionCall.Name, p.FunctionCall.Args)
+				if callID != "" && fcPart.FunctionCall != nil {
+					fcPart.FunctionCall.ID = callID
+				}
+				content.Parts[i] = fcPart
+			}
+		}
 		yield(&model.LLMResponse{
-			Content:      parsed.Candidates[0].Content,
+			Content:      content,
 			FinishReason: parsed.Candidates[0].FinishReason,
 			TurnComplete: true,
 		}, nil)
@@ -619,84 +606,3 @@ func (c *AgentPlatformGeminiConnector) SynthesizeTurn(ctx context.Context, req T
 	return strings.Join(texts, "\n"), nil
 }
 
-func enrichTurnWithLiveGCPObservabilityAndRegistry(ctx context.Context, r *Runtime, req TurnRequest, res *TurnResult) {
-	if req.ScenarioID != Scenario03AgentGatewayAndStepUp && req.ScenarioID != Scenario05FullChainZeroTrust {
-		return
-	}
-	cfg := r.Config()
-
-	// 1. Live Agent Registry discovery with ADC token
-	regLive := false
-	if strings.TrimSpace(cfg.AgentRegistryURL) != "" {
-		regConn := NewAgentRegistryConnector(r)
-		if _, prov, err := regConn.DiscoverGovernedResources(ctx); err == nil && prov == ProvenanceLive {
-			regLive = true
-			for i := range res.BoundaryTrace {
-				ev := &res.BoundaryTrace[i]
-				if ev.Boundary == BoundaryPlatformGovernance &&
-					(strings.Contains(ev.Component, "agentregistry") || strings.Contains(ev.Shield, "Agent Registry")) {
-					ev.Provenance = ProvenanceLive
-				}
-			}
-		}
-	}
-
-	// 2. Live GCP Observability (Cloud Logging & GKE Cluster)
-	if strings.TrimSpace(cfg.GCPProjectID) != "" && strings.TrimSpace(cfg.GKEClusterName) != "" {
-		obsConn := NewGCPObservabilityConnector(r)
-		liveRecords, prov := obsConn.QueryLoggingAndGKE(ctx, req.Persona)
-		if prov == ProvenanceLive && len(liveRecords) > 0 {
-			for _, lwr := range liveRecords {
-				replaced := false
-				for i := range res.WireRecords {
-					if res.WireRecords[i].ToolName == lwr.ToolName {
-						res.WireRecords[i] = lwr
-						replaced = true
-						break
-					}
-				}
-				if !replaced {
-					res.WireRecords = append(res.WireRecords, lwr)
-				}
-			}
-			for i := range res.BoundaryTrace {
-				ev := &res.BoundaryTrace[i]
-				if ev.Boundary == BoundaryPlatformGovernance &&
-					(strings.Contains(ev.Action, "logging.entries.list") || strings.Contains(ev.Action, "container.clusters.get") || regLive) {
-					ev.Provenance = ProvenanceLive
-				}
-			}
-		}
-	}
-}
-
-func enrichTurnWithLiveAgentPlatformGemini(ctx context.Context, r *Runtime, req TurnRequest, res *TurnResult) {
-	if r == nil || res == nil || res.Outcome != OutcomeDefendedSuccess {
-		return
-	}
-	conn := NewAgentPlatformGeminiConnector(r)
-	if conn.Provenance() != ProvenanceLive {
-		return
-	}
-	synthesized, err := conn.SynthesizeTurn(ctx, req, res.SanitizedInputPreview)
-	if err != nil || strings.TrimSpace(synthesized) == "" {
-		return
-	}
-	// Screen synthesized output through ContentGuard to ensure zero raw PII leak
-	guarded := r.Guard().InspectAndSanitize(ctx, synthesized, req.Posture)
-	if guarded.Blocked {
-		return
-	}
-	res.AssistantText = guarded.SanitizedText
-	res.BoundaryTrace = append(res.BoundaryTrace, BoundaryTraceEvent{
-		Order:      len(res.BoundaryTrace) + 1,
-		Boundary:   BoundaryReasoningGuard,
-		Shield:     "ADK v2 Reasoning Orchestrator",
-		Component:  "ADK v2 llmagent (gemini-2.5-flash)",
-		Action:     "GenerateContent(aegis_triage_orchestrator)",
-		Verdict:    VerdictAllowed,
-		Provenance: ProvenanceLive,
-		Detail:     "Synthesized incident summary via ADK Go v2 llmagent (gemini-2.5-flash) over SDP-sanitized context",
-		Timestamp:  time.Now().UTC(),
-	})
-}

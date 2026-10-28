@@ -189,6 +189,8 @@ type ConsentChallenge struct {
 // StepUpConfirmation represents an adk_request_confirmation HITL interrupt.
 type StepUpConfirmation struct {
 	ConfirmationID string            `json:"confirmationId"`
+	CallID         string            `json:"callId,omitempty"`
+	ADKSessionID   string            `json:"adkSessionId,omitempty"`
 	FunctionCall   string            `json:"functionCall"` // "adk_request_confirmation"
 	TargetTool     string            `json:"targetTool"`
 	TargetResource string            `json:"targetResource"`
@@ -224,19 +226,23 @@ type TurnRequest struct {
 
 // TurnResult is the output of AegisRuntime.ExecuteTurn.
 type TurnResult struct {
-	SessionID             string               `json:"sessionId"`
-	Persona               PersonaID            `json:"persona"`
-	ScenarioID            ScenarioID           `json:"scenarioId"`
-	Posture               SecurityPosture      `json:"posture"`
-	Outcome               TurnOutcome          `json:"outcome"`
-	AssistantText         string               `json:"assistantText"`
-	SanitizedInputPreview string               `json:"sanitizedInputPreview"`
-	OutboundCommentPreview string              `json:"outboundCommentPreview,omitempty"`
-	Cards                 []A2UICard           `json:"cards"`
-	BoundaryTrace         []BoundaryTraceEvent `json:"boundaryTrace"`
-	ConsentChallenge      *ConsentChallenge    `json:"consentChallenge,omitempty"`
-	StepUpConfirmation    *StepUpConfirmation  `json:"stepUpConfirmation,omitempty"`
-	WireRecords           []OutboundWireRecord `json:"wireRecords,omitempty"`
+	SessionID              string               `json:"sessionId"`
+	ADKSessionID           string               `json:"adkSessionId,omitempty"`
+	Persona                PersonaID            `json:"persona"`
+	ScenarioID             ScenarioID           `json:"scenarioId"`
+	Posture                SecurityPosture      `json:"posture"`
+	Outcome                TurnOutcome          `json:"outcome"`
+	AssistantText          string               `json:"assistantText"`
+	SanitizedInputPreview  string               `json:"sanitizedInputPreview"`
+	OutboundCommentPreview string               `json:"outboundCommentPreview,omitempty"`
+	Cards                  []A2UICard           `json:"cards"`
+	BoundaryTrace          []BoundaryTraceEvent `json:"boundaryTrace"`
+	ConsentChallenge       *ConsentChallenge    `json:"consentChallenge,omitempty"`
+	StepUpConfirmation     *StepUpConfirmation  `json:"stepUpConfirmation,omitempty"`
+	WireRecords            []OutboundWireRecord `json:"wireRecords,omitempty"`
+	ModelCallCount         int                  `json:"modelCallCount,omitempty"`
+	PluginCallbacks        []string             `json:"pluginCallbacks,omitempty"`
+	ExecutedTools          []string             `json:"executedTools,omitempty"`
 }
 
 // ConfirmationResolution resolves a pending StepUpConfirmation.
@@ -248,12 +254,13 @@ type ConfirmationResolution struct {
 
 // OAuthGrantRequest grants or completes a 3LO token for a Persona and Provider.
 type OAuthGrantRequest struct {
-	SessionID string     `json:"sessionId"`
-	Persona   PersonaID  `json:"persona"`
-	Provider  ProviderID `json:"provider"`
-	Scopes    []string   `json:"scopes,omitempty"`
-	Token     string     `json:"token,omitempty"`
-	Nonce     string     `json:"nonce,omitempty"`
+	SessionID   string     `json:"sessionId"`
+	Persona     PersonaID  `json:"persona"`
+	Provider    ProviderID `json:"provider"`
+	Scopes      []string   `json:"scopes,omitempty"`
+	Token       string     `json:"token,omitempty"`
+	AccessToken string     `json:"accessToken,omitempty"`
+	Nonce       string     `json:"nonce,omitempty"`
 }
 
 // OAuthCallback carries parameters to complete an OAuth 2.0 3LO grant or callback.
@@ -268,11 +275,41 @@ type ConsentResult struct {
 	Session   *SessionSnapshot `json:"session,omitempty"`
 }
 
+// TurnStreamEventType identifies one of the 6 real-time SSE frames in ADR-0009.
+type TurnStreamEventType string
+
+const (
+	TurnStreamEventStarted      TurnStreamEventType = "turn.started"
+	TurnStreamEventBoundaryStep TurnStreamEventType = "boundary.step"
+	TurnStreamEventWireRecord   TurnStreamEventType = "wire.record"
+	TurnStreamEventTextDelta    TurnStreamEventType = "text.delta"
+	TurnStreamEventA2UICard     TurnStreamEventType = "a2ui.card"
+	TurnStreamEventCompleted    TurnStreamEventType = "turn.completed"
+)
+
+// TurnStreamEvent is a single frame emitted over the Turn Event Stream (SSE) during a turn.
+type TurnStreamEvent struct {
+	Type       TurnStreamEventType `json:"type"`
+	SessionID  string              `json:"sessionId"`
+	Persona    PersonaID           `json:"persona"`
+	ScenarioID ScenarioID          `json:"scenarioId,omitempty"`
+	Step       *BoundaryTraceEvent `json:"step,omitempty"`
+	Record     *OutboundWireRecord `json:"record,omitempty"`
+	Delta      string              `json:"delta,omitempty"`
+	Card       *A2UICard           `json:"card,omitempty"`
+	Turn       *TurnResult         `json:"turn,omitempty"`
+}
+
+// TurnEventSink receives real-time TurnStreamEvent frames as a turn executes.
+type TurnEventSink func(TurnStreamEvent)
+
 // AegisRuntime defines the primary in-process seam for executing turns, resolving HITL
 // confirmations, completing 3LO OAuth callbacks, and inspecting session state.
 type AegisRuntime interface {
 	ExecuteTurn(ctx context.Context, req TurnRequest) (*TurnResult, error)
+	ExecuteTurnStream(ctx context.Context, req TurnRequest, sink TurnEventSink) (*TurnResult, error)
 	ResolveConfirmation(ctx context.Context, res ConfirmationResolution) (*TurnResult, error)
+	ResolveConfirmationStream(ctx context.Context, res ConfirmationResolution, sink TurnEventSink) (*TurnResult, error)
 	CompleteOAuthConsent(ctx context.Context, cb OAuthCallback) (*ConsentResult, error)
 	GetSessionState(ctx context.Context, sessionID string) (*SessionSnapshot, error)
 	GetSourcesStatus(ctx context.Context) ([]SourceStatus, error)
@@ -321,10 +358,6 @@ type RuntimeConfig struct {
 	OAuthTokenEndpointOverride string
 	HTTPClient                 *http.Client
 }
-
-// ScenarioHandlerFunc allows modular vertical slices (Tickets 2, 3, 4, 6) to register
-// scenario and route handlers onto Runtime without modifying core files simultaneously.
-type ScenarioHandlerFunc func(ctx context.Context, rt *Runtime, req TurnRequest) (*TurnResult, error)
 
 // HTTPRouteRegistrar registers additional HTTP routes onto the Aegis server mux.
 type HTTPRouteRegistrar func(mux *http.ServeMux, rt *Runtime)

@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -169,7 +171,7 @@ func (c *SubstrateSandboxConnector) dispatchGatewayHTTP(
 	if parsed.AllowedEgress == "" {
 		parsed.AllowedEgress = "api.github.com"
 	}
-	if parsed.BlockedEgress == "" {
+	if parsed.BlockedEgress == "" && parsed.Verified && execReq.AtenetMITMEnabled && !strings.HasPrefix(parsed.Metadata["evilExfilProbe"], "http:2") {
 		parsed.BlockedEgress = "https://evil.example.com/exfil"
 	}
 	parsed.Provenance = ProvenanceLive
@@ -251,28 +253,56 @@ func (c *SubstrateSandboxConnector) verifyClusterViaKubectl(
 		},
 	}
 
-	if podsOut, podsErr := runner(cmdCtx, "kubectl", "get", "pods", "-A", "-l", fmt.Sprintf("ate.dev/pool=%s", poolName), "-o", "json"); podsErr == nil && len(podsOut) > 0 {
-		var podList struct {
-			Items []struct {
-				Metadata struct {
-					Name      string `json:"name"`
-					Namespace string `json:"namespace"`
-				} `json:"metadata"`
-				Status struct {
-					Phase string `json:"phase"`
-				} `json:"status"`
-			} `json:"items"`
+	type k8sPodList struct {
+		Items []struct {
+			Metadata struct {
+				Name      string `json:"name"`
+				Namespace string `json:"namespace"`
+			} `json:"metadata"`
+			Status struct {
+				Phase string `json:"phase"`
+				PodIP string `json:"podIP"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+
+	var podList k8sPodList
+	if podsOut, podsErr := runner(cmdCtx, "kubectl", "get", "pods", "-A", "-l", fmt.Sprintf("ate.dev/worker-pool=%s", poolName), "-o", "json"); podsErr == nil && len(podsOut) > 0 {
+		_ = json.Unmarshal(podsOut, &podList)
+	}
+	if len(podList.Items) == 0 || podList.Items[0].Metadata.Name == "" {
+		if fallbackOut, fallbackErr := runner(cmdCtx, "kubectl", "get", "pods", "-A", "-l", fmt.Sprintf("ate.dev/pool=%s", poolName), "-o", "json"); fallbackErr == nil && len(fallbackOut) > 0 {
+			_ = json.Unmarshal(fallbackOut, &podList)
 		}
-		if json.Unmarshal(podsOut, &podList) == nil && len(podList.Items) > 0 && podList.Items[0].Metadata.Name != "" {
-			phase := strings.TrimSpace(podList.Items[0].Status.Phase)
-			if phase == "" || strings.EqualFold(phase, "Running") {
-				podName := podList.Items[0].Metadata.Name
-				podNS := firstNonEmpty(podList.Items[0].Metadata.Namespace, "aegis-system")
-				parsed.Metadata["sandboxPod"] = podName
-				if execOut, execErr := runner(cmdCtx, "kubectl", "exec", "-n", podNS, podName, "--", "go", "test", "./..."); execErr == nil && len(execOut) > 0 {
-					parsed.TestOutput = strings.TrimSpace(string(execOut))
-				}
+	}
+	if len(podList.Items) > 0 && podList.Items[0].Metadata.Name != "" {
+		phase := strings.TrimSpace(podList.Items[0].Status.Phase)
+		if phase == "" || strings.EqualFold(phase, "Running") {
+			podName := podList.Items[0].Metadata.Name
+			podNS := firstNonEmpty(podList.Items[0].Metadata.Namespace, "aegis-system")
+			parsed.Metadata["sandboxPod"] = podName
+			if podIP := strings.TrimSpace(podList.Items[0].Status.PodIP); podIP != "" {
+				parsed.Metadata["workerPodIP"] = podIP
 			}
+			if execOut, execErr := runner(cmdCtx, "kubectl", "exec", "-n", podNS, podName, "--", "go", "test", "./..."); execErr == nil && len(execOut) > 0 {
+				parsed.TestOutput = strings.TrimSpace(string(execOut))
+			}
+		}
+	}
+
+	kubectlAteCandidates := []string{"kubectl-ate"}
+	if homeDir := strings.TrimSpace(os.Getenv("HOME")); homeDir != "" {
+		kubectlAteCandidates = append(kubectlAteCandidates, filepath.Join(homeDir, "go", "bin", "kubectl-ate"))
+	}
+
+	var actorsOut, egressOut []byte
+	for _, bin := range kubectlAteCandidates {
+		if out, err := runner(cmdCtx, bin, "get", "actors", "-a", "aegis-system", "-o", "json"); err == nil && len(bytes.TrimSpace(out)) > 0 {
+			actorsOut = out
+			if egOut, egErr := runner(cmdCtx, bin, "get", "egress-policy", "default", "-a", "aegis-system", "-o", "json"); egErr == nil && len(bytes.TrimSpace(egOut)) > 0 {
+				egressOut = egOut
+			}
+			break
 		}
 	}
 
@@ -290,6 +320,70 @@ func (c *SubstrateSandboxConnector) verifyClusterViaKubectl(
 				"X-Substrate-Sandbox-Config": sandboxConfigName,
 			},
 		},
+	}
+
+	if len(actorsOut) > 0 || len(egressOut) > 0 {
+		parsed.Metadata["kubectlAteVerified"] = "true"
+		type actorEntry struct {
+			Name     string `json:"name"`
+			State    string `json:"state"`
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Status struct {
+				State string `json:"state"`
+				Phase string `json:"phase"`
+			} `json:"status"`
+		}
+		var actorList struct {
+			Items []actorEntry `json:"items"`
+		}
+		if json.Unmarshal(actorsOut, &actorList) == nil && len(actorList.Items) > 0 {
+			item := actorList.Items[0]
+			if name := firstNonEmpty(item.Metadata.Name, item.Name); name != "" {
+				parsed.Metadata["actorName"] = name
+			}
+			if state := firstNonEmpty(item.Status.State, firstNonEmpty(item.Status.Phase, item.State)); state != "" {
+				parsed.Metadata["actorState"] = state
+			}
+		} else {
+			var actorSlice []actorEntry
+			if json.Unmarshal(actorsOut, &actorSlice) == nil && len(actorSlice) > 0 {
+				item := actorSlice[0]
+				if name := firstNonEmpty(item.Metadata.Name, item.Name); name != "" {
+					parsed.Metadata["actorName"] = name
+				}
+				if state := firstNonEmpty(item.Status.State, firstNonEmpty(item.Status.Phase, item.State)); state != "" {
+					parsed.Metadata["actorState"] = state
+				}
+			}
+		}
+		if len(egressOut) > 0 {
+			var epObj struct {
+				DefaultAction string `json:"defaultAction"`
+				Spec          struct {
+					DefaultAction string `json:"defaultAction"`
+				} `json:"spec"`
+			}
+			if json.Unmarshal(egressOut, &epObj) == nil {
+				if da := firstNonEmpty(epObj.Spec.DefaultAction, epObj.DefaultAction); da != "" {
+					parsed.Metadata["egressDefaultAction"] = da
+				}
+			}
+		}
+		wire = append(wire, OutboundWireRecord{
+			Provider:          ProviderGCPIAM,
+			ToolName:          "substrate.kubectl_ate.inspect_actors",
+			Method:            http.MethodGet,
+			URL:               "ate://aegis-system/actors",
+			AuthHeaderPresent: true,
+			AuthPrincipal:     "kubeconfig:current-context",
+			StatusCode:        http.StatusOK,
+			Provenance:        ProvenanceLive,
+			Headers: map[string]string{
+				"X-Substrate-Atespace": "aegis-system",
+			},
+		})
 	}
 	return parsed, wire, true
 }

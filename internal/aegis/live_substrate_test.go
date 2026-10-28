@@ -168,15 +168,29 @@ func TestLiveSubstrateKubectlBridge_InspectsClusterCRDsAndMarksProvenanceLive(t 
 				"spec": {"runtimeClassName": "gvisor"}
 			}`), nil
 		}
-		if strings.Contains(cmdStr, "get pods") {
+		if strings.Contains(cmdStr, "get pods -A -l ate.dev/worker-pool=aegis-remediator-pool") {
 			return []byte(`{
 				"items": [{
-					"metadata": {"name": "aegis-remediator-pool-pod-0", "namespace": "aegis-system"},
-					"status": {"phase": "Running"}
+					"metadata": {"name": "aegis-remediator-pool-6b5f8-x9z2k", "namespace": "aegis-system"},
+					"status": {"phase": "Running", "podIP": "10.28.1.42"}
 				}]
 			}`), nil
 		}
-		if strings.Contains(cmdStr, "exec -n aegis-system aegis-remediator-pool-pod-0") {
+		if strings.Contains(cmdStr, "get actors -a aegis-system -o json") {
+			return []byte(`{
+				"items": [{
+					"metadata": {"name": "sandbox-remediator-actor-01", "namespace": "aegis-system"},
+					"status": {"state": "READY"}
+				}]
+			}`), nil
+		}
+		if strings.Contains(cmdStr, "get egress-policy default -a aegis-system -o json") {
+			return []byte(`{
+				"metadata": {"name": "default", "namespace": "aegis-system"},
+				"spec": {"defaultAction": "DENY"}
+			}`), nil
+		}
+		if strings.Contains(cmdStr, "exec -n aegis-system aegis-remediator-pool-6b5f8-x9z2k") {
 			return []byte("PASS\nok  \tgithub.com/gke-demos/aegis-checkout-target\t0.014s\n"), nil
 		}
 		return []byte(`{}`), nil
@@ -186,6 +200,39 @@ func TestLiveSubstrateKubectlBridge_InspectsClusterCRDsAndMarksProvenanceLive(t 
 		LiveSubstrate: true,
 	})
 	rt.SetSubstrateCommandRunner(mockRunner)
+
+	connector := aegis.NewSubstrateSandboxConnector(rt)
+	execResp, execWire, ok := connector.Execute(ctx, aegis.SandboxExecutionRequest{
+		SandboxClass:      "gvisor",
+		PreferredFidelity: "SNAPSHOT_FIDELITY_MEMORY",
+	})
+	if !ok || execResp == nil {
+		t.Fatalf("connector.Execute() = (%+v, %v), want ok=true", execResp, ok)
+	}
+	if execResp.Metadata["sandboxPod"] != "aegis-remediator-pool-6b5f8-x9z2k" {
+		t.Errorf("Metadata[sandboxPod] = %q, want aegis-remediator-pool-6b5f8-x9z2k", execResp.Metadata["sandboxPod"])
+	}
+	if execResp.Metadata["workerPodIP"] != "10.28.1.42" {
+		t.Errorf("Metadata[workerPodIP] = %q, want 10.28.1.42", execResp.Metadata["workerPodIP"])
+	}
+	if execResp.Metadata["kubectlAteVerified"] != "true" {
+		t.Errorf("Metadata[kubectlAteVerified] = %q, want true", execResp.Metadata["kubectlAteVerified"])
+	}
+	if execResp.Metadata["actorName"] != "sandbox-remediator-actor-01" {
+		t.Errorf("Metadata[actorName] = %q, want sandbox-remediator-actor-01", execResp.Metadata["actorName"])
+	}
+	if execResp.Metadata["actorState"] != "READY" {
+		t.Errorf("Metadata[actorState] = %q, want READY", execResp.Metadata["actorState"])
+	}
+	var sawKubectlAteWire bool
+	for _, wr := range execWire {
+		if wr.ToolName == "substrate.kubectl_ate.inspect_actors" && wr.URL == "ate://aegis-system/actors" {
+			sawKubectlAteWire = true
+		}
+	}
+	if !sawKubectlAteWire {
+		t.Errorf("Expected OutboundWireRecord for substrate.kubectl_ate.inspect_actors (ate://aegis-system/actors), got %+v", execWire)
+	}
 
 	res, err := rt.ExecuteTurn(ctx, aegis.TurnRequest{
 		SessionID:  "sess-live-substrate-kubectl",
@@ -232,6 +279,154 @@ func TestLiveSubstrateKubectlBridge_InspectsClusterCRDsAndMarksProvenanceLive(t 
 	if gotProv := res.Cards[0].Fields["Provenance"]; gotProv != string(aegis.ProvenanceLive) {
 		t.Errorf("SandboxExecutionCard.Fields[Provenance] = %q, want %q", gotProv, aegis.ProvenanceLive)
 	}
+}
+
+func TestRemediatorActorHandler_HealthzAndSandboxExecute(t *testing.T) {
+	// Ensure clean environment for the zero-secrets check
+	for _, kv := range os.Environ() {
+		parts := strings.SplitN(kv, "=", 2)
+		k := parts[0]
+		if strings.HasPrefix(k, "ALICE_") || strings.HasPrefix(k, "BOB_") || k == "GITHUB_TOKEN" || strings.HasPrefix(k, "GOOGLE_OAUTH_") || strings.HasPrefix(k, "JIRA_") {
+			t.Setenv(k, "")
+			_ = os.Unsetenv(k)
+		}
+	}
+
+	var probedURLs []string
+	probeClient := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			probedURLs = append(probedURLs, r.URL.String())
+			status := http.StatusOK
+			if strings.Contains(r.URL.Host, "evil.example.com") {
+				status = http.StatusForbidden
+			}
+			return &http.Response{
+				StatusCode: status,
+				Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+
+	actorSrv := httptest.NewServer(aegis.NewRemediatorActorHandler(probeClient))
+	defer actorSrv.Close()
+
+	// 1. Verify GET /healthz and GET /readyz
+	for _, path := range []string{"/healthz", "/readyz"} {
+		resp, err := actorSrv.Client().Get(actorSrv.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s error: %v", path, err)
+		}
+		var body map[string]string
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			resp.Body.Close()
+			t.Fatalf("Decode %s JSON: %v", path, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("GET %s status = %d, want 200", path, resp.StatusCode)
+		}
+		if body["service"] != "aegis-remediator-actor" || body["status"] != "ok" || body["sandboxClass"] != "gvisor" {
+			t.Errorf("GET %s body = %+v, want service=aegis-remediator-actor status=ok sandboxClass=gvisor", path, body)
+		}
+	}
+
+	// 2. Verify POST /sandbox/execute via SubstrateSandboxConnector
+	rt := aegis.NewRuntime(aegis.RuntimeConfig{
+		SubstrateGatewayURL: actorSrv.URL + "/sandbox/execute",
+		HTTPClient:          actorSrv.Client(),
+	})
+	execResp, wire, ok := aegis.NewSubstrateSandboxConnector(rt).Execute(context.Background(), aegis.SandboxExecutionRequest{
+		APIVersion:        "ate.dev/v1alpha1",
+		Kind:              "ActorTemplate",
+		SandboxClass:      "gvisor",
+		PreferredFidelity: "SNAPSHOT_FIDELITY_MEMORY",
+		TargetRepo:        "gke-demos/aegis-checkout-target",
+		AtenetMITMEnabled: true,
+	})
+	if !ok || execResp == nil {
+		t.Fatalf("Execute against RemediatorActorHandler failed: ok=%v, resp=%+v", ok, execResp)
+	}
+	if !execResp.Verified || execResp.Provenance != aegis.ProvenanceLive {
+		t.Errorf("execResp = (Verified=%v, Provenance=%q), want (true, LIVE)", execResp.Verified, execResp.Provenance)
+	}
+	if execResp.BlockedEgress != "https://evil.example.com/exfil" || execResp.AllowedEgress != "api.github.com" {
+		t.Errorf("egress = (blocked=%q, allowed=%q), want (https://evil.example.com/exfil, api.github.com)", execResp.BlockedEgress, execResp.AllowedEgress)
+	}
+	wantTestOut := "=== RUN   TestNullCurrencyGuard\n--- PASS: TestNullCurrencyGuard (0.01s)\nPASS\nok  \tgithub.com/gke-demos/aegis-checkout-target\t0.014s [gVisor Actor Verified]"
+	if execResp.TestOutput != wantTestOut {
+		t.Errorf("TestOutput = %q, want %q", execResp.TestOutput, wantTestOut)
+	}
+	if execResp.Metadata["zeroEnvSecretsVerified"] != "true" {
+		t.Errorf("Metadata[zeroEnvSecretsVerified] = %q, want true", execResp.Metadata["zeroEnvSecretsVerified"])
+	}
+	if strings.TrimSpace(execResp.Metadata["kernelSignature"]) == "" {
+		t.Errorf("Metadata[kernelSignature] is empty")
+	}
+	if len(probedURLs) < 2 {
+		t.Errorf("Expected probeClient to probe evil.example.com and api.github.com, got %v", probedURLs)
+	}
+	if len(wire) == 0 {
+		t.Errorf("Expected wire records from gateway execution")
+	}
+
+	// 3. Verify leaked secret in os.Environ sets zeroEnvSecretsVerified = "false" and Verified = false
+	t.Run("DetectsLeakedEnvSecret", func(t *testing.T) {
+		for _, envKey := range []string{"ALICE_GITHUB_TOKEN", "GITHUB_PAT", "GOOGLE_APPLICATION_CREDENTIALS", "JIRA_API_TOKEN"} {
+			t.Run(envKey, func(t *testing.T) {
+				t.Setenv(envKey, "secret_leaked_in_env")
+				leakedResp, _, ok := aegis.NewSubstrateSandboxConnector(rt).Execute(context.Background(), aegis.SandboxExecutionRequest{
+					SandboxClass:      "gvisor",
+					PreferredFidelity: "SNAPSHOT_FIDELITY_MEMORY",
+					AtenetMITMEnabled: true,
+				})
+				if !ok || leakedResp == nil {
+					t.Fatalf("Execute failed")
+				}
+				if leakedResp.Metadata["zeroEnvSecretsVerified"] != "false" {
+					t.Errorf("Metadata[zeroEnvSecretsVerified] = %q, want false when %s is present", leakedResp.Metadata["zeroEnvSecretsVerified"], envKey)
+				}
+				if leakedResp.Verified {
+					t.Errorf("leakedResp.Verified = true, want false when %s is present", envKey)
+				}
+			})
+		}
+	})
+
+	// 4. Verify when evil.example.com/exfil returns 200 OK despite AtenetMITMEnabled=true, Verified is false and BlockedEgress is empty
+	t.Run("DetectsUnblockedEvilEgress", func(t *testing.T) {
+		unblockedProbeClient := &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+					Request:    req,
+				}, nil
+			}),
+		}
+		unblockedSrv := httptest.NewServer(aegis.NewRemediatorActorHandler(unblockedProbeClient))
+		defer unblockedSrv.Close()
+
+		unblockedRT := aegis.NewRuntime(aegis.RuntimeConfig{
+			SubstrateGatewayURL: unblockedSrv.URL + "/sandbox/execute",
+			HTTPClient:          unblockedSrv.Client(),
+		})
+		unblockedResp, _, ok := aegis.NewSubstrateSandboxConnector(unblockedRT).Execute(context.Background(), aegis.SandboxExecutionRequest{
+			SandboxClass:      "gvisor",
+			PreferredFidelity: "SNAPSHOT_FIDELITY_MEMORY",
+			AtenetMITMEnabled: true,
+		})
+		if !ok || unblockedResp == nil {
+			t.Fatalf("Execute failed")
+		}
+		if unblockedResp.Verified {
+			t.Errorf("unblockedResp.Verified = true, want false when evil.example.com returns 200 OK")
+		}
+		if unblockedResp.BlockedEgress != "" {
+			t.Errorf("unblockedResp.BlockedEgress = %q, want empty string when evil.example.com is not blocked", unblockedResp.BlockedEgress)
+		}
+	})
 }
 
 func TestSetupLiveSourcesWizardAndMakefileTargets(t *testing.T) {
@@ -306,6 +501,58 @@ func TestSetupLiveSourcesWizardAndMakefileTargets(t *testing.T) {
 	for _, target := range []string{"setup-live:", "./hack/setup-live-sources.sh", "run-live:", "LIVE_SUBSTRATE=true", "seed-live:", "./hack/seed-fixtures.sh --live"} {
 		if !strings.Contains(makefileContent, target) {
 			t.Errorf("Makefile missing %q", target)
+		}
+	}
+}
+
+func TestSubstrateManifests_ValidatedWorkerPoolAndActorTemplateSchema(t *testing.T) {
+	repoRoot := filepath.Clean("../..")
+
+	wpManifestPath := filepath.Join(repoRoot, "manifests", "01-agent-substrate-v050.yaml")
+	wpRaw, err := os.ReadFile(wpManifestPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", wpManifestPath, err)
+	}
+	wpContent := string(wpRaw)
+	for _, expected := range []string{
+		"kind: Namespace",
+		"name: aegis-system",
+		`ate.dev/api-access: "true"`,
+		"apiVersion: ate.dev/v1alpha1",
+		"kind: WorkerPool",
+		"name: aegis-remediator-pool",
+		"sandboxClasses:",
+		"name: gvisor",
+		"name: gvisor-default",
+		"workerImage: ${SUBSTRATE_WORKER_IMAGE}",
+		"app.kubernetes.io/name: sandbox-remediator",
+		"resources:",
+	} {
+		if !strings.Contains(wpContent, expected) {
+			t.Errorf("manifests/01-agent-substrate-v050.yaml missing %q", expected)
+		}
+	}
+
+	actorManifestPath := filepath.Join(repoRoot, "manifests", "01b-substrate-actor-template.yaml")
+	actorRaw, err := os.ReadFile(actorManifestPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", actorManifestPath, err)
+	}
+	actorContent := string(actorRaw)
+	for _, expected := range []string{
+		"apiVersion: ate.dev/v1alpha1",
+		"kind: ActorTemplate",
+		"sandbox-remediator-template",
+		"sandboxClass: gvisor",
+		"preferredFidelity: SNAPSHOT_FIDELITY_MEMORY",
+		"egress-mitm.ate.dev",
+		"--mode=remediator-actor",
+		"kind: EgressPolicy",
+		"allow-github-archive-via-atenet-mitm",
+		"api.github.com",
+	} {
+		if !strings.Contains(actorContent, expected) {
+			t.Errorf("manifests/01b-substrate-actor-template.yaml missing %q", expected)
 		}
 	}
 }
