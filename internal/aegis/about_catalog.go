@@ -27,25 +27,34 @@ const (
 	PulseVerdictExfiltrated PacketPulseVerdict = "EXFILTRATED"
 )
 
+// TopologyZone identifies one of the 3 horizontal defense-in-depth topology lanes on /about.
+type TopologyZone string
+
+const (
+	ZoneIngress         TopologyZone = "INGRESS"
+	ZoneReasoningCore   TopologyZone = "REASONING_CORE"
+	ZoneExecutionPlanes TopologyZone = "EXECUTION_PLANES"
+)
+
 // TopologyContextNode describes a non-boundary entry/exit actor node on the SVG topology canvas (e.g. Operator Browser).
 type TopologyContextNode struct {
-	ID       string `json:"id"`
-	Zone     string `json:"zone"`
-	Title    string `json:"title"`
-	Subtitle string `json:"subtitle"`
-	NodeTag  string `json:"nodeTag"`
-	X        int    `json:"x"`
-	Y        int    `json:"y"`
-	Width    int    `json:"width"`
-	Height   int    `json:"height"`
+	ID       string       `json:"id"`
+	Zone     TopologyZone `json:"zone"`
+	Title    string       `json:"title"`
+	Subtitle string       `json:"subtitle"`
+	NodeTag  string       `json:"nodeTag"`
+	X        int          `json:"x"`
+	Y        int          `json:"y"`
+	Width    int          `json:"width"`
+	Height   int          `json:"height"`
 }
 
 // BoundaryCatalogNode describes one of AegisSRE's 6 defense-in-depth security boundaries for /about.
 type BoundaryCatalogNode struct {
-	ID                   BoundaryID `json:"id"`
-	Code                 string     `json:"code"`
-	Zone                 string     `json:"zone"`
-	Title                string     `json:"title"`
+	ID                   BoundaryID   `json:"id"`
+	Code                 string       `json:"code"`
+	Zone                 TopologyZone `json:"zone"`
+	Title                string       `json:"title"`
 	ShortLabel           string     `json:"shortLabel"`
 	Subtitle             string     `json:"subtitle"`
 	NodeTag              string     `json:"nodeTag"`
@@ -174,7 +183,7 @@ func (r *Runtime) BuildArchitectureTopologyCatalog(ctx context.Context) (*Archit
 		ContextNodes: []TopologyContextNode{
 			{
 				ID:       "OPERATOR_BROWSER",
-				Zone:     "INGRESS",
+				Zone:     ZoneIngress,
 				Title:    "Operator Browser",
 				Subtitle: "A2UI v0.9 + Web Crypto PKCE",
 				NodeTag:  "A2UI v0.9 · PKCE",
@@ -265,21 +274,38 @@ func VerifyArchitectureCatalogDrift(catalog *ArchitectureTopologyCatalog, rt *Ru
 	for _, b := range catalog.Boundaries {
 		validNodes[string(b.ID)] = true
 	}
-	validEdges := map[string]bool{}
+	validEdges := map[string]TopologyEdgeSpec{}
 	for _, e := range catalog.Edges {
 		if !validNodes[e.From] || !validNodes[e.To] {
 			return fmt.Errorf("edge %q references unknown node (%q -> %q)", e.ID, e.From, e.To)
 		}
-		validEdges[e.ID] = true
+		validEdges[e.ID] = e
 	}
 	for _, sc := range catalog.Scenarios {
 		for _, traj := range []ScenarioPostureTrajectory{sc.Blue, sc.Red} {
 			if len(traj.Pulses) == 0 {
 				return fmt.Errorf("scenario %s (%s) has zero pulses", sc.ID, traj.Posture)
 			}
-			for _, p := range traj.Pulses {
-				if !validEdges[p.EdgeID] || !validNodes[p.From] || !validNodes[p.To] {
+			touchedNodes := map[string]bool{}
+			reachable := map[string]bool{"OPERATOR_BROWSER": true}
+			for i, p := range traj.Pulses {
+				edgeSpec, ok := validEdges[p.EdgeID]
+				if !ok || !validNodes[p.From] || !validNodes[p.To] || edgeSpec.From != p.From || edgeSpec.To != p.To {
 					return fmt.Errorf("scenario %s (%s) pulse %d has invalid edge/node (%s: %s -> %s)", sc.ID, traj.Posture, p.Step, p.EdgeID, p.From, p.To)
+				}
+				if p.Step != i+1 {
+					return fmt.Errorf("scenario %s (%s) pulse step = %d, want %d", sc.ID, traj.Posture, p.Step, i+1)
+				}
+				if !reachable[p.From] {
+					return fmt.Errorf("scenario %s (%s) pulse %d (%s -> %s) originates from unreached node %s", sc.ID, traj.Posture, p.Step, p.From, p.To, p.From)
+				}
+				reachable[p.To] = true
+				touchedNodes[p.From] = true
+				touchedNodes[p.To] = true
+			}
+			for _, ab := range traj.ActiveBoundaries {
+				if !touchedNodes[string(ab)] {
+					return fmt.Errorf("scenario %s (%s) active boundary %s is never traversed by Pulses", sc.ID, traj.Posture, ab)
 				}
 			}
 		}
@@ -421,13 +447,37 @@ func parseADRMarkdownMetadata(markdown string, expectedNum string) (title string
 	return title, "Accepted", nil
 }
 
+// SampleTopologyEdgePoint evaluates the cubic Bezier curve for e at parameter t in [0, 1].
+func SampleTopologyEdgePoint(e TopologyEdgeSpec, t float64) (float64, float64) {
+	x0, y0 := float64(e.FromX), float64(e.FromY)
+	x3, y3 := float64(e.ToX), float64(e.ToY)
+	dx := math.Max(24, math.Abs(x3-x0)*0.48)
+	sign := 1.0
+	if x3 < x0 {
+		sign = -1.0
+	}
+	cx1, cy1 := x0+sign*dx, y0
+	cx2, cy2 := x3-sign*dx, y3
+	if e.CurveOffsetY != 0 {
+		railY := math.Max(y0, y3) + float64(e.CurveOffsetY)
+		cx1, cy1 = x0, railY
+		cx2, cy2 = x3, railY
+	}
+	u := 1 - t
+	uu := u * u
+	tt := t * t
+	px := uu*u*x0 + 3*uu*t*cx1 + 3*u*tt*cx2 + tt*t*x3
+	py := uu*u*y0 + 3*uu*t*cy1 + 3*u*tt*cy2 + tt*t*y3
+	return px, py
+}
+
 func verifyTopologyGeometryAndSummaries(catalog *ArchitectureTopologyCatalog) error {
 	if catalog.ViewBoxWidth <= 0 || catalog.ViewBoxHeight <= 0 {
 		return fmt.Errorf("invalid viewBox (%dx%d)", catalog.ViewBoxWidth, catalog.ViewBoxHeight)
 	}
 	type rect struct {
 		id   string
-		zone string
+		zone TopologyZone
 		x    int
 		y    int
 		w    int
@@ -440,14 +490,14 @@ func verifyTopologyGeometryAndSummaries(catalog *ArchitectureTopologyCatalog) er
 		}
 		zone := cn.Zone
 		if zone == "" {
-			zone = "INGRESS"
+			zone = ZoneIngress
 		}
 		rects = append(rects, rect{id: cn.ID, zone: zone, x: cn.X, y: cn.Y, w: cn.Width, h: cn.Height})
 	}
-	allowedZones := map[string]bool{
-		"INGRESS":          true,
-		"REASONING_CORE":   true,
-		"EXECUTION_PLANES": true,
+	allowedZones := map[TopologyZone]bool{
+		ZoneIngress:         true,
+		ZoneReasoningCore:   true,
+		ZoneExecutionPlanes: true,
 	}
 	for _, b := range catalog.Boundaries {
 		if !allowedZones[b.Zone] {
@@ -470,7 +520,7 @@ func verifyTopologyGeometryAndSummaries(catalog *ArchitectureTopologyCatalog) er
 		}
 	}
 
-	zoneSpan := func(z string) (int, int) {
+	zoneSpan := func(z TopologyZone) (int, int) {
 		minX, maxX := catalog.ViewBoxWidth, 0
 		for _, r := range rects {
 			if r.zone != z {
@@ -485,33 +535,16 @@ func verifyTopologyGeometryAndSummaries(catalog *ArchitectureTopologyCatalog) er
 		}
 		return minX, maxX
 	}
-	_, inMax := zoneSpan("INGRESS")
-	coreMin, coreMax := zoneSpan("REASONING_CORE")
-	execMin, _ := zoneSpan("EXECUTION_PLANES")
+	_, inMax := zoneSpan(ZoneIngress)
+	coreMin, coreMax := zoneSpan(ZoneReasoningCore)
+	execMin, _ := zoneSpan(ZoneExecutionPlanes)
 	if coreMin-inMax < 52 || execMin-coreMax < 52 {
 		return fmt.Errorf("insufficient 3-zone horizontal separation: ingress->core=%dpx, core->exec=%dpx (want >=52px)", coreMin-inMax, execMin-coreMax)
 	}
 
 	for _, e := range catalog.Edges {
-		x0, y0 := float64(e.FromX), float64(e.FromY)
-		x3, y3 := float64(e.ToX), float64(e.ToY)
-		dx := math.Max(24, math.Abs(x3-x0)*0.48)
-		sign := 1.0
-		if x3 < x0 {
-			sign = -1.0
-		}
-		cx1, cy1 := x0+sign*dx, y0
-		cx2, cy2 := x3-sign*dx, y3
-		if e.CurveOffsetY != 0 {
-			railY := math.Max(y0, y3) + float64(e.CurveOffsetY)
-			cx1, cy1 = x0, railY
-			cx2, cy2 = x3, railY
-		}
 		for step := 5; step < 195; step++ {
-			tVal := float64(step) / 200.0
-			u := 1 - tVal
-			px := u*u*u*x0 + 3*u*u*tVal*cx1 + 3*u*tVal*tVal*cx2 + tVal*tVal*tVal*x3
-			py := u*u*u*y0 + 3*u*u*tVal*cy1 + 3*u*tVal*tVal*cy2 + tVal*tVal*tVal*y3
+			px, py := SampleTopologyEdgePoint(e, float64(step)/200.0)
 			if px < 0 || px > float64(catalog.ViewBoxWidth) || py < 0 || py > float64(catalog.ViewBoxHeight) {
 				return fmt.Errorf("edge %s curve escapes viewBox at (%.1f, %.1f)", e.ID, px, py)
 			}
@@ -533,7 +566,7 @@ func canonicalBoundaryCatalogNodes() []BoundaryCatalogNode {
 		{
 			ID:                   BoundaryGenerativeUI,
 			Code:                 "B1",
-			Zone:                 "INGRESS",
+			Zone:                 ZoneIngress,
 			Title:                "Presentation & Generative UI Boundary",
 			ShortLabel:           "B1 · A2UI v0.9 & Step-Up",
 			Subtitle:             "Schema-validated cards + adk_request_confirmation",
@@ -557,7 +590,7 @@ func canonicalBoundaryCatalogNodes() []BoundaryCatalogNode {
 		{
 			ID:                   BoundaryReasoningGuard,
 			Code:                 "B2",
-			Zone:                 "REASONING_CORE",
+			Zone:                 ZoneReasoningCore,
 			Title:                "In-Loop Reasoning & Content Guard Boundary",
 			ShortLabel:           "B2 · Triage Orchestrator & Guard",
 			Subtitle:             "ADK Go v2 + Model Armor + Cloud SDP",
@@ -583,7 +616,7 @@ func canonicalBoundaryCatalogNodes() []BoundaryCatalogNode {
 		{
 			ID:                   BoundaryIdentity3LO,
 			Code:                 "B3",
-			Zone:                 "EXECUTION_PLANES",
+			Zone:                 ZoneExecutionPlanes,
 			Title:                "Identity & Per-User Multi-IdP Token Brokering",
 			ShortLabel:           "B3 · OAuth 2.0 S256 PKCE Vault",
 			Subtitle:             "15m Ephemeral TokenBroker + Persona Session Partition",
@@ -610,7 +643,7 @@ func canonicalBoundaryCatalogNodes() []BoundaryCatalogNode {
 		{
 			ID:                   BoundaryPlatformGovernance,
 			Code:                 "B4",
-			Zone:                 "EXECUTION_PLANES",
+			Zone:                 ZoneExecutionPlanes,
 			Title:                "Platform Governance & Tool Discovery Boundary",
 			ShortLabel:           "B4 · Agent Registry & Gateway UAP",
 			Subtitle:             "adk/v2/agentregistry + AGENT_TO_ANYWHERE CEL",
@@ -636,7 +669,7 @@ func canonicalBoundaryCatalogNodes() []BoundaryCatalogNode {
 		{
 			ID:                   BoundaryCrossAgentA2A,
 			Code:                 "B5",
-			Zone:                 "EXECUTION_PLANES",
+			Zone:                 ZoneExecutionPlanes,
 			Title:                "Cross-Agent Federation Boundary",
 			ShortLabel:           "B5 · Attenuated A2A v2",
 			Subtitle:             "withoutCredentialParts + Peer Screen",
@@ -660,7 +693,7 @@ func canonicalBoundaryCatalogNodes() []BoundaryCatalogNode {
 		{
 			ID:                   BoundarySandboxEgress,
 			Code:                 "B6",
-			Zone:                 "EXECUTION_PLANES",
+			Zone:                 ZoneExecutionPlanes,
 			Title:                "Compute & Network Sandbox Boundary",
 			ShortLabel:           "B6 · gVisor + atenet MITM",
 			Subtitle:             "svc/atenet-router -> Actor/remediator-1",
@@ -1180,7 +1213,8 @@ func canonicalScenarioSimulationSpecs() []ScenarioSimulationSpec {
 					{Step: 2, EdgeID: "EDGE_B1_B2", From: string(BoundaryGenerativeUI), To: string(BoundaryReasoningGuard), Verdict: PulseVerdictExfiltrated, Label: "Shared Session", Detail: "Unpartitioned session exposes Alice's prior history"},
 					{Step: 3, EdgeID: "EDGE_B2_B3", From: string(BoundaryReasoningGuard), To: string(BoundaryIdentity3LO), Verdict: PulseVerdictExfiltrated, Label: "Root Service Token", Detail: "Uses over-privileged shared agent credential"},
 					{Step: 4, EdgeID: "EDGE_B3_B2", From: string(BoundaryIdentity3LO), To: string(BoundaryReasoningGuard), Verdict: PulseVerdictExfiltrated, Label: "200 OK Confused Deputy", Detail: "SEC-101 and GHSA-sec-101 returned to unauthorized persona"},
-					{Step: 5, EdgeID: "EDGE_B1_BROWSER", From: string(BoundaryGenerativeUI), To: "OPERATOR_BROWSER", Verdict: PulseVerdictExfiltrated, Label: "Restricted Data Leaked", Detail: "Bob reads SecOps-only advisory"},
+					{Step: 5, EdgeID: "EDGE_B2_B1", From: string(BoundaryReasoningGuard), To: string(BoundaryGenerativeUI), Verdict: PulseVerdictExfiltrated, Label: "Unfiltered Reply", Detail: "Forwards restricted SecOps payload to B1"},
+					{Step: 6, EdgeID: "EDGE_B1_BROWSER", From: string(BoundaryGenerativeUI), To: "OPERATOR_BROWSER", Verdict: PulseVerdictExfiltrated, Label: "Restricted Data Leaked", Detail: "Bob reads SecOps-only advisory"},
 				},
 			},
 		},
@@ -1273,9 +1307,11 @@ func canonicalScenarioSimulationSpecs() []ScenarioSimulationSpec {
 				},
 				Pulses: []ScenarioPulseHop{
 					{Step: 1, EdgeID: "EDGE_BROWSER_B1", From: "OPERATOR_BROWSER", To: string(BoundaryGenerativeUI), Verdict: PulseVerdictPass, Label: "Verify Repo Tests", Detail: "Sandbox Egress MITM shield disabled"},
-					{Step: 2, EdgeID: "EDGE_B2_B5", From: string(BoundaryReasoningGuard), To: string(BoundaryCrossAgentA2A), Verdict: PulseVerdictExfiltrated, Label: "Unattenuated 3LO Credential Forwarding", Detail: "Raw upstream 3LO bearer token forwarded over A2A"},
-					{Step: 3, EdgeID: "EDGE_B5_B6", From: string(BoundaryCrossAgentA2A), To: string(BoundarySandboxEgress), Verdict: PulseVerdictExfiltrated, Label: "init() Env Exfil", Detail: "os.Environ() + 3LO tokens POSTed to evil.example.com/exfil"},
-					{Step: 4, EdgeID: "EDGE_B6_B2", From: string(BoundarySandboxEgress), To: string(BoundaryReasoningGuard), Verdict: PulseVerdictExfiltrated, Label: "Poisoned Peer Return", Detail: "Unscreened peer injection re-enters parent orchestrator"},
+					{Step: 2, EdgeID: "EDGE_B1_B2", From: string(BoundaryGenerativeUI), To: string(BoundaryReasoningGuard), Verdict: PulseVerdictExfiltrated, Label: "Unscreened Dispatch", Detail: "Orchestrator invokes delegate_sandbox_test without shields"},
+					{Step: 3, EdgeID: "EDGE_B2_B5", From: string(BoundaryReasoningGuard), To: string(BoundaryCrossAgentA2A), Verdict: PulseVerdictExfiltrated, Label: "Unattenuated 3LO Credential Forwarding", Detail: "Raw upstream 3LO bearer token forwarded over A2A"},
+					{Step: 4, EdgeID: "EDGE_B5_B6", From: string(BoundaryCrossAgentA2A), To: string(BoundarySandboxEgress), Verdict: PulseVerdictExfiltrated, Label: "init() Env Exfil", Detail: "os.Environ() + 3LO tokens POSTed to evil.example.com/exfil"},
+					{Step: 5, EdgeID: "EDGE_B6_B2", From: string(BoundarySandboxEgress), To: string(BoundaryReasoningGuard), Verdict: PulseVerdictExfiltrated, Label: "Poisoned Peer Return", Detail: "Unscreened peer injection re-enters parent orchestrator"},
+					{Step: 6, EdgeID: "EDGE_B2_B1", From: string(BoundaryReasoningGuard), To: string(BoundaryGenerativeUI), Verdict: PulseVerdictExfiltrated, Label: "Compromised Result", Detail: "Exfiltrated sandbox turn surfaces unblocked"},
 				},
 			},
 		},
@@ -1333,10 +1369,15 @@ func canonicalScenarioSimulationSpecs() []ScenarioSimulationSpec {
 				},
 				Pulses: []ScenarioPulseHop{
 					{Step: 1, EdgeID: "EDGE_BROWSER_B1", From: "OPERATOR_BROWSER", To: string(BoundaryGenerativeUI), Verdict: PulseVerdictExfiltrated, Label: "0/5 Shields", Detail: "All security boundaries disabled"},
-					{Step: 2, EdgeID: "EDGE_B2_B3", From: string(BoundaryReasoningGuard), To: string(BoundaryIdentity3LO), Verdict: PulseVerdictExfiltrated, Label: "Confused Deputy + PII", Detail: "Raw SSN 123-45-6789 + shared root token leak"},
-					{Step: 3, EdgeID: "EDGE_B2_B4", From: string(BoundaryReasoningGuard), To: string(BoundaryPlatformGovernance), Verdict: PulseVerdictExfiltrated, Label: "UAP Bypassed", Detail: "Destructive container.clusters.delete executes"},
-					{Step: 4, EdgeID: "EDGE_B5_B6", From: string(BoundaryCrossAgentA2A), To: string(BoundarySandboxEgress), Verdict: PulseVerdictExfiltrated, Label: "Sandbox Env Exfil", Detail: "init() POSTs secrets to evil.example.com/exfil"},
-					{Step: 5, EdgeID: "EDGE_B2_B1", From: string(BoundaryReasoningGuard), To: string(BoundaryGenerativeUI), Verdict: PulseVerdictExfiltrated, Label: "Unapproved PR", Detail: "State-mutating PR created without human confirmation"},
+					{Step: 2, EdgeID: "EDGE_B1_B2", From: string(BoundaryGenerativeUI), To: string(BoundaryReasoningGuard), Verdict: PulseVerdictExfiltrated, Label: "Unscreened Loop", Detail: "Prompt Screen & Cloud SDP disabled in ADK loop"},
+					{Step: 3, EdgeID: "EDGE_B2_B3", From: string(BoundaryReasoningGuard), To: string(BoundaryIdentity3LO), Verdict: PulseVerdictExfiltrated, Label: "Confused Deputy + PII", Detail: "Raw SSN 123-45-6789 + shared root token leak"},
+					{Step: 4, EdgeID: "EDGE_B3_B2", From: string(BoundaryIdentity3LO), To: string(BoundaryReasoningGuard), Verdict: PulseVerdictExfiltrated, Label: "Poisoned 3LO Return", Detail: "Unmasked SSN & restricted SEC-101 enter model context"},
+					{Step: 5, EdgeID: "EDGE_B2_B4", From: string(BoundaryReasoningGuard), To: string(BoundaryPlatformGovernance), Verdict: PulseVerdictExfiltrated, Label: "UAP Bypassed", Detail: "Destructive container.clusters.delete executes"},
+					{Step: 6, EdgeID: "EDGE_B2_B5", From: string(BoundaryReasoningGuard), To: string(BoundaryCrossAgentA2A), Verdict: PulseVerdictExfiltrated, Label: "Unattenuated A2A", Detail: "Upstream 3LO tokens forwarded to Sandbox Remediator"},
+					{Step: 7, EdgeID: "EDGE_B5_B6", From: string(BoundaryCrossAgentA2A), To: string(BoundarySandboxEgress), Verdict: PulseVerdictExfiltrated, Label: "Sandbox Env Exfil", Detail: "init() POSTs secrets to evil.example.com/exfil"},
+					{Step: 8, EdgeID: "EDGE_B6_B2", From: string(BoundarySandboxEgress), To: string(BoundaryReasoningGuard), Verdict: PulseVerdictExfiltrated, Label: "Unscreened Peer Reply", Detail: "Poisoned peer response re-enters orchestrator"},
+					{Step: 9, EdgeID: "EDGE_B2_B1", From: string(BoundaryReasoningGuard), To: string(BoundaryGenerativeUI), Verdict: PulseVerdictExfiltrated, Label: "Unapproved PR", Detail: "State-mutating PR created without human confirmation"},
+					{Step: 10, EdgeID: "EDGE_B1_BROWSER", From: string(BoundaryGenerativeUI), To: "OPERATOR_BROWSER", Verdict: PulseVerdictExfiltrated, Label: "Full Compromise", Detail: "All 6 boundaries exploited end to end"},
 				},
 			},
 		},

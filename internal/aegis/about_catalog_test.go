@@ -337,7 +337,7 @@ func TestArchitectureTopologyCatalog_ThreeZoneGeometryMicroSummariesAndNonCrossi
 
 	type nodeBox struct {
 		id   string
-		zone string
+		zone aegis.TopologyZone
 		x    int
 		y    int
 		w    int
@@ -353,7 +353,7 @@ func TestArchitectureTopologyCatalog_ThreeZoneGeometryMicroSummariesAndNonCrossi
 		if strings.TrimSpace(cn.NodeTag) == "" {
 			t.Errorf("ContextNode %q missing NodeTag", cn.ID)
 		}
-		nb := nodeBox{id: cn.ID, zone: "INGRESS", x: cn.X, y: cn.Y, w: cn.Width, h: cn.Height}
+		nb := nodeBox{id: cn.ID, zone: aegis.ZoneIngress, x: cn.X, y: cn.Y, w: cn.Width, h: cn.Height}
 		if cn.Zone != "" {
 			nb.zone = cn.Zone
 		}
@@ -361,13 +361,13 @@ func TestArchitectureTopologyCatalog_ThreeZoneGeometryMicroSummariesAndNonCrossi
 		byID[cn.ID] = nb
 	}
 
-	wantBoundaryZone := map[aegis.BoundaryID]string{
-		aegis.BoundaryGenerativeUI:       "INGRESS",
-		aegis.BoundaryReasoningGuard:     "REASONING_CORE",
-		aegis.BoundaryIdentity3LO:        "EXECUTION_PLANES",
-		aegis.BoundaryPlatformGovernance: "EXECUTION_PLANES",
-		aegis.BoundaryCrossAgentA2A:      "EXECUTION_PLANES",
-		aegis.BoundarySandboxEgress:      "EXECUTION_PLANES",
+	wantBoundaryZone := map[aegis.BoundaryID]aegis.TopologyZone{
+		aegis.BoundaryGenerativeUI:       aegis.ZoneIngress,
+		aegis.BoundaryReasoningGuard:     aegis.ZoneReasoningCore,
+		aegis.BoundaryIdentity3LO:        aegis.ZoneExecutionPlanes,
+		aegis.BoundaryPlatformGovernance: aegis.ZoneExecutionPlanes,
+		aegis.BoundaryCrossAgentA2A:      aegis.ZoneExecutionPlanes,
+		aegis.BoundarySandboxEgress:      aegis.ZoneExecutionPlanes,
 	}
 
 	for _, b := range catalog.Boundaries {
@@ -405,7 +405,7 @@ func TestArchitectureTopologyCatalog_ThreeZoneGeometryMicroSummariesAndNonCrossi
 	}
 
 	// Verify >= 52px horizontal separation between INGRESS, REASONING_CORE, and EXECUTION_PLANES
-	zoneBounds := func(zone string) (minX, maxX int) {
+	zoneBounds := func(zone aegis.TopologyZone) (minX, maxX int) {
 		minX = catalog.ViewBoxWidth
 		maxX = 0
 		for _, nb := range boxes {
@@ -421,9 +421,9 @@ func TestArchitectureTopologyCatalog_ThreeZoneGeometryMicroSummariesAndNonCrossi
 		}
 		return minX, maxX
 	}
-	_, ingressMaxX := zoneBounds("INGRESS")
-	coreMinX, coreMaxX := zoneBounds("REASONING_CORE")
-	execMinX, _ := zoneBounds("EXECUTION_PLANES")
+	_, ingressMaxX := zoneBounds(aegis.ZoneIngress)
+	coreMinX, coreMaxX := zoneBounds(aegis.ZoneReasoningCore)
+	execMinX, _ := zoneBounds(aegis.ZoneExecutionPlanes)
 
 	if gap1 := coreMinX - ingressMaxX; gap1 < 52 {
 		t.Errorf("INGRESS -> REASONING_CORE horizontal gap = %dpx, want >= 52px", gap1)
@@ -1559,19 +1559,35 @@ func TestPortal_AboutInterZoneCalloutClearanceAndLightModeZeroShift(t *testing.T
 	}
 	css := string(cssBytes)
 
-	// 1. Inter-zone SVG hop callout clearance for EDGE_B2_B3, EDGE_B3_B2, EDGE_B2_B4, and EDGE_B2_B5
+	// 1. Dynamic obstacle-aware SVG hop callout clearance across inter-zone & horizontal ingress/return edges,
+	//    Micro-Inspector component tag + deep disclosure, Cmd+K stage-safe source endpoints, and glossary Operator naming.
 	for _, wantJS := range []string{
+		"function computeRectOverlapArea(",
 		"function resolveHopCalloutBox(",
 		`"EDGE_B2_B3"`,
 		`"EDGE_B3_B2"`,
 		`"EDGE_B2_B4"`,
 		`"EDGE_B2_B5"`,
+		`"EDGE_B2_B1"`,
+		`"EDGE_B1_BROWSER"`,
 		"hop.edgeId",
 		"finalHop.edgeId",
+		"inspector-component-tag",
+		"inspector-deep-drawer",
+		"source-status-endpoint",
+		"source-status-detail",
+		"status-operator",
+		"function createAboutRefRow(",
 	} {
 		if !strings.Contains(js, wantJS) {
-			t.Errorf("app.js missing inter-zone SVG hop callout clearance logic %q", wantJS)
+			t.Errorf("app.js missing Phase 5 hardening logic %q", wantJS)
 		}
+	}
+	if strings.Contains(js, "status-client") || strings.Contains(css, ".status-client") {
+		t.Errorf("Operator Browser status dot must use Glossary 'status-operator' rather than avoided synonym 'client'")
+	}
+	if strings.Contains(css, ".topology-trajectory-banner") {
+		t.Errorf("styles.css still contains unused .topology-trajectory-banner rules")
 	}
 
 	// 2. Projector Light Mode ([data-theme="light"]) uses pure color-token overrides with zero layout-shifting rules

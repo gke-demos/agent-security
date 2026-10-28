@@ -1048,19 +1048,44 @@ body {
 
 .source-status-chip {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 6px 10px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+  padding: 7px 10px;
   border-radius: 7px;
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
   font-size: 11.5px;
+  min-width: 0;
+}
+
+.source-status-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .source-status-name {
   font-weight: 600;
   color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.source-status-endpoint {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 10px;
+  color: var(--accent-blue);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.source-status-detail {
+  font-size: 10.5px;
+  color: var(--text-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1833,52 +1858,6 @@ body {
   color: var(--accent-blue);
 }
 
-.topology-trajectory-banner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-  padding: 11px 14px;
-  border-radius: 10px;
-  background: var(--bg-canvas);
-  border: 1px solid var(--border-subtle);
-}
-
-.topology-trajectory-banner.posture-BLUE {
-  border-left: 4px solid var(--accent-blue);
-}
-
-.topology-trajectory-banner.posture-RED {
-  border-left: 4px solid var(--accent-red);
-}
-
-.trajectory-banner-main {
-  flex: 1;
-  min-width: 240px;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.trajectory-banner-title {
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--text-primary);
-}
-
-.trajectory-banner-summary {
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.trajectory-banner-badges {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  flex-shrink: 0;
-}
-
 /* Interactive SVG Stage */
 .about-svg-stage {
   width: 100%;
@@ -2006,7 +1985,7 @@ body {
   stroke-width: 1.2;
 }
 
-.node-status-dot.status-client {
+.node-status-dot.status-operator {
   fill: var(--accent-purple);
 }
 
@@ -2397,6 +2376,47 @@ body {
   font-size: 13.5px;
   font-weight: 700;
   color: var(--text-primary);
+}
+
+.inspector-component-tag {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 5px;
+  background: var(--accent-green-bg);
+  border: 1px solid var(--accent-green-border);
+  color: var(--accent-green);
+}
+
+.inspector-deep-toggle {
+  padding: 1px 7px;
+  border-radius: 5px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  color: var(--text-muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.inspector-deep-toggle:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+
+.inspector-deep-drawer {
+  padding: 7px 10px;
+  border-radius: 7px;
+  background: var(--bg-surface);
+  border: 1px dashed var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.inspector-deep-drawer[hidden] {
+  display: none;
 }
 
 .inspector-compare-grid {

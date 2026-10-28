@@ -654,6 +654,7 @@ func TestRepositoryManifestsScriptsAndHygiene(t *testing.T) {
 
 	localStorageCallRe := regexp.MustCompile(`localStorage\.(?:getItem|setItem|removeItem)\(\s*["']([^"']+)["']`)
 	nativeDialogRe := regexp.MustCompile(`\b(?:alert|prompt|confirm)\s*\(`)
+	unsafeEvalRe := regexp.MustCompile(`\beval\s*\(`)
 	unsafeDOMSinks := []string{".innerHTML", ".outerHTML", "insertAdjacentHTML", "document.write("}
 
 	staticEntries, err := os.ReadDir(staticDir)
@@ -687,6 +688,9 @@ func TestRepositoryManifestsScriptsAndHygiene(t *testing.T) {
 		}
 		if m := nativeDialogRe.FindString(src); m != "" {
 			t.Errorf("static/%s contains forbidden native browser modal call %q", ent.Name(), m)
+		}
+		if m := unsafeEvalRe.FindString(src); m != "" {
+			t.Errorf("static/%s contains forbidden dynamic code evaluation %q", ent.Name(), m)
 		}
 	}
 

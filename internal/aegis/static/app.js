@@ -78,6 +78,7 @@
       expandedTools: {},
       expandedSources: {},
       expandedAdrs: {},
+      inspectorExpanded: false,
       rafId: 0,
       pulseRunToken: 0,
     },
@@ -1141,12 +1142,30 @@
         chip.setAttribute("data-source-id", src.id || "");
         if (src.detail) chip.title = src.detail;
 
+        const topRow = document.createElement("div");
+        topRow.className = "source-status-top";
+
         const nameSpan = document.createElement("span");
         nameSpan.className = "source-status-name";
         nameSpan.textContent = src.name || src.id || "";
 
-        chip.appendChild(nameSpan);
-        chip.appendChild(buildProvenanceBadge(src.provenance || "FIXTURE"));
+        topRow.appendChild(nameSpan);
+        topRow.appendChild(buildProvenanceBadge(src.provenance || "FIXTURE"));
+        chip.appendChild(topRow);
+
+        if (src.endpoint) {
+          const epSpan = document.createElement("div");
+          epSpan.className = "source-status-endpoint";
+          epSpan.textContent = src.endpoint;
+          chip.appendChild(epSpan);
+        }
+        if (src.detail) {
+          const detailSpan = document.createElement("div");
+          detailSpan.className = "source-status-detail";
+          detailSpan.textContent = src.detail;
+          chip.appendChild(detailSpan);
+        }
+
         grid.appendChild(chip);
       });
     } catch (err) {
@@ -1557,50 +1576,115 @@
     };
   }
 
-  function resolveHopCalloutBox(edgeId, px, py, pillW, pillH, vbWidth, vbHeight) {
-    if (edgeId === "EDGE_B2_B3" || edgeId === "EDGE_B3_B2") {
-      const anchorX = 704;
-      const maxRight = 736;
-      const boxX = Math.max(474, Math.min(anchorX - pillW / 2, maxRight - pillW));
-      const boxY = Math.max(34, Math.min(116, py - 15 - pillH));
-      return { x: boxX, y: boxY };
-    }
-    if (edgeId === "EDGE_B2_B4") {
-      const anchorX = 706;
-      const boxX = Math.max(8, Math.min(vbWidth - pillW - 8, anchorX - pillW / 2));
-      return { x: boxX, y: 117 };
-    }
-    if (edgeId === "EDGE_B2_B5") {
-      const anchorX = 704;
-      const maxRight = 736;
-      const boxX = Math.max(474, Math.min(anchorX - pillW / 2, maxRight - pillW));
-      const boxY = Math.max(222, Math.min(324 - pillH, py - pillH / 2));
-      return { x: boxX, y: boxY };
-    }
-
-    let boxY = py - 15 - pillH;
-    if (boxY < 8) {
-      boxY = py + 15;
-    }
-    boxY = Math.max(8, Math.min(vbHeight - pillH - 8, boxY));
-    const boxX = Math.max(8, Math.min(vbWidth - pillW - 8, px - pillW / 2));
-    return { x: boxX, y: boxY };
+  function computeRectOverlapArea(ax, ay, aw, ah, bx, by, bw, bh, pad) {
+    const ox = Math.max(0, Math.min(ax + aw, bx + bw + pad) - Math.max(ax, bx - pad));
+    const oy = Math.max(0, Math.min(ay + ah, by + bh + pad) - Math.max(ay, by - pad));
+    return ox * oy;
   }
 
-  function positionHopCallout(calloutRefs, px, py, badgeLabel, verdict, vbWidth, vbHeight, edgeId) {
-    if (!calloutRefs) return;
+  function resolveHopCalloutBox(svgRefs, edgeId, px, py, pillW, pillH) {
+    const vbWidth = (svgRefs && svgRefs.vbWidth) || 1200;
+    const vbHeight = (svgRefs && svgRefs.vbHeight) || 390;
+    const obstacles = (svgRefs && svgRefs.obstacles) || [];
+    const minX = 8;
+    const maxX = Math.max(minX, vbWidth - pillW - 8);
+    const minY = 26;
+    const maxY = Math.max(minY, vbHeight - pillH - 4);
+    const clampX = function (x) {
+      return Math.max(minX, Math.min(maxX, x));
+    };
+    const clampY = function (y) {
+      return Math.max(minY, Math.min(maxY, y));
+    };
+
+    let execMinX = vbWidth;
+    let coreMinX = 0;
+    let midTopY = 144;
+    let midBottomY = 216;
+    let lowerBottomY = 320;
+    obstacles.forEach(function (ob) {
+      if (ob.zone === "EXECUTION_PLANES" && ob.x < execMinX) {
+        execMinX = ob.x;
+      }
+      if (ob.zone === "REASONING_CORE" && (coreMinX === 0 || ob.x < coreMinX)) {
+        coreMinX = ob.x;
+      }
+      if (ob.zone === "INGRESS" || ob.zone === "REASONING_CORE") {
+        midTopY = Math.min(midTopY, ob.y);
+        midBottomY = Math.max(midBottomY, ob.y + ob.h);
+      }
+      if (ob.y + ob.h > lowerBottomY) {
+        lowerBottomY = ob.y + ob.h;
+      }
+    });
+
+    const channelRightX = Math.max(minX, execMinX - 8 - pillW);
+    const channelLeftX = Math.max(minX, coreMinX);
+    const candidates = [];
+    const pushCand = function (cx, cy, bias) {
+      candidates.push({ x: clampX(cx), y: clampY(cy), bias: bias || 0 });
+    };
+
+    if (edgeId === "EDGE_B2_B3" || edgeId === "EDGE_B3_B2") {
+      pushCand(Math.max(channelLeftX, Math.min(px - pillW / 2, channelRightX)), py - 14 - pillH, 0);
+      pushCand(px - pillW / 2, midTopY - pillH - 5, 4);
+    } else if (edgeId === "EDGE_B2_B4") {
+      pushCand(px - pillW / 2, midTopY - pillH - 5, 0);
+      pushCand(px - pillW / 2, midBottomY + 5, 6);
+    } else if (edgeId === "EDGE_B2_B5") {
+      pushCand(Math.max(channelLeftX, Math.min(px - pillW / 2, channelRightX)), Math.max(midBottomY + 5, py - pillH / 2), 0);
+      pushCand(px - pillW / 2, midBottomY + 5, 4);
+    } else if (edgeId === "EDGE_B2_B1" || edgeId === "EDGE_B1_BROWSER") {
+      pushCand(px - pillW / 2, midBottomY + 6, 0);
+      pushCand(px - pillW / 2, midTopY - pillH - 6, 6);
+    } else if (edgeId === "EDGE_BROWSER_B1" || edgeId === "EDGE_B1_B2") {
+      pushCand(px - pillW / 2, midTopY - pillH - 6, 0);
+      pushCand(px - pillW / 2, midBottomY + 6, 6);
+    } else if (edgeId === "EDGE_B5_B6") {
+      pushCand(px - pillW / 2, midBottomY + 5, 0);
+      pushCand(px - pillW / 2, lowerBottomY + 6, 4);
+    } else if (edgeId === "EDGE_B6_B2") {
+      pushCand(px - pillW / 2, lowerBottomY + 6, 0);
+      pushCand(px - pillW / 2, py + 10, 4);
+    }
+
+    pushCand(px - pillW / 2, py - 14 - pillH, 10);
+    pushCand(px - pillW / 2, py + 14, 12);
+    pushCand(px - pillW / 2, midTopY - pillH - 6, 16);
+    pushCand(px - pillW / 2, midBottomY + 6, 16);
+    pushCand(px - pillW / 2, lowerBottomY + 6, 20);
+
+    let best = candidates[0];
+    let bestScore = Infinity;
+    candidates.forEach(function (cand) {
+      let overlap = 0;
+      obstacles.forEach(function (ob) {
+        overlap += computeRectOverlapArea(cand.x, cand.y, pillW, pillH, ob.x, ob.y, ob.w, ob.h, 3);
+      });
+      const dist = Math.hypot(cand.x + pillW / 2 - px, cand.y + pillH / 2 - py);
+      const score = overlap * 10000 + dist + cand.bias;
+      if (score < bestScore) {
+        bestScore = score;
+        best = cand;
+      }
+    });
+    return { x: best.x, y: best.y };
+  }
+
+  function positionHopCallout(calloutRefs, svgRefs, pt, badgeLabel, verdict, edgeId) {
+    if (!calloutRefs || !pt) return;
     const v = String(verdict || "PASS");
-    calloutRefs.halo.setAttribute("cx", px.toFixed(1));
-    calloutRefs.halo.setAttribute("cy", py.toFixed(1));
+    calloutRefs.halo.setAttribute("cx", pt.x.toFixed(1));
+    calloutRefs.halo.setAttribute("cy", pt.y.toFixed(1));
     calloutRefs.halo.setAttribute("class", "topo-pulse-halo verdict-" + v);
-    calloutRefs.core.setAttribute("cx", px.toFixed(1));
-    calloutRefs.core.setAttribute("cy", py.toFixed(1));
+    calloutRefs.core.setAttribute("cx", pt.x.toFixed(1));
+    calloutRefs.core.setAttribute("cy", pt.y.toFixed(1));
     calloutRefs.core.setAttribute("class", "topo-pulse-core verdict-" + v);
     calloutRefs.group.setAttribute("class", "topo-hop-callout verdict-" + v);
 
     const pillW = Math.max(96, badgeLabel.length * 6.0 + 18);
     const pillH = 22;
-    const box = resolveHopCalloutBox(edgeId || "", px, py, pillW, pillH, vbWidth, vbHeight);
+    const box = resolveHopCalloutBox(svgRefs, edgeId || "", pt.x, pt.y, pillW, pillH);
 
     calloutRefs.bg.setAttribute("x", box.x.toFixed(1));
     calloutRefs.bg.setAttribute("y", box.y.toFixed(1));
@@ -1623,7 +1707,7 @@
     stageEl.replaceChildren();
 
     const vbWidth = Number(cat.viewBoxWidth) || 1200;
-    const vbHeight = Math.max(Number(cat.viewBoxHeight) || 390, 396);
+    const vbHeight = Number(cat.viewBoxHeight) || 390;
 
     const svg = createSVGElement("svg", {
       id: "about-topology-svg",
@@ -1743,7 +1827,7 @@
         ry: 11,
       });
       const dot = createSVGElement("circle", {
-        class: "node-status-dot status-client",
+        class: "node-status-dot status-operator",
         cx: cn.x + cn.width - 14,
         cy: cn.y + 18,
         r: 4.5,
@@ -1863,12 +1947,35 @@
     svg.appendChild(pulseLayer);
     stageEl.appendChild(svg);
 
+    const obstacles = [];
+    (cat.contextNodes || []).forEach(function (cn) {
+      obstacles.push({
+        id: cn.id,
+        zone: cn.zone || "INGRESS",
+        x: Number(cn.x) || 0,
+        y: Number(cn.y) || 0,
+        w: Number(cn.width) || 0,
+        h: Number(cn.height) || 0,
+      });
+    });
+    (cat.boundaries || []).forEach(function (b) {
+      obstacles.push({
+        id: b.id,
+        zone: b.zone || "",
+        x: Number(b.x) || 0,
+        y: Number(b.y) || 0,
+        w: Number(b.width) || 0,
+        h: Number(b.height) || 0,
+      });
+    });
+
     return {
       svg: svg,
       vbWidth: vbWidth,
       vbHeight: vbHeight,
       edgeRefs: edgeRefs,
       pulseLayer: pulseLayer,
+      obstacles: obstacles,
     };
   }
 
@@ -1912,12 +2019,10 @@
         const calloutRefs = buildHopCalloutElements(svgRefs.pulseLayer);
         positionHopCallout(
           calloutRefs,
-          activeRef.curve.midX,
-          activeRef.curve.midY,
+          svgRefs,
+          { x: activeRef.curve.midX, y: activeRef.curve.midY },
           formatHopCalloutLabel(hop),
           hop.verdict,
-          svgRefs.vbWidth,
-          svgRefs.vbHeight,
           hop.edgeId
         );
       }
@@ -2113,12 +2218,10 @@
         if (finalHop && finalEdge && finalEdge.curve) {
           positionHopCallout(
             calloutRefs,
-            finalEdge.curve.midX,
-            finalEdge.curve.midY,
+            svgRefs,
+            { x: finalEdge.curve.midX, y: finalEdge.curve.midY },
             formatHopCalloutLabel(finalHop),
             finalHop.verdict,
-            svgRefs.vbWidth,
-            svgRefs.vbHeight,
             finalHop.edgeId
           );
         }
@@ -2149,12 +2252,10 @@
         const pt = evalCubicBezierPoints(c.x0, c.y0, c.cx1, c.cy1, c.cx2, c.cy2, c.x3, c.y3, easedT);
         positionHopCallout(
           calloutRefs,
-          pt.x,
-          pt.y,
+          svgRefs,
+          pt,
           formatHopCalloutLabel(hop),
           hop.verdict,
-          svgRefs.vbWidth,
-          svgRefs.vbHeight,
           hop.edgeId
         );
       }
@@ -2193,12 +2294,22 @@
     titleEl.className = "inspector-title";
     titleEl.textContent = boundary.title;
 
+    const compChip = document.createElement("span");
+    compChip.className = "inspector-component-tag";
+    compChip.textContent = boundary.nodeTag || boundary.subtitle || "";
+    if (boundary.componentName) {
+      compChip.title = boundary.componentName;
+    }
+
     const shieldChip = document.createElement("span");
     shieldChip.className = "about-tag-chip";
     shieldChip.textContent = "Shield: " + boundary.shieldName;
 
     codeGroup.appendChild(codeBadge);
     codeGroup.appendChild(titleEl);
+    if (compChip.textContent) {
+      codeGroup.appendChild(compChip);
+    }
     codeGroup.appendChild(shieldChip);
     topRow.appendChild(codeGroup);
 
@@ -2228,6 +2339,23 @@
       });
       linksGroup.appendChild(btn);
     });
+
+    const deepDrawer = document.createElement("div");
+    deepDrawer.className = "inspector-deep-drawer";
+    deepDrawer.hidden = !state.about.inspectorExpanded;
+
+    const deepBtn = document.createElement("button");
+    deepBtn.type = "button";
+    deepBtn.className = "inspector-deep-toggle";
+    deepBtn.setAttribute("aria-expanded", state.about.inspectorExpanded ? "true" : "false");
+    deepBtn.textContent = state.about.inspectorExpanded ? "Hide Spec" : "Full Spec";
+    deepBtn.addEventListener("click", function () {
+      state.about.inspectorExpanded = !state.about.inspectorExpanded;
+      deepDrawer.hidden = !state.about.inspectorExpanded;
+      deepBtn.setAttribute("aria-expanded", state.about.inspectorExpanded ? "true" : "false");
+      deepBtn.textContent = state.about.inspectorExpanded ? "Hide Spec" : "Full Spec";
+    });
+    linksGroup.appendChild(deepBtn);
 
     topRow.appendChild(linksGroup);
     cardEl.appendChild(topRow);
@@ -2260,6 +2388,20 @@
     compareGrid.appendChild(blueBox);
     compareGrid.appendChild(redBox);
     cardEl.appendChild(compareGrid);
+
+    const compMeta = document.createElement("div");
+    compMeta.className = "about-ref-detail-meta";
+    compMeta.textContent = "Stack: " + (boundary.componentName || "");
+    const deepBlue = document.createElement("p");
+    deepBlue.className = "about-card-desc";
+    deepBlue.textContent = "Blue Mechanism: " + (boundary.blueDefenseMechanism || "");
+    const deepRed = document.createElement("p");
+    deepRed.className = "about-card-desc";
+    deepRed.textContent = "Red Exploit: " + (boundary.redExploitMode || "");
+    deepDrawer.appendChild(compMeta);
+    deepDrawer.appendChild(deepBlue);
+    deepDrawer.appendChild(deepRed);
+    cardEl.appendChild(deepDrawer);
   }
 
   function renderAboutLifecycleModule() {
@@ -2548,6 +2690,61 @@
     });
   }
 
+  function createAboutRefRow(opts) {
+    const row = document.createElement("article");
+    row.className =
+      "about-ref-row " + opts.rowClass + (opts.isExpanded ? " expanded" : "");
+    if (opts.dataAttrName) {
+      row.setAttribute(opts.dataAttrName, opts.dataAttrValue || "");
+    }
+
+    const summary = document.createElement("div");
+    summary.className = "about-ref-summary";
+    summary.setAttribute("role", "button");
+    summary.setAttribute("tabindex", "0");
+    summary.setAttribute("aria-expanded", opts.isExpanded ? "true" : "false");
+
+    const left = document.createElement("div");
+    left.className = "about-ref-left";
+    (opts.leftNodes || []).forEach(function (n) {
+      if (n) left.appendChild(n);
+    });
+
+    const right = document.createElement("div");
+    right.className = "about-ref-right";
+    (opts.rightNodes || []).forEach(function (n) {
+      if (n) right.appendChild(n);
+    });
+    right.appendChild(createRefRowChevron());
+
+    summary.appendChild(left);
+    summary.appendChild(right);
+
+    const detail = document.createElement("div");
+    detail.className = "about-ref-detail";
+    detail.hidden = !opts.isExpanded;
+
+    const desc = document.createElement("p");
+    desc.className = "about-card-desc";
+    desc.textContent = opts.description || "";
+    detail.appendChild(desc);
+
+    const meta = document.createElement("div");
+    meta.className = "about-ref-detail-meta";
+    meta.textContent = opts.metaText || "";
+    detail.appendChild(meta);
+
+    wireRefRowSummaryToggle(row, summary, detail, function (expanded) {
+      if (typeof opts.onToggle === "function") {
+        opts.onToggle(expanded, row);
+      }
+    });
+
+    row.appendChild(summary);
+    row.appendChild(detail);
+    return row;
+  }
+
   function renderAboutGovernanceModule() {
     const cat = state.about.catalog;
     if (!cat) return;
@@ -2583,64 +2780,32 @@
         const prov = src.provenance === "LIVE" ? "LIVE" : "FIXTURE";
         const isExpanded = Boolean(state.about.expandedSources[srcKey]);
 
-        const row = document.createElement("article");
-        row.className =
-          "about-ref-row about-source-row source-" + prov + (isExpanded ? " expanded" : "");
-        row.setAttribute("data-about-source-id", src.id || "");
-
-        const summary = document.createElement("div");
-        summary.className = "about-ref-summary";
-        summary.setAttribute("role", "button");
-        summary.setAttribute("tabindex", "0");
-        summary.setAttribute("aria-expanded", isExpanded ? "true" : "false");
-
-        const left = document.createElement("div");
-        left.className = "about-ref-left";
-
         const nameSpan = document.createElement("span");
         nameSpan.className = "about-ref-title";
         nameSpan.textContent = src.name || src.id || "";
-        left.appendChild(nameSpan);
-        left.appendChild(buildProvenanceBadge(prov));
 
+        let epSpan = null;
         if (src.endpoint) {
-          const ep = document.createElement("span");
-          ep.className = "about-ref-mono";
-          ep.textContent = src.endpoint;
-          left.appendChild(ep);
+          epSpan = document.createElement("span");
+          epSpan.className = "about-ref-mono";
+          epSpan.textContent = src.endpoint;
         }
 
-        const right = document.createElement("div");
-        right.className = "about-ref-right";
-        if (src.boundary) {
-          right.appendChild(createRowBoundaryPill(src.boundary));
-        }
-        right.appendChild(createRefRowChevron());
-
-        summary.appendChild(left);
-        summary.appendChild(right);
-
-        const detail = document.createElement("div");
-        detail.className = "about-ref-detail";
-        detail.hidden = !isExpanded;
-
-        const desc = document.createElement("p");
-        desc.className = "about-card-desc";
-        desc.textContent = src.detail || "";
-        detail.appendChild(desc);
-
-        const meta = document.createElement("div");
-        meta.className = "about-ref-detail-meta";
-        meta.textContent = "Source ID: " + (src.id || "") + " · Boundary: " + (src.boundary || "");
-        detail.appendChild(meta);
-
-        wireRefRowSummaryToggle(row, summary, detail, function (expanded) {
-          state.about.expandedSources[srcKey] = expanded;
-        });
-
-        row.appendChild(summary);
-        row.appendChild(detail);
-        sourcesGrid.appendChild(row);
+        sourcesGrid.appendChild(
+          createAboutRefRow({
+            rowClass: "about-source-row source-" + prov,
+            dataAttrName: "data-about-source-id",
+            dataAttrValue: src.id || "",
+            isExpanded: isExpanded,
+            leftNodes: [nameSpan, buildProvenanceBadge(prov), epSpan],
+            rightNodes: src.boundary ? [createRowBoundaryPill(src.boundary)] : [],
+            description: src.detail || "",
+            metaText: "Source ID: " + (src.id || "") + " · Boundary: " + (src.boundary || ""),
+            onToggle: function (expanded) {
+              state.about.expandedSources[srcKey] = expanded;
+            },
+          })
+        );
       });
     }
 
@@ -2651,22 +2816,6 @@
         const isHighlighted = state.about.highlightedToolName === tool.name;
         const isExpanded = Boolean(state.about.expandedTools[tool.name]) || isHighlighted;
 
-        const row = document.createElement("article");
-        row.className =
-          "about-ref-row about-tool-row" +
-          (isHighlighted ? " highlighted-tool" : "") +
-          (isExpanded ? " expanded" : "");
-        row.setAttribute("data-about-tool-name", tool.name);
-
-        const summary = document.createElement("div");
-        summary.className = "about-ref-summary";
-        summary.setAttribute("role", "button");
-        summary.setAttribute("tabindex", "0");
-        summary.setAttribute("aria-expanded", isExpanded ? "true" : "false");
-
-        const left = document.createElement("div");
-        left.className = "about-ref-left";
-
         const tName = document.createElement("span");
         tName.className = "about-ref-title about-ref-code-title";
         tName.textContent = tool.name;
@@ -2675,49 +2824,29 @@
         wire.className = "about-ref-mono";
         wire.textContent = tool.wireOperation;
 
-        left.appendChild(tName);
-        left.appendChild(wire);
-
-        const right = document.createElement("div");
-        right.className = "about-ref-right";
-
         const policyBadge = document.createElement("span");
         policyBadge.className = "tool-policy-badge " + classifyToolPolicyClass(tool.stepUpPolicy);
         policyBadge.textContent = tool.stepUpPolicy;
 
-        right.appendChild(policyBadge);
-        right.appendChild(createRowBoundaryPill(tool.primaryBoundary));
-        right.appendChild(createRefRowChevron());
-
-        summary.appendChild(left);
-        summary.appendChild(right);
-
-        const detail = document.createElement("div");
-        detail.className = "about-ref-detail";
-        detail.hidden = !isExpanded;
-
-        const desc = document.createElement("p");
-        desc.className = "about-card-desc";
-        desc.textContent = tool.description;
-        detail.appendChild(desc);
-
-        const meta = document.createElement("div");
-        meta.className = "about-ref-detail-meta";
-        meta.textContent =
-          "Provider: " + tool.provider + " · Primary Boundary: " + tool.primaryBoundary;
-        detail.appendChild(meta);
-
-        wireRefRowSummaryToggle(row, summary, detail, function (expanded) {
-          state.about.expandedTools[tool.name] = expanded;
-          if (!expanded && state.about.highlightedToolName === tool.name) {
-            state.about.highlightedToolName = "";
-            row.classList.remove("highlighted-tool");
-          }
-        });
-
-        row.appendChild(summary);
-        row.appendChild(detail);
-        toolsGrid.appendChild(row);
+        toolsGrid.appendChild(
+          createAboutRefRow({
+            rowClass: "about-tool-row" + (isHighlighted ? " highlighted-tool" : ""),
+            dataAttrName: "data-about-tool-name",
+            dataAttrValue: tool.name,
+            isExpanded: isExpanded,
+            leftNodes: [tName, wire],
+            rightNodes: [policyBadge, createRowBoundaryPill(tool.primaryBoundary)],
+            description: tool.description,
+            metaText: "Provider: " + tool.provider + " · Primary Boundary: " + tool.primaryBoundary,
+            onToggle: function (expanded, row) {
+              state.about.expandedTools[tool.name] = expanded;
+              if (!expanded && state.about.highlightedToolName === tool.name) {
+                state.about.highlightedToolName = "";
+                row.classList.remove("highlighted-tool");
+              }
+            },
+          })
+        );
       });
     }
 
@@ -2768,22 +2897,6 @@
       const isHighlighted = state.about.highlightedAdrNum === adr.number;
       const isExpanded = Boolean(state.about.expandedAdrs[adr.number]) || isHighlighted;
 
-      const row = document.createElement("article");
-      row.className =
-        "about-ref-row about-adr-row" +
-        (isHighlighted ? " highlighted-adr" : "") +
-        (isExpanded ? " expanded" : "");
-      row.setAttribute("data-adr-number", adr.number);
-
-      const summary = document.createElement("div");
-      summary.className = "about-ref-summary";
-      summary.setAttribute("role", "button");
-      summary.setAttribute("tabindex", "0");
-      summary.setAttribute("aria-expanded", isExpanded ? "true" : "false");
-
-      const left = document.createElement("div");
-      left.className = "about-ref-left";
-
       const numBadge = document.createElement("span");
       numBadge.className = "adr-num-badge";
       numBadge.textContent = "ADR-" + adr.number;
@@ -2792,50 +2905,34 @@
       title.className = "about-ref-title";
       title.textContent = adr.title;
 
-      left.appendChild(numBadge);
-      left.appendChild(title);
-
-      const right = document.createElement("div");
-      right.className = "about-ref-right";
-
       const statusBadge = document.createElement("span");
       statusBadge.className = "adr-status-badge";
       statusBadge.textContent = adr.status || "Accepted";
-      right.appendChild(statusBadge);
 
+      const rightNodes = [statusBadge];
       (adr.primaryBoundaries || []).forEach(function (bId) {
-        right.appendChild(createRowBoundaryPill(bId));
-      });
-      right.appendChild(createRefRowChevron());
-
-      summary.appendChild(left);
-      summary.appendChild(right);
-
-      const detail = document.createElement("div");
-      detail.className = "about-ref-detail";
-      detail.hidden = !isExpanded;
-
-      const summaryText = document.createElement("p");
-      summaryText.className = "about-card-desc";
-      summaryText.textContent = adr.summary;
-      detail.appendChild(summaryText);
-
-      const fileMeta = document.createElement("div");
-      fileMeta.className = "about-ref-detail-meta";
-      fileMeta.textContent = "docs/adr/" + adr.fileName;
-      detail.appendChild(fileMeta);
-
-      wireRefRowSummaryToggle(row, summary, detail, function (expanded) {
-        state.about.expandedAdrs[adr.number] = expanded;
-        if (!expanded && state.about.highlightedAdrNum === adr.number) {
-          state.about.highlightedAdrNum = "";
-          row.classList.remove("highlighted-adr");
-        }
+        rightNodes.push(createRowBoundaryPill(bId));
       });
 
-      row.appendChild(summary);
-      row.appendChild(detail);
-      adrGrid.appendChild(row);
+      adrGrid.appendChild(
+        createAboutRefRow({
+          rowClass: "about-adr-row" + (isHighlighted ? " highlighted-adr" : ""),
+          dataAttrName: "data-adr-number",
+          dataAttrValue: adr.number,
+          isExpanded: isExpanded,
+          leftNodes: [numBadge, title],
+          rightNodes: rightNodes,
+          description: adr.summary,
+          metaText: "docs/adr/" + adr.fileName,
+          onToggle: function (expanded, row) {
+            state.about.expandedAdrs[adr.number] = expanded;
+            if (!expanded && state.about.highlightedAdrNum === adr.number) {
+              state.about.highlightedAdrNum = "";
+              row.classList.remove("highlighted-adr");
+            }
+          },
+        })
+      );
     });
   }
 
