@@ -114,21 +114,21 @@ func TestGetSourcesStatus_FixtureVsLiveAndHTTPEndpoint(t *testing.T) {
 	liveRT := NewRuntime(RuntimeConfig{
 		AgentPlatformLiveLLM: true,
 		GeminiEndpoint:       "https://us-central1-aiplatform.googleapis.com",
-		ModelArmorEndpoint:  "https://modelarmor.us-central1.rep.googleapis.com",
-		DLPEndpoint:         "https://dlp.googleapis.com",
-		GCPProjectID:        "demo-sec-project",
-		GCPLocation:         "us-central1",
-		GKEClusterName:      "demo-sec-cluster",
-		AgentRegistryURL:    "https://agentregistry.googleapis.com",
-		GitHubAPIURL:        "https://api.github.com",
-		GitHubTargetRepo:    "gke-demos/aegis-checkout-target",
-		AliceGitHubToken:    "gho_live_alice_token",
-		GmailAPIURL:         "https://gmail.googleapis.com",
-		AliceGmailToken:     "gmail_tok_live_alice",
-		JiraBaseURL:         "https://acme-sec.atlassian.net",
-		AliceJiraToken:      "atlassian_live_alice",
-		SubstrateGatewayURL: "http://127.0.0.1:8088",
-		LiveSubstrate:       true,
+		ModelArmorEndpoint:   "https://modelarmor.us-central1.rep.googleapis.com",
+		DLPEndpoint:          "https://dlp.googleapis.com",
+		GCPProjectID:         "demo-sec-project",
+		GCPLocation:          "us-central1",
+		GKEClusterName:       "demo-sec-cluster",
+		AgentRegistryURL:     "https://agentregistry.googleapis.com",
+		GitHubAPIURL:         "https://api.github.com",
+		GitHubTargetRepo:     "gke-demos/aegis-checkout-target",
+		AliceGitHubToken:     "gho_live_alice_token",
+		GmailAPIURL:          "https://gmail.googleapis.com",
+		AliceGmailToken:      "gmail_tok_live_alice",
+		JiraBaseURL:          "https://acme-sec.atlassian.net",
+		AliceJiraToken:       "atlassian_live_alice",
+		SubstrateGatewayURL:  "http://127.0.0.1:8088",
+		LiveSubstrate:        true,
 	})
 
 	srv := httptest.NewServer(NewHandler(liveRT))
@@ -159,6 +159,148 @@ func TestGetSourcesStatus_FixtureVsLiveAndHTTPEndpoint(t *testing.T) {
 		}
 		if src.Provenance != ProvenanceLive {
 			t.Errorf("live payload.Sources[%d] (%s).Provenance = %q, want %q", i, src.ID, src.Provenance, ProvenanceLive)
+		}
+	}
+}
+
+func TestGetSourcesStatus_StageSafeSanitizationPreservesOutboundRuntimeConfig(t *testing.T) {
+	const (
+		secretProjectID = "sec-stage-proj-94821"
+		secretCluster   = "sec-stage-gke-cluster-01"
+	)
+
+	// 1. Auto-discovered regional endpoints via ConfigFromEnvWithLookup
+	env := map[string]string{
+		"GOOGLE_CLOUD_PROJECT":    secretProjectID,
+		"GOOGLE_CLOUD_LOCATION":   "europe-west4",
+		"GKE_CLUSTER_NAME":        secretCluster,
+		"AGENT_PLATFORM_LIVE_LLM": "true",
+		"LIVE_GITHUB":             "true",
+		"GITHUB_TARGET_REPO":      "gke-demos/aegis-checkout-target",
+		"ALICE_GMAIL_TOKEN":       "gmail_tok_stage_safe_alice",
+		"JIRA_BASE_URL":           "https://acme-sec.atlassian.net",
+		"ALICE_JIRA_TOKEN":        "jira_tok_stage_safe_alice",
+		"SUBSTRATE_GATEWAY_URL":   "http://127.0.0.1:8088",
+		"LIVE_SUBSTRATE":          "true",
+	}
+	cfg := ConfigFromEnvWithLookup(
+		func(k string) string { return env[k] },
+		func() string { return "gho_stage_safe_cli_token" },
+	)
+
+	// Outbound RuntimeConfig fields MUST remain 100% intact for real cloud calls.
+	wantMA := "https://modelarmor.europe-west4.rep.googleapis.com/v1/projects/" + secretProjectID + "/locations/europe-west4/templates/aegis-prompt-screen:sanitizeUserPrompt"
+	if cfg.ModelArmorEndpoint != wantMA {
+		t.Fatalf("cfg.ModelArmorEndpoint = %q, want %q", cfg.ModelArmorEndpoint, wantMA)
+	}
+	wantDLP := "https://dlp.googleapis.com/v2/projects/" + secretProjectID + "/locations/global/content:deidentify"
+	if cfg.DLPEndpoint != wantDLP {
+		t.Fatalf("cfg.DLPEndpoint = %q, want %q", cfg.DLPEndpoint, wantDLP)
+	}
+	wantReg := "https://agentregistry.googleapis.com/v1alpha/projects/" + secretProjectID + "/locations/global"
+	if cfg.AgentRegistryURL != wantReg {
+		t.Fatalf("cfg.AgentRegistryURL = %q, want %q", cfg.AgentRegistryURL, wantReg)
+	}
+	if cfg.GCPProjectID != secretProjectID || cfg.GKEClusterName != secretCluster {
+		t.Fatalf("RuntimeConfig project/cluster mutated: got (%q, %q)", cfg.GCPProjectID, cfg.GKEClusterName)
+	}
+
+	rt := NewRuntime(cfg)
+	// Verify runtime.Config() also retains raw outbound URLs
+	if rt.Config().ModelArmorEndpoint != wantMA || rt.Config().AgentRegistryURL != wantReg {
+		t.Fatalf("rt.Config() mutated outbound URLs: %+v", rt.Config())
+	}
+
+	srv := httptest.NewServer(NewHTTPHandler(rt))
+	if !strings.HasPrefix(srv.URL, "http://127.0.0.1:") {
+		srv.Close()
+		t.Fatalf("test server URL %q must bind strictly to 127.0.0.1", srv.URL)
+	}
+	t.Cleanup(srv.Close)
+
+	// Check GET /api/sources/status
+	sourcesResp, err := http.Get(srv.URL + "/api/sources/status")
+	if err != nil {
+		t.Fatalf("GET /api/sources/status: %v", err)
+	}
+	sourcesBody, err := io.ReadAll(sourcesResp.Body)
+	sourcesResp.Body.Close()
+	if err != nil {
+		t.Fatalf("read /api/sources/status: %v", err)
+	}
+	if sourcesResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/sources/status status = %d, want 200", sourcesResp.StatusCode)
+	}
+	sourcesRaw := string(sourcesBody)
+	if strings.Contains(sourcesRaw, secretProjectID) {
+		t.Errorf("/api/sources/status leaked GCPProjectID %q: %s", secretProjectID, sourcesRaw)
+	}
+	if strings.Contains(sourcesRaw, secretCluster) {
+		t.Errorf("/api/sources/status leaked GKEClusterName %q: %s", secretCluster, sourcesRaw)
+	}
+
+	var decoded struct {
+		Sources []SourceStatus `json:"sources"`
+	}
+	if err := json.Unmarshal(sourcesBody, &decoded); err != nil {
+		t.Fatalf("unmarshal /api/sources/status: %v", err)
+	}
+	byID := map[ExternalSourceID]SourceStatus{}
+	for _, s := range decoded.Sources {
+		byID[s.ID] = s
+	}
+
+	wantMADisplay := "https://modelarmor.europe-west4.rep.googleapis.com/v1 · Template aegis-prompt-screen"
+	if got := byID[SourceModelArmorSDP].Endpoint; got != wantMADisplay {
+		t.Errorf("ModelArmorSDP stage-safe Endpoint = %q, want %q", got, wantMADisplay)
+	}
+	wantRegDisplay := "https://agentregistry.googleapis.com/v1alpha · Global Catalog"
+	if got := byID[SourceAgentRegistry].Endpoint; got != wantRegDisplay {
+		t.Errorf("AgentRegistry stage-safe Endpoint = %q, want %q", got, wantRegDisplay)
+	}
+	wantObsDetail := "Live Cloud Logging & GKE cluster telemetry (Active GKE Context)"
+	if got := byID[SourceGCPObservability].Detail; got != wantObsDetail {
+		t.Errorf("GCPObservability stage-safe Detail = %q, want %q", got, wantObsDetail)
+	}
+
+	// Check GET /api/about/catalog also contains zero occurrences of project ID or cluster name
+	catResp, err := http.Get(srv.URL + "/api/about/catalog")
+	if err != nil {
+		t.Fatalf("GET /api/about/catalog: %v", err)
+	}
+	catBody, err := io.ReadAll(catResp.Body)
+	catResp.Body.Close()
+	if err != nil {
+		t.Fatalf("read /api/about/catalog: %v", err)
+	}
+	if catResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/about/catalog status = %d, want 200", catResp.StatusCode)
+	}
+	catRaw := string(catBody)
+	if strings.Contains(catRaw, secretProjectID) {
+		t.Errorf("/api/about/catalog leaked GCPProjectID %q: %s", secretProjectID, catRaw)
+	}
+	if strings.Contains(catRaw, secretCluster) {
+		t.Errorf("/api/about/catalog leaked GKEClusterName %q: %s", secretCluster, catRaw)
+	}
+
+	// 2. Custom endpoints containing raw project/cluster identifiers are also stripped/redacted
+	customRT := NewRuntime(RuntimeConfig{
+		GCPProjectID:         secretProjectID,
+		GKEClusterName:       secretCluster,
+		AgentPlatformLiveLLM: true,
+		GeminiEndpoint:       "https://us-central1-aiplatform.googleapis.com/v1/projects/" + secretProjectID + "/locations/us-central1",
+		SubstrateGatewayURL:  "https://gateway." + secretCluster + ".internal/" + secretProjectID,
+		LiveSubstrate:        true,
+	})
+	customStatuses, err := customRT.GetSourcesStatus(context.Background())
+	if err != nil {
+		t.Fatalf("customRT.GetSourcesStatus: %v", err)
+	}
+	for _, st := range customStatuses {
+		joined := st.Name + " | " + st.Endpoint + " | " + st.Detail
+		if strings.Contains(joined, secretProjectID) || strings.Contains(joined, secretCluster) {
+			t.Errorf("custom SourceStatus %s leaked project/cluster identifier: %q", st.ID, joined)
 		}
 	}
 }

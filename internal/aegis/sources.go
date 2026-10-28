@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -17,6 +18,10 @@ func init() {
 	RegisterHTTPRoutes(registerSourcesHTTPRoutes)
 }
 
+// TODO(security): GET /api/sources/status is a stateless read-only JSON endpoint that sanitizes
+// GCPProjectID and GKEClusterName from display strings before returning SourceStatus payloads;
+// SQL parameterization, multipart file-upload scanning, and cookie-based CSRF tokens are N/A
+// (zero SQL DB, zero file uploads, zero auth cookies).
 func registerSourcesHTTPRoutes(mux *http.ServeMux, rt *Runtime) {
 	mux.HandleFunc("GET /api/sources/status", func(w http.ResponseWriter, r *http.Request) {
 		statuses, err := rt.GetSourcesStatus(r.Context())
@@ -174,15 +179,15 @@ func (r *Runtime) GetSourcesStatus(_ context.Context) ([]SourceStatus, error) {
 	jiraLive := isJiraLive(r)
 	substrateLive := NewSubstrateSandboxConnector(r).Provenance() == ProvenanceLive
 
-	targetRepo := firstNonEmpty(cfg.GitHubTargetRepo, "gke-demos/aegis-checkout-target")
+	targetRepo := sanitizeStageSafeText(firstNonEmpty(cfg.GitHubTargetRepo, "gke-demos/aegis-checkout-target"), cfg)
 
-	return []SourceStatus{
+	statuses := []SourceStatus{
 		buildSourceStatus(
 			SourceAgentPlatformGemini,
 			"Gemini on Agent Platform (ADK v2)",
 			BoundaryReasoningGuard,
 			agentPlatformLive,
-			firstNonEmpty(cfg.GeminiEndpoint, "https://aiplatform.googleapis.com/v1 (gemini-2.5-flash)"),
+			formatStageSafeGeminiEndpoint(cfg),
 			"in-memory://adk-v2-fixture-orchestrator",
 			"Live ADK Go v2 llmagent reasoning on Gemini Enterprise Agent Platform (gemini-2.5-flash)",
 			"Deterministic ADK v2 scenario state machine fallback",
@@ -192,7 +197,7 @@ func (r *Runtime) GetSourcesStatus(_ context.Context) ([]SourceStatus, error) {
 			"Model Armor + Cloud SDP",
 			BoundaryReasoningGuard,
 			modelArmorLive,
-			firstNonEmpty(cfg.ModelArmorEndpoint, cfg.DLPEndpoint, "https://modelarmor.googleapis.com/v1"),
+			formatStageSafeModelArmorEndpoint(cfg),
 			"in-memory://model-armor-sdp-policy-engine",
 			"Live Model Armor prompt screening and Cloud SDP DeidentifyContent",
 			"Deterministic local prompt injection & SDP de-identification engine",
@@ -204,7 +209,7 @@ func (r *Runtime) GetSourcesStatus(_ context.Context) ([]SourceStatus, error) {
 			gcpObsLive,
 			"https://logging.googleapis.com/mcp + https://container.googleapis.com/mcp",
 			"in-memory://gcp-observability-mcp-fixture",
-			fmt.Sprintf("Live Cloud Logging & GKE cluster telemetry (%s/%s)", cfg.GCPProjectID, cfg.GKEClusterName),
+			"Live Cloud Logging & GKE cluster telemetry (Active GKE Context)",
 			"Deterministic GKE & Cloud Logging MCP fixture",
 		),
 		buildSourceStatus(
@@ -212,7 +217,7 @@ func (r *Runtime) GetSourcesStatus(_ context.Context) ([]SourceStatus, error) {
 			"Google Cloud Agent Registry",
 			BoundaryPlatformGovernance,
 			registryLive,
-			firstNonEmpty(cfg.AgentRegistryURL, "https://agentregistry.googleapis.com/v1alpha"),
+			formatStageSafeAgentRegistryEndpoint(cfg),
 			"in-memory://governed-registry-manifest",
 			"Live adk/v2/agentregistry catalog discovery",
 			"Governed local MCP server & A2A agent manifest fallback",
@@ -257,7 +262,97 @@ func (r *Runtime) GetSourcesStatus(_ context.Context) ([]SourceStatus, error) {
 			"Live Agent Substrate v0.5.0 gVisor WorkerPool & atenet Egress MITM",
 			"Deterministic gVisor Actor & atenet Egress MITM fixture",
 		),
-	}, nil
+	}
+
+	for i := range statuses {
+		statuses[i] = sanitizeStageSafeSourceStatus(statuses[i], cfg)
+	}
+	return statuses, nil
+}
+
+var stageSafeProjectsSegmentRe = regexp.MustCompile(`/projects/[^/\s:)]+`)
+
+func formatStageSafeGeminiEndpoint(cfg RuntimeConfig) string {
+	raw := firstNonEmpty(cfg.GeminiEndpoint, "https://aiplatform.googleapis.com/v1 (gemini-2.5-flash)")
+	if idx := strings.Index(raw, "/projects/"); idx >= 0 {
+		base := firstNonEmpty(strings.TrimRight(raw[:idx], "/"), "https://aiplatform.googleapis.com/v1")
+		return sanitizeStageSafeText(base+" (gemini-2.5-flash)", cfg)
+	}
+	return sanitizeStageSafeText(raw, cfg)
+}
+
+func formatStageSafeModelArmorEndpoint(cfg RuntimeConfig) string {
+	if cfg.ModelArmorEndpoint != "" && strings.Contains(cfg.ModelArmorEndpoint, "/projects/") {
+		idx := strings.Index(cfg.ModelArmorEndpoint, "/projects/")
+		base := strings.TrimRight(cfg.ModelArmorEndpoint[:idx], "/")
+		if base == "" {
+			loc := firstNonEmpty(cfg.GCPLocation, "us-central1")
+			base = fmt.Sprintf("https://modelarmor.%s.rep.googleapis.com/v1", loc)
+		}
+		tmpl := extractModelArmorTemplateName(cfg.ModelArmorEndpoint)
+		return sanitizeStageSafeText(fmt.Sprintf("%s · Template %s", base, tmpl), cfg)
+	}
+	raw := firstNonEmpty(cfg.ModelArmorEndpoint, cfg.DLPEndpoint, "https://modelarmor.googleapis.com/v1")
+	if idx := strings.Index(raw, "/projects/"); idx >= 0 {
+		base := firstNonEmpty(strings.TrimRight(raw[:idx], "/"), "https://dlp.googleapis.com/v2")
+		return sanitizeStageSafeText(base+" · Cloud SDP DeidentifyContent", cfg)
+	}
+	return sanitizeStageSafeText(raw, cfg)
+}
+
+func extractModelArmorTemplateName(endpoint string) string {
+	const marker = "/templates/"
+	idx := strings.Index(endpoint, marker)
+	if idx < 0 {
+		return "aegis-prompt-screen"
+	}
+	rest := endpoint[idx+len(marker):]
+	if cut := strings.IndexAny(rest, ":/?"); cut >= 0 {
+		rest = rest[:cut]
+	}
+	rest = strings.TrimSpace(rest)
+	if rest == "" {
+		return "aegis-prompt-screen"
+	}
+	return rest
+}
+
+func formatStageSafeAgentRegistryEndpoint(cfg RuntimeConfig) string {
+	raw := firstNonEmpty(cfg.AgentRegistryURL, "https://agentregistry.googleapis.com/v1alpha")
+	if idx := strings.Index(raw, "/projects/"); idx >= 0 {
+		base := firstNonEmpty(strings.TrimRight(raw[:idx], "/"), "https://agentregistry.googleapis.com/v1alpha")
+		return sanitizeStageSafeText(base+" · Global Catalog", cfg)
+	}
+	return sanitizeStageSafeText(raw, cfg)
+}
+
+func sanitizeStageSafeSourceStatus(st SourceStatus, cfg RuntimeConfig) SourceStatus {
+	st.Name = sanitizeStageSafeText(st.Name, cfg)
+	st.Endpoint = sanitizeStageSafeText(st.Endpoint, cfg)
+	st.Detail = sanitizeStageSafeText(st.Detail, cfg)
+	return st
+}
+
+func sanitizeStageSafeText(text string, cfg RuntimeConfig) string {
+	if text == "" {
+		return text
+	}
+	out := stageSafeProjectsSegmentRe.ReplaceAllString(text, "/projects/active-gcp-project")
+	if proj := strings.TrimSpace(cfg.GCPProjectID); proj != "" {
+		out = replaceCaseInsensitiveLiteral(out, proj, "active-gcp-project")
+	}
+	if cluster := strings.TrimSpace(cfg.GKEClusterName); cluster != "" {
+		out = replaceCaseInsensitiveLiteral(out, cluster, "active-gke-context")
+	}
+	return out
+}
+
+func replaceCaseInsensitiveLiteral(haystack, needle, replacement string) string {
+	if needle == "" {
+		return haystack
+	}
+	re := regexp.MustCompile(`(?i)` + regexp.QuoteMeta(needle))
+	return re.ReplaceAllString(haystack, replacement)
 }
 
 func buildSourceStatus(
