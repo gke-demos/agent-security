@@ -189,6 +189,8 @@ type ConsentChallenge struct {
 // StepUpConfirmation represents an adk_request_confirmation HITL interrupt.
 type StepUpConfirmation struct {
 	ConfirmationID string            `json:"confirmationId"`
+	CallID         string            `json:"callId,omitempty"`
+	ADKSessionID   string            `json:"adkSessionId,omitempty"`
 	FunctionCall   string            `json:"functionCall"` // "adk_request_confirmation"
 	TargetTool     string            `json:"targetTool"`
 	TargetResource string            `json:"targetResource"`
@@ -224,19 +226,23 @@ type TurnRequest struct {
 
 // TurnResult is the output of AegisRuntime.ExecuteTurn.
 type TurnResult struct {
-	SessionID             string               `json:"sessionId"`
-	Persona               PersonaID            `json:"persona"`
-	ScenarioID            ScenarioID           `json:"scenarioId"`
-	Posture               SecurityPosture      `json:"posture"`
-	Outcome               TurnOutcome          `json:"outcome"`
-	AssistantText         string               `json:"assistantText"`
-	SanitizedInputPreview string               `json:"sanitizedInputPreview"`
-	OutboundCommentPreview string              `json:"outboundCommentPreview,omitempty"`
-	Cards                 []A2UICard           `json:"cards"`
-	BoundaryTrace         []BoundaryTraceEvent `json:"boundaryTrace"`
-	ConsentChallenge      *ConsentChallenge    `json:"consentChallenge,omitempty"`
-	StepUpConfirmation    *StepUpConfirmation  `json:"stepUpConfirmation,omitempty"`
-	WireRecords           []OutboundWireRecord `json:"wireRecords,omitempty"`
+	SessionID              string               `json:"sessionId"`
+	ADKSessionID           string               `json:"adkSessionId,omitempty"`
+	Persona                PersonaID            `json:"persona"`
+	ScenarioID             ScenarioID           `json:"scenarioId"`
+	Posture                SecurityPosture      `json:"posture"`
+	Outcome                TurnOutcome          `json:"outcome"`
+	AssistantText          string               `json:"assistantText"`
+	SanitizedInputPreview  string               `json:"sanitizedInputPreview"`
+	OutboundCommentPreview string               `json:"outboundCommentPreview,omitempty"`
+	Cards                  []A2UICard           `json:"cards"`
+	BoundaryTrace          []BoundaryTraceEvent `json:"boundaryTrace"`
+	ConsentChallenge       *ConsentChallenge    `json:"consentChallenge,omitempty"`
+	StepUpConfirmation     *StepUpConfirmation  `json:"stepUpConfirmation,omitempty"`
+	WireRecords            []OutboundWireRecord `json:"wireRecords,omitempty"`
+	ModelCallCount         int                  `json:"modelCallCount,omitempty"`
+	PluginCallbacks        []string             `json:"pluginCallbacks,omitempty"`
+	ExecutedTools          []string             `json:"executedTools,omitempty"`
 }
 
 // ConfirmationResolution resolves a pending StepUpConfirmation.
