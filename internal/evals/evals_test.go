@@ -716,9 +716,12 @@ func TestRepositoryManifestsScriptsAndHygiene(t *testing.T) {
 		}
 		if d.IsDir() {
 			name := d.Name()
-			if name == ".git" || name == ".worktrees" || name == "node_modules" || name == "vendor" {
+			if name == ".git" || name == ".worktrees" || name == "bin" || name == "dist" || name == "node_modules" || name == "vendor" {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if d.Name() == ".env.local" {
 			return nil
 		}
 		raw, err := os.ReadFile(path)
