@@ -15,11 +15,13 @@ func TestLiveGCP_ModelArmorAndCloudSDP_ADCAndProvenance(t *testing.T) {
 	t.Setenv("GOOGLE_OAUTH_ACCESS_TOKEN", "adc-test-modelarmor-sdp-token-123")
 
 	var modelArmorAuthHeader, dlpAuthHeader string
+	var modelArmorQuotaProj, dlpQuotaProj string
 	var modelArmorHits, dlpHits int
 
 	maSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		modelArmorHits++
 		modelArmorAuthHeader = r.Header.Get("Authorization")
+		modelArmorQuotaProj = r.Header.Get("x-goog-user-project")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"sanitizationResult": {
@@ -32,6 +34,7 @@ func TestLiveGCP_ModelArmorAndCloudSDP_ADCAndProvenance(t *testing.T) {
 	dlpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		dlpHits++
 		dlpAuthHeader = r.Header.Get("Authorization")
+		dlpQuotaProj = r.Header.Get("x-goog-user-project")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"result": {
@@ -48,6 +51,7 @@ func TestLiveGCP_ModelArmorAndCloudSDP_ADCAndProvenance(t *testing.T) {
 	defer dlpSrv.Close()
 
 	rt := aegis.NewRuntime(aegis.RuntimeConfig{
+		GCPProjectID:       "demo-proj",
 		ModelArmorEndpoint: maSrv.URL + "/v1/projects/demo-proj/locations/us-central1/templates/aegis:sanitizeUserPrompt",
 		DLPEndpoint:        dlpSrv.URL + "/v2/projects/demo-proj/content:deidentify",
 		HTTPClient:         maSrv.Client(),
@@ -60,8 +64,14 @@ func TestLiveGCP_ModelArmorAndCloudSDP_ADCAndProvenance(t *testing.T) {
 	if modelArmorAuthHeader != "Bearer adc-test-modelarmor-sdp-token-123" {
 		t.Errorf("Model Armor Authorization = %q, want Bearer adc-test-modelarmor-sdp-token-123", modelArmorAuthHeader)
 	}
+	if modelArmorQuotaProj != "demo-proj" {
+		t.Errorf("Model Armor x-goog-user-project = %q, want demo-proj", modelArmorQuotaProj)
+	}
 	if dlpAuthHeader != "Bearer adc-test-modelarmor-sdp-token-123" {
 		t.Errorf("Cloud DLP Authorization = %q, want Bearer adc-test-modelarmor-sdp-token-123", dlpAuthHeader)
+	}
+	if dlpQuotaProj != "demo-proj" {
+		t.Errorf("Cloud DLP x-goog-user-project = %q, want demo-proj", dlpQuotaProj)
 	}
 	if inspection.Provenance != aegis.ProvenanceLive {
 		t.Errorf("inspection.Provenance = %q, want %q", inspection.Provenance, aegis.ProvenanceLive)
@@ -132,12 +142,15 @@ func TestLiveGCP_ObservabilityAndAgentRegistry_Scenario03And05(t *testing.T) {
 	t.Setenv("GOOGLE_OAUTH_ACCESS_TOKEN", "adc-test-observability-registry-token-456")
 
 	var (
-		registryHits int
-		loggingHits  int
-		gkeHits      int
-		loggingAuth  string
-		gkeAuth      string
-		registryAuth string
+		registryHits      int
+		loggingHits       int
+		gkeHits           int
+		loggingAuth       string
+		gkeAuth           string
+		registryAuth      string
+		loggingQuotaProj  string
+		gkeQuotaProj      string
+		registryQuotaProj string
 	)
 
 	gcpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -146,6 +159,7 @@ func TestLiveGCP_ObservabilityAndAgentRegistry_Scenario03And05(t *testing.T) {
 		case strings.HasSuffix(r.URL.Path, "/mcpServers"):
 			registryHits++
 			registryAuth = r.Header.Get("Authorization")
+			registryQuotaProj = r.Header.Get("x-goog-user-project")
 			_, _ = w.Write([]byte(`{
 				"mcpServers": [
 					{
@@ -178,6 +192,7 @@ func TestLiveGCP_ObservabilityAndAgentRegistry_Scenario03And05(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/v2/entries:list":
 			loggingHits++
 			loggingAuth = r.Header.Get("Authorization")
+			loggingQuotaProj = r.Header.Get("x-goog-user-project")
 			_, _ = w.Write([]byte(`{
 				"entries": [
 					{
@@ -190,6 +205,7 @@ func TestLiveGCP_ObservabilityAndAgentRegistry_Scenario03And05(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/demo-sec-proj/locations/us-central1/clusters/demo-gke-cluster":
 			gkeHits++
 			gkeAuth = r.Header.Get("Authorization")
+			gkeQuotaProj = r.Header.Get("x-goog-user-project")
 			_, _ = w.Write([]byte(`{
 				"name": "demo-gke-cluster",
 				"location": "us-central1",
@@ -265,11 +281,56 @@ func TestLiveGCP_ObservabilityAndAgentRegistry_Scenario03And05(t *testing.T) {
 	if loggingAuth != "Bearer adc-test-observability-registry-token-456" {
 		t.Errorf("Logging Authorization = %q, want Bearer adc-test-observability-registry-token-456", loggingAuth)
 	}
+	if loggingQuotaProj != "demo-sec-proj" {
+		t.Errorf("Logging x-goog-user-project = %q, want demo-sec-proj", loggingQuotaProj)
+	}
 	if gkeAuth != "Bearer adc-test-observability-registry-token-456" {
 		t.Errorf("GKE Authorization = %q, want Bearer adc-test-observability-registry-token-456", gkeAuth)
 	}
+	if gkeQuotaProj != "demo-sec-proj" {
+		t.Errorf("GKE x-goog-user-project = %q, want demo-sec-proj", gkeQuotaProj)
+	}
 	if registryAuth != "Bearer adc-test-observability-registry-token-456" {
 		t.Errorf("Agent Registry Authorization = %q, want Bearer adc-test-observability-registry-token-456", registryAuth)
+	}
+	if registryQuotaProj != "demo-sec-proj" {
+		t.Errorf("Agent Registry x-goog-user-project = %q, want demo-sec-proj", registryQuotaProj)
+	}
+
+	// Verify DiscoverGovernedResources with /locations/global AgentRegistryURL queries /locations/global/mcpServers with x-goog-user-project
+	var sawGlobalPath bool
+	var globalQuotaProj string
+	globalRegSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/locations/global/mcpServers") {
+			sawGlobalPath = true
+			globalQuotaProj = r.Header.Get("x-goog-user-project")
+			_, _ = w.Write([]byte(`{"mcpServers":[{"name":"projects/demo-sec-proj/locations/global/mcpServers/logging-mcp","mcpServerId":"logging-mcp","displayName":"Cloud Logging MCP"}]}`))
+			return
+		}
+		if strings.Contains(r.URL.Path, "/locations/global/agents") {
+			_, _ = w.Write([]byte(`{"agents":[]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer globalRegSrv.Close()
+
+	globalRT := aegis.NewRuntime(aegis.RuntimeConfig{
+		AgentRegistryURL: globalRegSrv.URL + "/v1alpha/projects/demo-sec-proj/locations/global",
+		GCPProjectID:     "demo-sec-proj",
+		GCPLocation:      "us-central1",
+		HTTPClient:       globalRegSrv.Client(),
+	})
+	cat, prov, err := aegis.NewAgentRegistryConnector(globalRT).DiscoverGovernedResources(ctx)
+	if err != nil {
+		t.Fatalf("DiscoverGovernedResources(global) error = %v", err)
+	}
+	if prov != aegis.ProvenanceLive || !sawGlobalPath {
+		t.Errorf("DiscoverGovernedResources(global) prov=%q sawGlobalPath=%v, want LIVE and true (cat=%+v)", prov, sawGlobalPath, cat)
+	}
+	if globalQuotaProj != "demo-sec-proj" {
+		t.Errorf("global Agent Registry x-goog-user-project = %q, want demo-sec-proj", globalQuotaProj)
 	}
 }
 

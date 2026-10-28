@@ -226,6 +226,70 @@ func TestRuntimeConfigFromEnv(t *testing.T) {
 	}
 }
 
+func TestConfigFromEnv_AutoDefaultsAndGitHubTokenResolution(t *testing.T) {
+	// 1. Auto-default regional endpoints when GOOGLE_CLOUD_PROJECT is set and GOOGLE_CLOUD_LOCATION is empty
+	env1 := map[string]string{
+		"GOOGLE_CLOUD_PROJECT": "aegis-zero-click-proj",
+		"LIVE_GITHUB":          "true",
+	}
+	cfg1 := ConfigFromEnvWithLookup(func(k string) string { return env1[k] }, func() string { return "gho_resolved_from_cli_123" })
+	if cfg1.GCPLocation != "us-central1" {
+		t.Errorf("cfg1.GCPLocation = %q, want us-central1", cfg1.GCPLocation)
+	}
+	wantMA := "https://modelarmor.us-central1.rep.googleapis.com/v1/projects/aegis-zero-click-proj/locations/us-central1/templates/aegis-prompt-screen:sanitizeUserPrompt"
+	if cfg1.ModelArmorEndpoint != wantMA {
+		t.Errorf("cfg1.ModelArmorEndpoint = %q, want %q", cfg1.ModelArmorEndpoint, wantMA)
+	}
+	wantDLP := "https://dlp.googleapis.com/v2/projects/aegis-zero-click-proj/locations/global/content:deidentify"
+	if cfg1.DLPEndpoint != wantDLP {
+		t.Errorf("cfg1.DLPEndpoint = %q, want %q", cfg1.DLPEndpoint, wantDLP)
+	}
+	wantReg := "https://agentregistry.googleapis.com/v1alpha/projects/aegis-zero-click-proj/locations/global"
+	if cfg1.AgentRegistryURL != wantReg {
+		t.Errorf("cfg1.AgentRegistryURL = %q, want %q", cfg1.AgentRegistryURL, wantReg)
+	}
+	if cfg1.AliceGitHubToken != "gho_resolved_from_cli_123" {
+		t.Errorf("cfg1.AliceGitHubToken = %q, want gho_resolved_from_cli_123", cfg1.AliceGitHubToken)
+	}
+
+	// 2. Custom GOOGLE_CLOUD_LOCATION flows into regional ModelArmorEndpoint
+	env2 := map[string]string{
+		"GOOGLE_CLOUD_PROJECT":  "aegis-eu-proj",
+		"GOOGLE_CLOUD_LOCATION": "europe-west4",
+	}
+	cfg2 := ConfigFromEnvWithLookup(func(k string) string { return env2[k] }, nil)
+	wantEUMA := "https://modelarmor.europe-west4.rep.googleapis.com/v1/projects/aegis-eu-proj/locations/europe-west4/templates/aegis-prompt-screen:sanitizeUserPrompt"
+	if cfg2.ModelArmorEndpoint != wantEUMA {
+		t.Errorf("cfg2.ModelArmorEndpoint = %q, want %q", cfg2.ModelArmorEndpoint, wantEUMA)
+	}
+
+	// 3. ConfigFromEnv() with t.Setenv and injectable defaultGitHubCLITokenResolver
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "aegis-live-proj")
+	t.Setenv("GOOGLE_CLOUD_LOCATION", "")
+	t.Setenv("MODEL_ARMOR_ENDPOINT", "")
+	t.Setenv("DLP_ENDPOINT", "")
+	t.Setenv("AGENT_REGISTRY_URL", "")
+	t.Setenv("LIVE_GITHUB", "true")
+	t.Setenv("ALICE_GITHUB_TOKEN", "")
+
+	origResolver := defaultGitHubCLITokenResolver
+	defaultGitHubCLITokenResolver = func() string { return "gho_injected_default_resolver" }
+	defer func() { defaultGitHubCLITokenResolver = origResolver }()
+
+	cfg3 := ConfigFromEnv()
+	if cfg3.AliceGitHubToken != "gho_injected_default_resolver" {
+		t.Errorf("cfg3.AliceGitHubToken = %q, want gho_injected_default_resolver", cfg3.AliceGitHubToken)
+	}
+	if cfg3.ModelArmorEndpoint == "" || cfg3.DLPEndpoint == "" || cfg3.AgentRegistryURL == "" {
+		t.Errorf("expected auto-defaulted endpoints in cfg3: %+v", cfg3)
+	}
+
+	// 4. resolveGitHubCLIToken skips CLI execution when running under go test (flag.Lookup("test.v") != nil)
+	if got := resolveGitHubCLIToken(); got != "" {
+		t.Errorf("resolveGitHubCLIToken() under go test = %q, want empty string", got)
+	}
+}
+
 func TestTokenBroker_EnvPersonaSeedingAndLiveOAuthCallbackExchange(t *testing.T) {
 	ctx := context.Background()
 
@@ -341,6 +405,61 @@ func TestTokenBroker_EnvPersonaSeedingAndLiveOAuthCallbackExchange(t *testing.T)
 	for _, st := range dynStatuses {
 		if st.ID == SourceGitHub && st.Provenance != ProvenanceLive {
 			t.Errorf("dynamicRT SourceGitHub Provenance = %q, want %q", st.Provenance, ProvenanceLive)
+		}
+	}
+
+	// 4. Verify runtime 3LO token injection via OAuthGrantRequest.AccessToken (HTTP POST /oauth/grant and CompleteOAuthConsent)
+	// transitions Gmail and Jira Cloud from FIXTURE to LIVE.
+	seedRT := NewRuntime(RuntimeConfig{})
+	seedSrv := httptest.NewServer(NewHandler(seedRT))
+	defer seedSrv.Close()
+
+	if got := NewGmailConnector(seedRT).Provenance(); got != ProvenanceFixture {
+		t.Fatalf("initial GmailConnector.Provenance() = %q, want FIXTURE", got)
+	}
+	if got := NewJiraConnector(seedRT).Provenance(); got != ProvenanceFixture {
+		t.Fatalf("initial JiraConnector.Provenance() = %q, want FIXTURE", got)
+	}
+
+	gmailGrantBody := `{"persona":"alice","provider":"google_gmail","accessToken":"gmail_tok_runtime_seeded_3lo"}`
+	gmailGrantResp, err := http.Post(seedSrv.URL+"/api/sessions/runtime-seed-sess/oauth/grant", "application/json", strings.NewReader(gmailGrantBody))
+	if err != nil {
+		t.Fatalf("POST /oauth/grant (gmail accessToken): %v", err)
+	}
+	gmailGrantResp.Body.Close()
+	if gmailGrantResp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /oauth/grant status = %d, want 200", gmailGrantResp.StatusCode)
+	}
+
+	if _, err := seedRT.CompleteOAuthConsent(ctx, OAuthGrantRequest{
+		SessionID:   "runtime-seed-sess",
+		Persona:     PersonaAlice,
+		Provider:    ProviderAtlassianJira,
+		AccessToken: "atlassian_3lo_runtime_seeded_jira_token",
+	}); err != nil {
+		t.Fatalf("CompleteOAuthConsent (jira accessToken): %v", err)
+	}
+
+	if !seedRT.TokenBroker().HasNonFixtureGrant(ProviderGoogleGmail) {
+		t.Errorf("HasNonFixtureGrant(google_gmail) = false, want true")
+	}
+	if !seedRT.TokenBroker().HasNonFixtureGrant(ProviderAtlassianJira) {
+		t.Errorf("HasNonFixtureGrant(atlassian_jira) = false, want true")
+	}
+	if got := NewGmailConnector(seedRT).Provenance(); got != ProvenanceLive {
+		t.Errorf("GmailConnector.Provenance() after accessToken grant = %q, want LIVE", got)
+	}
+	if got := NewJiraConnector(seedRT).Provenance(); got != ProvenanceLive {
+		t.Errorf("JiraConnector.Provenance() after accessToken grant = %q, want LIVE", got)
+	}
+
+	seedStatuses, err := seedRT.GetSourcesStatus(ctx)
+	if err != nil {
+		t.Fatalf("seedRT.GetSourcesStatus: %v", err)
+	}
+	for _, st := range seedStatuses {
+		if (st.ID == SourceGoogleGmail || st.ID == SourceAtlassianJira) && st.Provenance != ProvenanceLive {
+			t.Errorf("seedRT source %s Provenance = %q, want LIVE", st.ID, st.Provenance)
 		}
 	}
 }

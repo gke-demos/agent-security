@@ -248,12 +248,13 @@ type ConfirmationResolution struct {
 
 // OAuthGrantRequest grants or completes a 3LO token for a Persona and Provider.
 type OAuthGrantRequest struct {
-	SessionID string     `json:"sessionId"`
-	Persona   PersonaID  `json:"persona"`
-	Provider  ProviderID `json:"provider"`
-	Scopes    []string   `json:"scopes,omitempty"`
-	Token     string     `json:"token,omitempty"`
-	Nonce     string     `json:"nonce,omitempty"`
+	SessionID   string     `json:"sessionId"`
+	Persona     PersonaID  `json:"persona"`
+	Provider    ProviderID `json:"provider"`
+	Scopes      []string   `json:"scopes,omitempty"`
+	Token       string     `json:"token,omitempty"`
+	AccessToken string     `json:"accessToken,omitempty"`
+	Nonce       string     `json:"nonce,omitempty"`
 }
 
 // OAuthCallback carries parameters to complete an OAuth 2.0 3LO grant or callback.

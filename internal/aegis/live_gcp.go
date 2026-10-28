@@ -29,6 +29,10 @@ func resolveGoogleADCToken(ctx context.Context) string {
 	return resolveGCPBearerToken(ctx, "https://logging.googleapis.com")
 }
 
+func resolveGCPAccessToken(ctx context.Context, targetURL string) string {
+	return resolveGCPBearerToken(ctx, targetURL)
+}
+
 // resolveGCPBearerToken resolves a Google Cloud OAuth 2.0 Bearer access token via:
 // 1. Explicit environment token (GOOGLE_OAUTH_ACCESS_TOKEN or GCP_ACCESS_TOKEN)
 // 2. Google Application Default Credentials (golang.org/x/oauth2/google.FindDefaultCredentials)
@@ -127,15 +131,21 @@ func (c *AgentRegistryConnector) DiscoverGovernedResources(ctx context.Context) 
 		return defaultRegistryCatalog(), ProvenanceFixture, nil
 	}
 
-	projectID := firstNonEmpty(strings.TrimSpace(cfg.GCPProjectID), "aegis-sre")
+	userProject := strings.TrimSpace(cfg.GCPProjectID)
+	projectID := firstNonEmpty(userProject, "aegis-sre")
 	location := firstNonEmpty(strings.TrimSpace(cfg.GCPLocation), "us-central1")
-	token := resolveGCPBearerToken(ctx, regURL)
+	if parsedProj, parsedLoc := parseProjectAndLocationFromURL(targetURL.Path); parsedProj != "" && parsedLoc != "" {
+		projectID = parsedProj
+		location = parsedLoc
+	}
+	token := resolveGCPAccessToken(ctx, regURL)
 
 	hc := &http.Client{
 		Transport: &adcRegistryRewriteTransport{
 			base:        baseTransport,
 			target:      targetURL,
 			bearerToken: token,
+			userProject: userProject,
 		},
 		Timeout: 5 * time.Second,
 	}
@@ -148,11 +158,20 @@ func (c *AgentRegistryConnector) DiscoverGovernedResources(ctx context.Context) 
 	if err == nil {
 		mcpResp, mcpErr := regClient.ListMCPServers(ctx)
 		agentResp, agentErr := regClient.ListAgents(ctx)
-		if mcpErr == nil && agentErr == nil && len(mcpResp.MCPServers) > 0 {
+		if mcpErr == nil {
+			def := defaultRegistryCatalog()
+			servers := mcpResp.MCPServers
+			if len(servers) == 0 {
+				servers = def.MCPServers
+			}
+			agents := def.Agents
+			if agentErr == nil && len(agentResp.Agents) > 0 {
+				agents = agentResp.Agents
+			}
 			return &RegistryCatalog{
 				Source:     "agentregistry_api",
-				MCPServers: mcpResp.MCPServers,
-				Agents:     agentResp.Agents,
+				MCPServers: servers,
+				Agents:     agents,
 			}, ProvenanceLive, nil
 		}
 	}
@@ -160,10 +179,25 @@ func (c *AgentRegistryConnector) DiscoverGovernedResources(ctx context.Context) 
 	return defaultRegistryCatalog(), ProvenanceFixture, nil
 }
 
+func parseProjectAndLocationFromURL(urlPath string) (string, string) {
+	parts := strings.Split(strings.Trim(urlPath, "/"), "/")
+	var proj, loc string
+	for i := 0; i+1 < len(parts); i++ {
+		if parts[i] == "projects" && proj == "" {
+			proj = parts[i+1]
+		}
+		if parts[i] == "locations" && loc == "" {
+			loc = parts[i+1]
+		}
+	}
+	return proj, loc
+}
+
 type adcRegistryRewriteTransport struct {
 	base        http.RoundTripper
 	target      *url.URL
 	bearerToken string
+	userProject string
 }
 
 func (t *adcRegistryRewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -173,6 +207,9 @@ func (t *adcRegistryRewriteTransport) RoundTrip(req *http.Request) (*http.Respon
 	cloned.Host = t.target.Host
 	if t.bearerToken != "" && cloned.Header.Get("Authorization") == "" {
 		cloned.Header.Set("Authorization", "Bearer "+t.bearerToken)
+	}
+	if t.userProject != "" && cloned.Header.Get("x-goog-user-project") == "" {
+		cloned.Header.Set("x-goog-user-project", t.userProject)
 	}
 	return t.base.RoundTrip(cloned)
 }
@@ -214,76 +251,125 @@ func (c *GCPObservabilityConnector) Provenance() SourceProvenance {
 	return ProvenanceFixture
 }
 
-// QueryLoggingAndGKE executes live Cloud Logging entries:list and GKE clusters.get HTTP requests.
-func (c *GCPObservabilityConnector) QueryLoggingAndGKE(ctx context.Context, persona PersonaID) ([]OutboundWireRecord, SourceProvenance) {
-	if c.Provenance() != ProvenanceLive {
-		return nil, ProvenanceFixture
+// QueryCloudLogging executes a live Cloud Logging entries:list HTTP request.
+func (c *GCPObservabilityConnector) QueryCloudLogging(ctx context.Context, persona PersonaID) (*OutboundWireRecord, error) {
+	if c == nil || c.rt == nil {
+		return nil, fmt.Errorf("gcp observability connector not initialized")
 	}
 	cfg := c.rt.Config()
 	projectID := strings.TrimSpace(cfg.GCPProjectID)
-	location := firstNonEmpty(strings.TrimSpace(cfg.GCPLocation), "us-central1")
-	clusterName := strings.TrimSpace(cfg.GKEClusterName)
-
+	if projectID == "" {
+		return nil, fmt.Errorf("GOOGLE_CLOUD_PROJECT is not configured")
+	}
 	hc := cfg.HTTPClient
 	if hc == nil {
 		hc = &http.Client{Timeout: 5 * time.Second}
 	}
 
-	var records []OutboundWireRecord
-
-	// 1. POST {LoggingBaseURL}/v2/entries:list
 	loggingURL := fmt.Sprintf("%s/v2/entries:list", c.LoggingBaseURL)
 	loggingBody, _ := json.Marshal(map[string]any{
 		"resourceNames": []string{"projects/" + projectID},
 		"pageSize":      5,
 	})
 	logReq, err := http.NewRequestWithContext(ctx, http.MethodPost, loggingURL, bytes.NewReader(loggingBody))
-	if err == nil {
-		logReq.Header.Set("Content-Type", "application/json")
-		tok := resolveGCPBearerToken(ctx, loggingURL)
-		if tok != "" {
-			logReq.Header.Set("Authorization", "Bearer "+tok)
-		}
-		if resp, doErr := hc.Do(logReq); doErr == nil {
-			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				records = append(records, OutboundWireRecord{
-					Provider:          ProviderGCPIAM,
-					ToolName:          "logging.entries.list",
-					Method:            http.MethodPost,
-					URL:               loggingURL,
-					AuthHeaderPresent: tok != "",
-					AuthPrincipal:     string(persona),
-					StatusCode:        resp.StatusCode,
-					Provenance:        ProvenanceLive,
-				})
-			}
-		}
+	if err != nil {
+		return nil, err
+	}
+	logReq.Header.Set("Content-Type", "application/json")
+	tok := resolveGCPAccessToken(ctx, loggingURL)
+	if tok != "" {
+		logReq.Header.Set("Authorization", "Bearer "+tok)
+	}
+	if projectID != "" {
+		logReq.Header.Set("x-goog-user-project", projectID)
+	}
+	resp, doErr := hc.Do(logReq)
+	if doErr != nil {
+		return nil, doErr
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("logging entries:list returned HTTP %d", resp.StatusCode)
+	}
+	return &OutboundWireRecord{
+		Provider:          ProviderGCPIAM,
+		ToolName:          "logging.entries.list",
+		Method:            http.MethodPost,
+		URL:               loggingURL,
+		AuthHeaderPresent: tok != "",
+		AuthPrincipal:     string(persona),
+		StatusCode:        resp.StatusCode,
+		Provenance:        ProvenanceLive,
+		Headers: map[string]string{
+			"x-goog-user-project": projectID,
+		},
+	}, nil
+}
+
+// GetGKECluster executes a live GKE clusters.get HTTP request.
+func (c *GCPObservabilityConnector) GetGKECluster(ctx context.Context, persona PersonaID) (*OutboundWireRecord, error) {
+	if c == nil || c.rt == nil {
+		return nil, fmt.Errorf("gcp observability connector not initialized")
+	}
+	cfg := c.rt.Config()
+	projectID := strings.TrimSpace(cfg.GCPProjectID)
+	location := firstNonEmpty(strings.TrimSpace(cfg.GCPLocation), "us-central1")
+	clusterName := strings.TrimSpace(cfg.GKEClusterName)
+	if projectID == "" || clusterName == "" {
+		return nil, fmt.Errorf("GOOGLE_CLOUD_PROJECT or GKE_CLUSTER_NAME is not configured")
+	}
+	hc := cfg.HTTPClient
+	if hc == nil {
+		hc = &http.Client{Timeout: 5 * time.Second}
 	}
 
-	// 2. GET {GKEBaseURL}/v1/projects/{project}/locations/{location}/clusters/{cluster}
 	gkeURL := fmt.Sprintf("%s/v1/projects/%s/locations/%s/clusters/%s", c.GKEBaseURL, projectID, location, clusterName)
 	gkeReq, err := http.NewRequestWithContext(ctx, http.MethodGet, gkeURL, nil)
-	if err == nil {
-		tok := resolveGCPBearerToken(ctx, gkeURL)
-		if tok != "" {
-			gkeReq.Header.Set("Authorization", "Bearer "+tok)
-		}
-		if resp, doErr := hc.Do(gkeReq); doErr == nil {
-			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				records = append(records, OutboundWireRecord{
-					Provider:          ProviderGCPIAM,
-					ToolName:          "container.clusters.get",
-					Method:            http.MethodGet,
-					URL:               gkeURL,
-					AuthHeaderPresent: tok != "",
-					AuthPrincipal:     string(persona),
-					StatusCode:        resp.StatusCode,
-					Provenance:        ProvenanceLive,
-				})
-			}
-		}
+	if err != nil {
+		return nil, err
+	}
+	tok := resolveGCPAccessToken(ctx, gkeURL)
+	if tok != "" {
+		gkeReq.Header.Set("Authorization", "Bearer "+tok)
+	}
+	if projectID != "" {
+		gkeReq.Header.Set("x-goog-user-project", projectID)
+	}
+	resp, doErr := hc.Do(gkeReq)
+	if doErr != nil {
+		return nil, doErr
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("container clusters.get returned HTTP %d", resp.StatusCode)
+	}
+	return &OutboundWireRecord{
+		Provider:          ProviderGCPIAM,
+		ToolName:          "container.clusters.get",
+		Method:            http.MethodGet,
+		URL:               gkeURL,
+		AuthHeaderPresent: tok != "",
+		AuthPrincipal:     string(persona),
+		StatusCode:        resp.StatusCode,
+		Provenance:        ProvenanceLive,
+		Headers: map[string]string{
+			"x-goog-user-project": projectID,
+		},
+	}, nil
+}
+
+// QueryLoggingAndGKE executes live Cloud Logging entries:list and GKE clusters.get HTTP requests.
+func (c *GCPObservabilityConnector) QueryLoggingAndGKE(ctx context.Context, persona PersonaID) ([]OutboundWireRecord, SourceProvenance) {
+	if c.Provenance() != ProvenanceLive {
+		return nil, ProvenanceFixture
+	}
+
+	var records []OutboundWireRecord
+	if logRec, err := c.QueryCloudLogging(ctx, persona); err == nil && logRec != nil {
+		records = append(records, *logRec)
+	}
+	if gkeRec, err := c.GetGKECluster(ctx, persona); err == nil && gkeRec != nil {
+		records = append(records, *gkeRec)
 	}
 
 	if len(records) == 0 {
@@ -506,20 +592,22 @@ func (c *AgentPlatformGeminiConnector) buildLLMModel(ctx context.Context) model.
 	}
 
 	return &agentPlatformGeminiRESTModel{
-		modelName:  "gemini-2.5-flash",
-		endpoint:   endpoint,
-		httpClient: hc,
-		sdkModel:   sdkModel,
-		useDirect:  strings.TrimSpace(cfg.GeminiEndpoint) != "" || sdkModel == nil,
+		modelName:   "gemini-2.5-flash",
+		endpoint:    endpoint,
+		userProject: strings.TrimSpace(cfg.GCPProjectID),
+		httpClient:  hc,
+		sdkModel:    sdkModel,
+		useDirect:   strings.TrimSpace(cfg.GeminiEndpoint) != "" || sdkModel == nil,
 	}
 }
 
 type agentPlatformGeminiRESTModel struct {
-	modelName  string
-	endpoint   string
-	httpClient *http.Client
-	sdkModel   model.LLM
-	useDirect  bool
+	modelName   string
+	endpoint    string
+	userProject string
+	httpClient  *http.Client
+	sdkModel    model.LLM
+	useDirect   bool
 }
 
 func (m *agentPlatformGeminiRESTModel) Name() string {
@@ -550,6 +638,9 @@ func (m *agentPlatformGeminiRESTModel) GenerateContent(ctx context.Context, req 
 		httpReq.Header.Set("Content-Type", "application/json")
 		if tok := resolveGCPBearerToken(ctx, m.endpoint); tok != "" {
 			httpReq.Header.Set("Authorization", "Bearer "+tok)
+		}
+		if m.userProject != "" {
+			httpReq.Header.Set("x-goog-user-project", m.userProject)
 		}
 		resp, err := m.httpClient.Do(httpReq)
 		if err != nil {

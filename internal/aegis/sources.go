@@ -2,6 +2,7 @@ package aegis
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"net/http"
 	"os"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"time"
 )
+
+var defaultGitHubCLITokenResolver = resolveGitHubCLIToken
 
 func init() {
 	RegisterHTTPRoutes(registerSourcesHTTPRoutes)
@@ -27,43 +30,88 @@ func registerSourcesHTTPRoutes(mux *http.ServeMux, rt *Runtime) {
 	})
 }
 
-// RuntimeConfigFromEnv populates a RuntimeConfig from environment variables,
-// including optional `gh auth token` auto-detection when LIVE_GITHUB=true.
+// ConfigFromEnv populates a RuntimeConfig from environment variables,
+// auto-defaulting regional Model Armor, Cloud SDP, and Agent Registry endpoints
+// when GOOGLE_CLOUD_PROJECT is set, and auto-detecting `gh auth token` when LIVE_GITHUB=true.
+func ConfigFromEnv() RuntimeConfig {
+	return ConfigFromEnvWithLookup(os.Getenv, defaultGitHubCLITokenResolver)
+}
+
+// RuntimeConfigFromEnv is an alias for ConfigFromEnv.
 func RuntimeConfigFromEnv() RuntimeConfig {
-	cfg := RuntimeConfig{
-		ModelArmorEndpoint:         strings.TrimSpace(os.Getenv("MODEL_ARMOR_ENDPOINT")),
-		DLPEndpoint:                strings.TrimSpace(os.Getenv("DLP_ENDPOINT")),
-		AgentRegistryURL:           strings.TrimSpace(os.Getenv("AGENT_REGISTRY_URL")),
-		GCPProjectID:               strings.TrimSpace(os.Getenv("GOOGLE_CLOUD_PROJECT")),
-		GCPLocation:                strings.TrimSpace(os.Getenv("GOOGLE_CLOUD_LOCATION")),
-		GKEClusterName:             strings.TrimSpace(os.Getenv("GKE_CLUSTER_NAME")),
-		AgentPlatformLiveLLM:       parseBoolEnv(os.Getenv("AGENT_PLATFORM_LIVE_LLM")),
-		GeminiEndpoint:             strings.TrimSpace(os.Getenv("GEMINI_ENDPOINT")),
-		GitHubAPIURL:               strings.TrimSpace(os.Getenv("GITHUB_API_URL")),
-		GitHubTargetRepo:           strings.TrimSpace(os.Getenv("GITHUB_TARGET_REPO")),
-		GmailAPIURL:                strings.TrimSpace(os.Getenv("GMAIL_API_URL")),
-		JiraBaseURL:                strings.TrimSpace(os.Getenv("JIRA_BASE_URL")),
-		JiraRestrictedKey:          strings.TrimSpace(os.Getenv("JIRA_RESTRICTED_KEY")),
-		JiraPublicKey:              strings.TrimSpace(os.Getenv("JIRA_PUBLIC_KEY")),
-		SubstrateGatewayURL:        strings.TrimSpace(os.Getenv("SUBSTRATE_GATEWAY_URL")),
-		LiveSubstrate:              parseBoolEnv(os.Getenv("LIVE_SUBSTRATE")),
-		AliceGitHubToken:           strings.TrimSpace(os.Getenv("ALICE_GITHUB_TOKEN")),
-		BobGitHubToken:             strings.TrimSpace(os.Getenv("BOB_GITHUB_TOKEN")),
-		AliceGmailToken:            strings.TrimSpace(os.Getenv("ALICE_GMAIL_TOKEN")),
-		BobGmailToken:              strings.TrimSpace(os.Getenv("BOB_GMAIL_TOKEN")),
-		AliceJiraToken:             strings.TrimSpace(os.Getenv("ALICE_JIRA_TOKEN")),
-		BobJiraToken:               strings.TrimSpace(os.Getenv("BOB_JIRA_TOKEN")),
-		GitHubOAuthClientID:        strings.TrimSpace(os.Getenv("GITHUB_OAUTH_CLIENT_ID")),
-		GitHubOAuthClientSecret:    strings.TrimSpace(os.Getenv("GITHUB_OAUTH_CLIENT_SECRET")),
-		GoogleOAuthClientID:        strings.TrimSpace(os.Getenv("GOOGLE_OAUTH_CLIENT_ID")),
-		GoogleOAuthClientSecret:    strings.TrimSpace(os.Getenv("GOOGLE_OAUTH_CLIENT_SECRET")),
-		JiraOAuthClientID:          strings.TrimSpace(os.Getenv("JIRA_OAUTH_CLIENT_ID")),
-		JiraOAuthClientSecret:      strings.TrimSpace(os.Getenv("JIRA_OAUTH_CLIENT_SECRET")),
-		OAuthTokenEndpointOverride: strings.TrimSpace(os.Getenv("OAUTH_TOKEN_ENDPOINT_OVERRIDE")),
+	return ConfigFromEnv()
+}
+
+// ConfigFromEnvWithLookup populates a RuntimeConfig using the provided environment lookup
+// and GitHub CLI token resolver functions.
+func ConfigFromEnvWithLookup(getenv func(string) string, ghTokenFn func() string) RuntimeConfig {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	if ghTokenFn == nil {
+		ghTokenFn = defaultGitHubCLITokenResolver
 	}
 
-	if parseBoolEnv(os.Getenv("LIVE_GITHUB")) && cfg.AliceGitHubToken == "" {
-		if tok := detectGitHubCLIToken(); tok != "" {
+	cfg := RuntimeConfig{
+		ModelArmorEndpoint:         strings.TrimSpace(getenv("MODEL_ARMOR_ENDPOINT")),
+		DLPEndpoint:                strings.TrimSpace(getenv("DLP_ENDPOINT")),
+		AgentRegistryURL:           strings.TrimSpace(getenv("AGENT_REGISTRY_URL")),
+		GCPProjectID:               strings.TrimSpace(getenv("GOOGLE_CLOUD_PROJECT")),
+		GCPLocation:                strings.TrimSpace(getenv("GOOGLE_CLOUD_LOCATION")),
+		GKEClusterName:             strings.TrimSpace(getenv("GKE_CLUSTER_NAME")),
+		AgentPlatformLiveLLM:       parseBoolEnv(getenv("AGENT_PLATFORM_LIVE_LLM")),
+		GeminiEndpoint:             strings.TrimSpace(getenv("GEMINI_ENDPOINT")),
+		GitHubAPIURL:               strings.TrimSpace(getenv("GITHUB_API_URL")),
+		GitHubTargetRepo:           strings.TrimSpace(getenv("GITHUB_TARGET_REPO")),
+		GmailAPIURL:                strings.TrimSpace(getenv("GMAIL_API_URL")),
+		JiraBaseURL:                strings.TrimSpace(getenv("JIRA_BASE_URL")),
+		JiraRestrictedKey:          strings.TrimSpace(getenv("JIRA_RESTRICTED_KEY")),
+		JiraPublicKey:              strings.TrimSpace(getenv("JIRA_PUBLIC_KEY")),
+		SubstrateGatewayURL:        strings.TrimSpace(getenv("SUBSTRATE_GATEWAY_URL")),
+		LiveSubstrate:              parseBoolEnv(getenv("LIVE_SUBSTRATE")),
+		AliceGitHubToken:           strings.TrimSpace(getenv("ALICE_GITHUB_TOKEN")),
+		BobGitHubToken:             strings.TrimSpace(getenv("BOB_GITHUB_TOKEN")),
+		AliceGmailToken:            strings.TrimSpace(getenv("ALICE_GMAIL_TOKEN")),
+		BobGmailToken:              strings.TrimSpace(getenv("BOB_GMAIL_TOKEN")),
+		AliceJiraToken:             strings.TrimSpace(getenv("ALICE_JIRA_TOKEN")),
+		BobJiraToken:               strings.TrimSpace(getenv("BOB_JIRA_TOKEN")),
+		GitHubOAuthClientID:        strings.TrimSpace(getenv("GITHUB_OAUTH_CLIENT_ID")),
+		GitHubOAuthClientSecret:    strings.TrimSpace(getenv("GITHUB_OAUTH_CLIENT_SECRET")),
+		GoogleOAuthClientID:        strings.TrimSpace(getenv("GOOGLE_OAUTH_CLIENT_ID")),
+		GoogleOAuthClientSecret:    strings.TrimSpace(getenv("GOOGLE_OAUTH_CLIENT_SECRET")),
+		JiraOAuthClientID:          strings.TrimSpace(getenv("JIRA_OAUTH_CLIENT_ID")),
+		JiraOAuthClientSecret:      strings.TrimSpace(getenv("JIRA_OAUTH_CLIENT_SECRET")),
+		OAuthTokenEndpointOverride: strings.TrimSpace(getenv("OAUTH_TOKEN_ENDPOINT_OVERRIDE")),
+	}
+
+	if cfg.GCPProjectID != "" {
+		if cfg.GCPLocation == "" {
+			cfg.GCPLocation = "us-central1"
+		}
+		if cfg.ModelArmorEndpoint == "" {
+			cfg.ModelArmorEndpoint = fmt.Sprintf(
+				"https://modelarmor.%s.rep.googleapis.com/v1/projects/%s/locations/%s/templates/aegis-prompt-screen:sanitizeUserPrompt",
+				cfg.GCPLocation,
+				cfg.GCPProjectID,
+				cfg.GCPLocation,
+			)
+		}
+		if cfg.DLPEndpoint == "" {
+			cfg.DLPEndpoint = fmt.Sprintf(
+				"https://dlp.googleapis.com/v2/projects/%s/locations/global/content:deidentify",
+				cfg.GCPProjectID,
+			)
+		}
+		if cfg.AgentRegistryURL == "" {
+			cfg.AgentRegistryURL = fmt.Sprintf(
+				"https://agentregistry.googleapis.com/v1alpha/projects/%s/locations/global",
+				cfg.GCPProjectID,
+			)
+		}
+	}
+
+	if parseBoolEnv(getenv("LIVE_GITHUB")) && cfg.AliceGitHubToken == "" && ghTokenFn != nil {
+		if tok := strings.TrimSpace(ghTokenFn()); tok != "" {
 			cfg.AliceGitHubToken = tok
 		}
 	}
@@ -80,8 +128,11 @@ func parseBoolEnv(val string) bool {
 	}
 }
 
-func detectGitHubCLIToken() string {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+func resolveGitHubCLIToken() string {
+	if flag.Lookup("test.v") != nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "gh", "auth", "token").Output()
 	if err != nil {

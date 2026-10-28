@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -92,41 +91,8 @@ var (
 // google.golang.org/adk/v2/agentregistry.New and falls back to the governed local
 // manifest when no live endpoint is configured or reachable.
 func (r *Runtime) DiscoverRegistryResources(ctx context.Context) (*RegistryCatalog, error) {
-	cfg := r.Config()
-	if strings.TrimSpace(cfg.AgentRegistryURL) != "" {
-		baseTransport := http.DefaultTransport
-		if cfg.HTTPClient != nil && cfg.HTTPClient.Transport != nil {
-			baseTransport = cfg.HTTPClient.Transport
-		}
-		targetURL, err := url.Parse(strings.TrimRight(cfg.AgentRegistryURL, "/"))
-		if err == nil && targetURL.Host != "" {
-			hc := &http.Client{
-				Transport: &registryRewriteTransport{
-					base:   baseTransport,
-					target: targetURL,
-				},
-				Timeout: 5 * time.Second,
-			}
-			regClient, err := agentregistry.New(ctx, agentregistry.Config{
-				ProjectID:  "aegis-sre",
-				Location:   "us-central1",
-				HTTPClient: hc,
-			})
-			if err == nil {
-				mcpResp, mcpErr := regClient.ListMCPServers(ctx)
-				agentResp, agentErr := regClient.ListAgents(ctx)
-				if mcpErr == nil && agentErr == nil && len(mcpResp.MCPServers) > 0 {
-					return &RegistryCatalog{
-						Source:     "agentregistry_api",
-						MCPServers: mcpResp.MCPServers,
-						Agents:     agentResp.Agents,
-					}, nil
-				}
-			}
-		}
-	}
-
-	return defaultRegistryCatalog(), nil
+	cat, _, err := NewAgentRegistryConnector(r).DiscoverGovernedResources(ctx)
+	return cat, err
 }
 
 // VerifyMCPEndpoint ensures that a target MCP server ID or URL is registered in
@@ -156,19 +122,6 @@ func (r *Runtime) VerifyMCPEndpoint(ctx context.Context, serverRefOrURL string) 
 		}
 	}
 	return nil, fmt.Errorf("agentregistry: MCP server %q is not registered in the governed catalog", serverRefOrURL)
-}
-
-type registryRewriteTransport struct {
-	base   http.RoundTripper
-	target *url.URL
-}
-
-func (t *registryRewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	cloned := req.Clone(req.Context())
-	cloned.URL.Scheme = t.target.Scheme
-	cloned.URL.Host = t.target.Host
-	cloned.Host = t.target.Host
-	return t.base.RoundTrip(cloned)
 }
 
 func defaultRegistryCatalog() *RegistryCatalog {

@@ -283,7 +283,7 @@ func (b *TokenBroker) Grant(ctx context.Context, req OAuthGrantRequest) *Session
 	if len(scopes) == 0 {
 		scopes = defaultScopesForProvider(provider)
 	}
-	token := strings.TrimSpace(req.Token)
+	token := firstNonEmpty(req.AccessToken, req.Token)
 	if token == "" {
 		token = b.configuredOrDefaultPersonaToken(persona, provider)
 	}
@@ -373,6 +373,7 @@ func isFixture3LOToken(token string) bool {
 	return tok == "" ||
 		strings.HasPrefix(tok, "3lo-alice-") ||
 		strings.HasPrefix(tok, "3lo-bob-") ||
+		strings.HasPrefix(tok, "fixture-3lo-") ||
 		tok == sharedRootServiceToken
 }
 
