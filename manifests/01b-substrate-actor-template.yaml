@@ -1,55 +1,60 @@
-apiVersion: ate.dev/v1alpha1
-kind: ActorTemplate
+# Agent Substrate v0.5.0+ protojson ActorTemplate & EgressPolicy manifests.
+# Register against atespace `aegis-system` after WorkerPool/aegis-remediator-pool is Ready:
+#   1. kubectl-ate create actor-template -f <actor-template-doc>
+#   2. kubectl-ate create actor remediator-1 --template sandbox-remediator-template -a aegis-system
+#   3. kubectl-ate create egress-policy remediator-1 -a aegis-system -f <egress-policy-doc>
 metadata:
   name: sandbox-remediator-template
-  namespace: aegis-system
-  labels:
-    app.kubernetes.io/name: sandbox-remediator
-spec:
-  sandboxConfig:
-    sandboxClass: gvisor
-  snapshotConfig:
-    preferredFidelity: SNAPSHOT_FIDELITY_MEMORY
-  workerSelector:
-    ate.dev/worker-pool: aegis-remediator-pool
-  trustBundleDataSource:
-    names:
-      - egress-mitm.ate.dev
-      - system-roots.ate.dev
-  container:
-    image: ghcr.io/gke-demos/agent-security/sandbox-remediator:v0.5.0
-    command: ["/aegis-server", "--mode=remediator-actor"]
-    env: []
-    resources:
-      requests:
-        cpu: "500m"
-        memory: "256Mi"
-      limits:
-        cpu: "1"
-        memory: "512Mi"
+  atespace: aegis-system
+workerSelector:
+  matchLabels:
+    workload: aegis-remediator-pool
+snapshotConfig:
+  preferredFidelity: SNAPSHOT_FIDELITY_MEMORY
+  goldenSnapshotConfig:
+    mode: GOLDEN_SNAPSHOT_MODE_ENABLED
+resources:
+  limits:
+    cpuMillicores: "1000"
+    memoryBytes: "536870912"
+volumes:
+  - name: system-info
+    systemInfo:
+      dataSources:
+        - trustBundle:
+            names:
+              - egress-mitm.ate.dev
+              - system-roots.ate.dev
+            path: trust-bundle.pem
+containers:
+  - name: remediator
+    image: us-central1-docker.pkg.dev/PROJECT_ID/aegis/aegis-server:latest
+    command:
+      - /ko-app/aegis-server
+      - --mode=remediator-actor
+    env:
+      - name: PORT
+        value: "80"
+      - name: SSL_CERT_FILE
+        value: /run/ate/trust-bundle.pem
+      - name: SSL_CERT_DIR
+        value: /run/ate
+    volumeMounts:
+      - name: system-info
+        mountPath: /run/ate
     wakeupProbe:
       httpGet:
         path: /healthz
-        port: 8080
+        port: 80
+      timeoutSeconds: 30
 ---
-apiVersion: ate.dev/v1alpha1
-kind: EgressPolicy
 metadata:
   name: default
-  namespace: aegis-system
-spec:
-  defaultAction: DENY
-  rules:
-    - name: allow-github-archive-via-atenet-mitm
-      action: ALLOW
-      destinations:
-        - host: api.github.com
-          ports:
-            - port: 443
-              protocol: TCP
-      credentialInjection:
-        provider: k8s.io
-        headerName: Authorization
-        secretRef:
-          name: github-remediator-archive-token
-          key: token
+  atespace: aegis-system
+rules:
+  - https:
+      hostnames:
+        - api.github.com
+      ports:
+        numbers:
+          - 443

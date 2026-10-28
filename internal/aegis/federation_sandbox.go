@@ -217,18 +217,20 @@ func registerA2ARoutes(mux *http.ServeMux, rt *Runtime) {
 			partitionKey := fmt.Sprintf("token_broker_forwarded:%s:%s", sessionID, persona)
 			rt.SetExtension(partitionKey, forwardedToken)
 			rt.TokenBroker().Grant(r.Context(), OAuthGrantRequest{
-				SessionID: sessionID,
-				Persona:   persona,
-				Provider:  ProviderGoogleGmail,
-				Scopes:    []string{"https://www.googleapis.com/auth/gmail.readonly"},
-				Token:     forwardedToken,
+				SessionID:  sessionID,
+				Persona:    persona,
+				Provider:   ProviderGoogleGmail,
+				Scopes:     defaultScopesForProvider(ProviderGoogleGmail),
+				Token:      forwardedToken,
+				AuthMethod: "a2a_server_side_oauth2",
 			})
 			rt.TokenBroker().Grant(r.Context(), OAuthGrantRequest{
-				SessionID: sessionID,
-				Persona:   persona,
-				Provider:  ProviderGCPIAM,
-				Scopes:    []string{"https://www.googleapis.com/auth/cloud-platform"},
-				Token:     forwardedToken,
+				SessionID:  sessionID,
+				Persona:    persona,
+				Provider:   ProviderGCPIAM,
+				Scopes:     []string{"https://www.googleapis.com/auth/cloud-platform"},
+				Token:      forwardedToken,
+				AuthMethod: "a2a_server_side_oauth2",
 			})
 		}
 

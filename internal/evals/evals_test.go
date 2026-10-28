@@ -3,20 +3,44 @@ package evals_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gke-demos/agent-security/internal/aegis"
 	"github.com/gke-demos/agent-security/internal/evals"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
+
+func newLoopbackHTTPServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen(127.0.0.1:0): %v", err)
+	}
+	if !strings.HasPrefix(ln.Addr().String(), "127.0.0.1:") {
+		_ = ln.Close()
+		t.Fatalf("expected loopback listener on 127.0.0.1, got %q", ln.Addr().String())
+	}
+	srv := httptest.NewUnstartedServer(handler)
+	_ = srv.Listener.Close()
+	srv.Listener = ln
+	srv.Start()
+	return srv
+}
 
 func TestRedVsBlueTenTrajectories(t *testing.T) {
 	ctx := context.Background()
@@ -510,10 +534,22 @@ func TestRepositoryManifestsScriptsAndHygiene(t *testing.T) {
 			"kind: EgressPolicy",
 			"api.github.com",
 		},
+		"manifests/01b-substrate-actor-template.yaml": {
+			"sandbox-remediator-template",
+			"atespace: aegis-system",
+			"workload: aegis-remediator-pool",
+			"preferredFidelity: SNAPSHOT_FIDELITY_MEMORY",
+			"GOLDEN_SNAPSHOT_MODE_ENABLED",
+			"--mode=remediator-actor",
+			"api.github.com",
+		},
 		"manifests/02-aegis-deployment.yaml": {
 			"kind: Deployment",
 			"kind: Service",
 			"aegis-sre",
+			"SUBSTRATE_TARGET_ACTOR",
+			"aegis-system/remediator-1",
+			"http://atenet-router.ate-system.svc.cluster.local/sandbox/execute",
 		},
 		"manifests/agw-egress-config.yaml": {
 			"AGENT_TO_ANYWHERE",
@@ -562,7 +598,18 @@ func TestRepositoryManifestsScriptsAndHygiene(t *testing.T) {
 			"Agent Substrate",
 			"Agent Gateway",
 			"Model Armor",
-			"Gemini Enterprise",
+			"Gemini Enterprise Agent Platform",
+			"/about",
+			"Architecture Topology Catalog",
+			"/api/about/catalog",
+			"PKCE",
+			"S256",
+			"https://www.googleapis.com/auth/drive.readonly",
+			"https://www.googleapis.com/auth/calendar.readonly",
+			"15m",
+			"atenet-router",
+			"aegis-system/remediator-1",
+			"manifests/01b-substrate-actor-template.yaml",
 		},
 	}
 
@@ -581,33 +628,128 @@ func TestRepositoryManifestsScriptsAndHygiene(t *testing.T) {
 		}
 	}
 
-	// Verify zero hardcoded personal cluster/project names anywhere in the repository
+	// Enforce strict frontend security & browser storage hygiene across internal/aegis/static/
+	staticDir := filepath.Join(repoRoot, "internal", "aegis", "static")
+	indexBytes, err := os.ReadFile(filepath.Join(staticDir, "index.html"))
+	if err != nil {
+		t.Fatalf("ReadFile(index.html): %v", err)
+	}
+	indexHTML := string(indexBytes)
+	inputTagRe := regexp.MustCompile(`(?is)<input\b[^>]*>`)
+	for _, tag := range inputTagRe.FindAllString(indexHTML, -1) {
+		lowerTag := strings.ToLower(tag)
+		if strings.Contains(lowerTag, `type="password"`) || strings.Contains(lowerTag, "pat") || strings.Contains(lowerTag, "api-key") || strings.Contains(lowerTag, "access-token") {
+			t.Errorf("index.html contains forbidden PAT/secret <input> element: %s", tag)
+		}
+		isPromptInput := strings.Contains(tag, `id="input-prompt"`)
+		isCheckbox := strings.Contains(lowerTag, `type="checkbox"`)
+		if !isPromptInput && !isCheckbox {
+			t.Errorf("index.html contains unexpected <input> element %s; only #input-prompt and checkbox controls are permitted", tag)
+		}
+	}
+	inlineHandlerRe := regexp.MustCompile(`(?i)\son[a-z]+\s*=`)
+	if m := inlineHandlerRe.FindString(indexHTML); m != "" {
+		t.Errorf("index.html contains forbidden inline event handler attribute %q", strings.TrimSpace(m))
+	}
+
+	localStorageCallRe := regexp.MustCompile(`localStorage\.(?:getItem|setItem|removeItem)\(\s*["']([^"']+)["']`)
+	nativeDialogRe := regexp.MustCompile(`\b(?:alert|prompt|confirm)\s*\(`)
+	unsafeDOMSinks := []string{".innerHTML", ".outerHTML", "insertAdjacentHTML", "document.write("}
+
+	staticEntries, err := os.ReadDir(staticDir)
+	if err != nil {
+		t.Fatalf("ReadDir(static): %v", err)
+	}
+	for _, ent := range staticEntries {
+		if ent.IsDir() {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(staticDir, ent.Name()))
+		if err != nil {
+			t.Fatalf("ReadFile(static/%s): %v", ent.Name(), err)
+		}
+		src := string(raw)
+		if strings.Contains(src, "sessionStorage") {
+			t.Errorf("static/%s contains forbidden sessionStorage reference", ent.Name())
+		}
+		if strings.Contains(src, "localStorage.clear") {
+			t.Errorf("static/%s contains forbidden localStorage.clear call", ent.Name())
+		}
+		for _, submatch := range localStorageCallRe.FindAllStringSubmatch(src, -1) {
+			if len(submatch) > 1 && submatch[1] != "aegis_theme" {
+				t.Errorf("static/%s accesses non-theme localStorage key %q (only aegis_theme is permitted)", ent.Name(), submatch[1])
+			}
+		}
+		for _, sink := range unsafeDOMSinks {
+			if strings.Contains(src, sink) {
+				t.Errorf("static/%s contains unsafe DOM sink %q", ent.Name(), sink)
+			}
+		}
+		if m := nativeDialogRe.FindString(src); m != "" {
+			t.Errorf("static/%s contains forbidden native browser modal call %q", ent.Name(), m)
+		}
+	}
+
+	// Verify zero hardcoded personal cluster/project names, zero retired branding, and zero UI/doc emojis
 	forbiddenTokens := []string{
 		"ate" + "-cluster",
 		"mofi" + "labs",
 		"substrate" + "-poc",
 	}
+	forbiddenBranding := []string{
+		"vertex" + " ai",
+		"fluid" + " compute",
+	}
 
-	err := filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
+	hasEmojiRune := func(s string) (rune, bool) {
+		for _, r := range s {
+			if (r >= 0x1F300 && r <= 0x1FAFF) || (r >= 0x2600 && r <= 0x27BF) {
+				return r, true
+			}
+		}
+		return 0, false
+	}
+
+	err = filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
 			name := d.Name()
-			if name == ".git" || name == ".worktrees" || name == "node_modules" || name == "vendor" {
+			if name == ".git" || name == ".worktrees" || name == "bin" || name == "dist" || name == "node_modules" || name == "vendor" {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if d.Name() == ".env.local" {
 			return nil
 		}
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
-		lower := strings.ToLower(string(raw))
+		rel, _ := filepath.Rel(repoRoot, path)
+		relSlash := filepath.ToSlash(rel)
+		text := string(raw)
+		lower := strings.ToLower(text)
+
 		for _, forbidden := range forbiddenTokens {
 			if strings.Contains(lower, forbidden) {
-				rel, _ := filepath.Rel(repoRoot, path)
-				t.Errorf("File %s contains forbidden hardcoded personal identifier %q", rel, forbidden)
+				t.Errorf("File %s contains forbidden hardcoded personal identifier %q", relSlash, forbidden)
+			}
+		}
+
+		if !strings.HasSuffix(relSlash, "_test.go") {
+			for _, badTerm := range forbiddenBranding {
+				if strings.Contains(lower, badTerm) {
+					t.Errorf("File %s contains retired/internal terminology %q", relSlash, badTerm)
+				}
+			}
+		}
+
+		if strings.HasPrefix(relSlash, "internal/aegis/static/") || relSlash == "README.md" || relSlash == "GLOSSARY.md" || strings.HasPrefix(relSlash, "docs/adr/") {
+			if r, bad := hasEmojiRune(text); bad {
+				t.Errorf("File %s contains forbidden emoji rune U+%04X (%q); use SVG icons instead", relSlash, r, string(r))
 			}
 		}
 		return nil
@@ -756,35 +898,152 @@ func TestLiveEndToEndArenaEvals(t *testing.T) {
 	ctx := context.Background()
 	cfg := aegis.ConfigFromEnv()
 	rt := aegis.NewRuntime(cfg)
+	srv := newLoopbackHTTPServer(t, aegis.NewHTTPHandler(rt))
+	defer srv.Close()
 
-	var events []aegis.TurnStreamEvent
-	turn, err := rt.ExecuteTurnStream(ctx, aegis.TurnRequest{
-		SessionID:    "live-eval-s1-sdp",
-		Persona:      aegis.PersonaAlice,
-		ScenarioID:   aegis.Scenario01PromptInjectionAndPII,
-		Posture:      aegis.AllBluePosture(),
-		Prompt:       "Triage customer P0 checkout 502 escalation with live cloud security shields.",
-		CleanPIIOnly: true,
-	}, func(ev aegis.TurnStreamEvent) {
-		events = append(events, ev)
-	})
-	if err != nil {
-		t.Fatalf("ExecuteTurnStream (live): %v", err)
-	}
-	if _, err := evals.ValidateTurnStreamInvariants(events); err != nil {
-		t.Fatalf("ValidateTurnStreamInvariants (live): %v", err)
-	}
-
-	var sawLiveStep bool
-	for _, ev := range events {
-		if ev.Type == aegis.TurnStreamEventBoundaryStep && ev.Step != nil && ev.Step.Provenance == aegis.ProvenanceLive {
-			sawLiveStep = true
-			break
+	t.Run("LiveAboutCatalog_ZeroDriftAndSixPlusLiveSources", func(t *testing.T) {
+		resp, err := srv.Client().Get(srv.URL + "/api/about/catalog")
+		if err != nil {
+			t.Fatalf("GET /api/about/catalog: %v", err)
 		}
-	}
-	if !sawLiveStep {
-		t.Errorf("Expected at least one boundary.step with ProvenanceLive in AEGIS_LIVE_EVALS=true mode; got trace %+v", turn.BoundaryTrace)
-	}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET /api/about/catalog status = %d, want 200", resp.StatusCode)
+		}
+		if got := resp.Header.Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
+		}
+		if cc := resp.Header.Get("Cache-Control"); !strings.Contains(cc, "no-store") {
+			t.Errorf("Cache-Control = %q, want no-store", cc)
+		}
+
+		var catalog aegis.ArchitectureTopologyCatalog
+		if err := json.NewDecoder(resp.Body).Decode(&catalog); err != nil {
+			t.Fatalf("Decode ArchitectureTopologyCatalog: %v", err)
+		}
+		if err := aegis.VerifyArchitectureCatalogDrift(&catalog, rt, filepath.Clean("../../docs/adr")); err != nil {
+			t.Fatalf("VerifyArchitectureCatalogDrift (live): %v", err)
+		}
+
+		liveCount := 0
+		for _, src := range catalog.Sources {
+			t.Logf("Live catalog source %s (%s): provenance=%s endpoint=%s", src.ID, src.Name, src.Provenance, src.Endpoint)
+			if src.Provenance == aegis.ProvenanceLive {
+				liveCount++
+			}
+		}
+		if cfg.GCPProjectID != "" && cfg.LiveSubstrate && liveCount < 6 {
+			t.Errorf("liveCount = %d/8, want >= 6 LIVE External Sources when GOOGLE_CLOUD_PROJECT + LIVE_SUBSTRATE + LIVE_GITHUB + AGENT_PLATFORM_LIVE_LLM are set", liveCount)
+		}
+	})
+
+	t.Run("LiveScenario01_ModelArmorAndCloudSDP", func(t *testing.T) {
+		var events []aegis.TurnStreamEvent
+		turn, err := rt.ExecuteTurnStream(ctx, aegis.TurnRequest{
+			SessionID:    "live-eval-s1-sdp",
+			Persona:      aegis.PersonaAlice,
+			ScenarioID:   aegis.Scenario01PromptInjectionAndPII,
+			Posture:      aegis.AllBluePosture(),
+			Prompt:       "Triage customer P0 checkout 502 escalation with live cloud security shields.",
+			CleanPIIOnly: true,
+		}, func(ev aegis.TurnStreamEvent) {
+			events = append(events, ev)
+		})
+		if err != nil {
+			t.Fatalf("ExecuteTurnStream (live S1): %v", err)
+		}
+		if _, err := evals.ValidateTurnStreamInvariants(events); err != nil {
+			t.Fatalf("ValidateTurnStreamInvariants (live S1): %v", err)
+		}
+
+		var sawLiveStep bool
+		for _, ev := range events {
+			if ev.Type == aegis.TurnStreamEventBoundaryStep && ev.Step != nil && ev.Step.Provenance == aegis.ProvenanceLive {
+				sawLiveStep = true
+				break
+			}
+		}
+		if !sawLiveStep {
+			t.Errorf("Expected at least one boundary.step with ProvenanceLive in AEGIS_LIVE_EVALS=true mode; got trace %+v", turn.BoundaryTrace)
+		}
+	})
+
+	t.Run("LiveScenario04_AutoBridgedAtenetRouterGVisorActor", func(t *testing.T) {
+		if !cfg.LiveSubstrate && cfg.SubstrateGatewayURL == "" {
+			t.Skip("Skipping LiveScenario04_AutoBridgedAtenetRouterGVisorActor: LIVE_SUBSTRATE is not enabled")
+		}
+
+		s4Raw, _ := json.Marshal(aegis.TurnRequest{
+			SessionID:  "live-eval-s4-gvisor",
+			Persona:    aegis.PersonaAlice,
+			ScenarioID: aegis.Scenario04AttenuatedA2ASandbox,
+			Posture:    aegis.AllBluePosture(),
+			Prompt:     "Delegate checkout v2.4 hotfix verification to Sandbox Remediator in live Agent Substrate gVisor sandbox.",
+		})
+		streamResp, err := srv.Client().Post(srv.URL+"/api/sessions/live-eval-s4-gvisor/turns/stream", "application/json", bytes.NewReader(s4Raw))
+		if err != nil {
+			t.Fatalf("POST live SCENARIO-04 /turns/stream: %v", err)
+		}
+		sseBytes, _ := io.ReadAll(streamResp.Body)
+		streamResp.Body.Close()
+		if streamResp.StatusCode != http.StatusOK {
+			t.Fatalf("POST live SCENARIO-04 /turns/stream status = %d, want 200", streamResp.StatusCode)
+		}
+
+		events, err := evals.ParseSSEStream(string(sseBytes))
+		if err != nil {
+			t.Fatalf("ParseSSEStream (live S4): %v", err)
+		}
+		turn, err := evals.ValidateTurnStreamInvariants(events)
+		if err != nil {
+			t.Fatalf("ValidateTurnStreamInvariants (live S4): %v", err)
+		}
+		if turn.Outcome != aegis.OutcomeDefendedSuccess {
+			t.Fatalf("live SCENARIO-04 Outcome = %q, want %q", turn.Outcome, aegis.OutcomeDefendedSuccess)
+		}
+
+		var sawLiveRouterWire bool
+		for _, wr := range turn.WireRecords {
+			if wr.ToolName == "substrate.gateway.execute_sandbox" && wr.Provenance == aegis.ProvenanceLive && wr.Headers["ate-target-actor"] == "aegis-system/remediator-1" {
+				sawLiveRouterWire = true
+			}
+		}
+		if !sawLiveRouterWire {
+			t.Errorf("live SCENARIO-04 WireRecords missing LIVE substrate.gateway.execute_sandbox with ate-target-actor=aegis-system/remediator-1: %+v", turn.WireRecords)
+		}
+
+		var sandboxCard *aegis.A2UICard
+		for i := range turn.Cards {
+			if turn.Cards[i].Type == aegis.CardSandboxExecution {
+				sandboxCard = &turn.Cards[i]
+				break
+			}
+		}
+		if sandboxCard == nil {
+			t.Fatalf("live SCENARIO-04 missing SandboxExecutionCard in %+v", turn.Cards)
+		}
+		fields := sandboxCard.Fields
+		if fields["Provenance"] != string(aegis.ProvenanceLive) {
+			t.Errorf("Fields[Provenance] = %q, want LIVE", fields["Provenance"])
+		}
+		if fields["targetActor"] != "aegis-system/remediator-1" {
+			t.Errorf("Fields[targetActor] = %q, want aegis-system/remediator-1", fields["targetActor"])
+		}
+		if !strings.Contains(fields["kernelSignature"], "Linux version 4.19.0-gvisor") {
+			t.Errorf("Fields[kernelSignature] = %q, want substring 'Linux version 4.19.0-gvisor'", fields["kernelSignature"])
+		}
+		if fields["zeroEnvSecretsVerified"] != "true" {
+			t.Errorf("Fields[zeroEnvSecretsVerified] = %q, want 'true'", fields["zeroEnvSecretsVerified"])
+		}
+		if fields["githubAllowedProbe"] != "http:200" {
+			t.Errorf("Fields[githubAllowedProbe] = %q, want 'http:200'", fields["githubAllowedProbe"])
+		}
+		if !strings.HasPrefix(fields["evilExfilProbe"], "blocked") {
+			t.Errorf("Fields[evilExfilProbe] = %q, want prefix 'blocked'", fields["evilExfilProbe"])
+		}
+		t.Logf("Verified live GKE SCENARIO-04 Actor/remediator-1: kernel=%q zeroEnvSecrets=%q github=%q evil=%q pod=%q",
+			fields["kernelSignature"], fields["zeroEnvSecretsVerified"], fields["githubAllowedProbe"], fields["evilExfilProbe"], fields["sandboxPod"])
+	})
 }
 
 func TestValidateTurnStreamInvariants_WireRecordAndTextDelta(t *testing.T) {
@@ -822,5 +1081,660 @@ func TestValidateTurnStreamInvariants_WireRecordAndTextDelta(t *testing.T) {
 		}
 	})
 }
+
+func TestPhase4_WebSecurityHeadersAndPortalRouting(t *testing.T) {
+	rt := aegis.NewRuntime(aegis.RuntimeConfig{})
+	srv := newLoopbackHTTPServer(t, aegis.NewHTTPHandler(rt))
+	defer srv.Close()
+
+	const wantCSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'"
+
+	assertSecurityHeaders := func(t *testing.T, label string, hdr http.Header, wantNoStore bool) {
+		t.Helper()
+		if got := hdr.Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Errorf("%s X-Content-Type-Options = %q, want %q", label, got, "nosniff")
+		}
+		if got := hdr.Get("X-Frame-Options"); got != "DENY" {
+			t.Errorf("%s X-Frame-Options = %q, want %q", label, got, "DENY")
+		}
+		if got := hdr.Get("Referrer-Policy"); got != "strict-origin-when-cross-origin" {
+			t.Errorf("%s Referrer-Policy = %q, want %q", label, got, "strict-origin-when-cross-origin")
+		}
+		if got := hdr.Get("Permissions-Policy"); got != "camera=(), microphone=(), geolocation=()" {
+			t.Errorf("%s Permissions-Policy = %q, want %q", label, got, "camera=(), microphone=(), geolocation=()")
+		}
+		if got := hdr.Get("Content-Security-Policy"); got != wantCSP {
+			t.Errorf("%s Content-Security-Policy = %q, want %q", label, got, wantCSP)
+		}
+		if wantNoStore {
+			cc := hdr.Get("Cache-Control")
+			if !strings.Contains(cc, "no-store") {
+				t.Errorf("%s Cache-Control = %q, want substring %q", label, cc, "no-store")
+			}
+		}
+	}
+
+	inlineEventAttrRe := regexp.MustCompile(`(?i)\son[a-z]+\s*=`)
+
+	getCases := []struct {
+		path        string
+		wantNoStore bool
+		checkHTML   bool
+	}{
+		{path: "/", wantNoStore: false, checkHTML: true},
+		{path: "/about", wantNoStore: false, checkHTML: true},
+		{path: "/static/app.js", wantNoStore: false, checkHTML: false},
+		{path: "/healthz", wantNoStore: false, checkHTML: false},
+		{path: "/api/about/catalog", wantNoStore: true, checkHTML: false},
+		{path: "/api/sessions/eval-sec-hdr", wantNoStore: true, checkHTML: false},
+		{path: "/oauth/google_gmail/authorize?session_id=eval-sec-hdr&persona=alice", wantNoStore: true, checkHTML: false},
+	}
+
+	for _, tc := range getCases {
+		resp, err := srv.Client().Get(srv.URL + tc.path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", tc.path, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s status = %d, want 200", tc.path, resp.StatusCode)
+		}
+		assertSecurityHeaders(t, "GET "+tc.path, resp.Header, tc.wantNoStore)
+
+		if tc.checkHTML {
+			if match := inlineEventAttrRe.FindString(string(body)); match != "" {
+				t.Errorf("GET %s HTML contains inline event handler attribute %q (violates script-src 'self')", tc.path, strings.TrimSpace(match))
+			}
+		}
+	}
+
+	// Verify SSE /api/sessions/{id}/turns/stream also includes security headers + Cache-Control: no-store
+	turnPayload, _ := json.Marshal(aegis.TurnRequest{
+		SessionID:    "eval-sec-sse",
+		Persona:      aegis.PersonaAlice,
+		ScenarioID:   aegis.Scenario01PromptInjectionAndPII,
+		Posture:      aegis.AllBluePosture(),
+		Prompt:       "Triage customer P0 checkout 502 escalation.",
+		CleanPIIOnly: true,
+	})
+	sseResp, err := srv.Client().Post(srv.URL+"/api/sessions/eval-sec-sse/turns/stream", "application/json", bytes.NewReader(turnPayload))
+	if err != nil {
+		t.Fatalf("POST /turns/stream: %v", err)
+	}
+	_, _ = io.ReadAll(sseResp.Body)
+	sseResp.Body.Close()
+	if sseResp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /turns/stream status = %d, want 200", sseResp.StatusCode)
+	}
+	assertSecurityHeaders(t, "POST /api/sessions/eval-sec-sse/turns/stream", sseResp.Header, true)
+
+	// Verify HEAD and OPTIONS are permitted by the method allow-list
+	headReq, _ := http.NewRequest(http.MethodHead, srv.URL+"/about", nil)
+	headResp, err := srv.Client().Do(headReq)
+	if err != nil {
+		t.Fatalf("HEAD /about: %v", err)
+	}
+	headResp.Body.Close()
+	if headResp.StatusCode != http.StatusOK {
+		t.Errorf("HEAD /about status = %d, want 200", headResp.StatusCode)
+	}
+	assertSecurityHeaders(t, "HEAD /about", headResp.Header, false)
+
+	optReq, _ := http.NewRequest(http.MethodOptions, srv.URL+"/api/about/catalog", nil)
+	optResp, err := srv.Client().Do(optReq)
+	if err != nil {
+		t.Fatalf("OPTIONS /api/about/catalog: %v", err)
+	}
+	optResp.Body.Close()
+	if optResp.StatusCode != http.StatusNoContent {
+		t.Errorf("OPTIONS /api/about/catalog status = %d, want 204", optResp.StatusCode)
+	}
+	assertSecurityHeaders(t, "OPTIONS /api/about/catalog", optResp.Header, true)
+
+	// Verify disallowed HTTP methods (TRACE, PUT, DELETE, PATCH) return 405 Method Not Allowed with Allow header + security headers
+	disallowedMethods := []string{http.MethodTrace, http.MethodPut, http.MethodDelete, http.MethodPatch}
+	targetPaths := []string{"/", "/api/about/catalog", "/api/sessions/eval-sec-hdr/turns"}
+	for _, method := range disallowedMethods {
+		for _, path := range targetPaths {
+			req, err := http.NewRequest(method, srv.URL+path, nil)
+			if err != nil {
+				t.Fatalf("NewRequest(%s %s): %v", method, path, err)
+			}
+			resp, err := srv.Client().Do(req)
+			if err != nil {
+				t.Fatalf("%s %s error: %v", method, path, err)
+			}
+			_, _ = io.ReadAll(resp.Body)
+			resp.Body.Close()
+
+			if resp.StatusCode != http.StatusMethodNotAllowed {
+				t.Errorf("%s %s status = %d, want 405 Method Not Allowed", method, path, resp.StatusCode)
+			}
+			if allow := resp.Header.Get("Allow"); allow != "GET, HEAD, POST, OPTIONS" {
+				t.Errorf("%s %s Allow = %q, want %q", method, path, allow, "GET, HEAD, POST, OPTIONS")
+			}
+			wantNoStore := strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/oauth/")
+			assertSecurityHeaders(t, method+" "+path, resp.Header, wantNoStore)
+		}
+	}
+}
+
+func TestPhase4_AboutArchitectureCatalogAndDriftEval(t *testing.T) {
+	rt := aegis.NewRuntime(aegis.RuntimeConfig{})
+	srv := newLoopbackHTTPServer(t, aegis.NewHTTPHandler(rt))
+	defer srv.Close()
+
+	// 1. Verify GET /about serves the standalone HTML portal cleanly
+	aboutResp, err := srv.Client().Get(srv.URL + "/about")
+	if err != nil {
+		t.Fatalf("GET /about: %v", err)
+	}
+	aboutHTMLBytes, _ := io.ReadAll(aboutResp.Body)
+	aboutResp.Body.Close()
+	if aboutResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /about status = %d, want 200", aboutResp.StatusCode)
+	}
+	aboutHTML := string(aboutHTMLBytes)
+	if !strings.Contains(aboutHTML, `id="about-view"`) || !strings.Contains(aboutHTML, `id="about-topology-svg-stage"`) {
+		t.Errorf("GET /about HTML missing #about-view or #about-topology-svg-stage container")
+	}
+
+	// 2. Verify GET /api/about/catalog returns 200 OK and zero drift against docs/adr/
+	catResp, err := srv.Client().Get(srv.URL + "/api/about/catalog")
+	if err != nil {
+		t.Fatalf("GET /api/about/catalog: %v", err)
+	}
+	defer catResp.Body.Close()
+	if catResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/about/catalog status = %d, want 200", catResp.StatusCode)
+	}
+
+	var catalog aegis.ArchitectureTopologyCatalog
+	if err := json.NewDecoder(catResp.Body).Decode(&catalog); err != nil {
+		t.Fatalf("Decode ArchitectureTopologyCatalog: %v", err)
+	}
+
+	adrDir := filepath.Clean("../../docs/adr")
+	if err := aegis.VerifyArchitectureCatalogDrift(&catalog, rt, adrDir); err != nil {
+		t.Fatalf("VerifyArchitectureCatalogDrift failed: %v", err)
+	}
+
+	if len(catalog.Boundaries) != 6 {
+		t.Errorf("len(catalog.Boundaries) = %d, want 6", len(catalog.Boundaries))
+	}
+	if len(catalog.PluginCallbacks) != 6 {
+		t.Errorf("len(catalog.PluginCallbacks) = %d, want 6", len(catalog.PluginCallbacks))
+	}
+	if len(catalog.Tools) != 8 {
+		t.Errorf("len(catalog.Tools) = %d, want 8", len(catalog.Tools))
+	}
+	if len(catalog.Scenarios) != 5 {
+		t.Errorf("len(catalog.Scenarios) = %d, want 5", len(catalog.Scenarios))
+	}
+	if len(catalog.Sources) != 8 {
+		t.Errorf("len(catalog.Sources) = %d, want 8", len(catalog.Sources))
+	}
+	if len(catalog.ADRs) != 13 {
+		t.Errorf("len(catalog.ADRs) = %d, want 13 (0001..0013)", len(catalog.ADRs))
+	}
+	for _, sc := range catalog.Scenarios {
+		if len(sc.Blue.Pulses) == 0 || len(sc.Red.Pulses) == 0 {
+			t.Errorf("Scenario %s missing Blue or Red pulse hops", sc.ID)
+		}
+	}
+}
+
+func TestPhase4_OAuth2S256PKCEAndSubSecondTTLPruningEval(t *testing.T) {
+	rt := aegis.NewRuntime(aegis.RuntimeConfig{})
+	srv := newLoopbackHTTPServer(t, aegis.NewHTTPHandler(rt))
+	defer srv.Close()
+
+	sessionID := "eval-p4-pkce-lifecycle"
+	pkce43Re := regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
+	wantWorkspaceScopes := []string{
+		"openid",
+		"email",
+		"https://www.googleapis.com/auth/gmail.readonly",
+		"https://www.googleapis.com/auth/drive.readonly",
+		"https://www.googleapis.com/auth/calendar.readonly",
+	}
+
+	// 1. Cold 3LO SSE turn pauses with OutcomeConsentRequired + S256 ConsentChallengeCard + Unified Google Workspace SSO scopes
+	coldTurnRaw, _ := json.Marshal(aegis.TurnRequest{
+		SessionID:             sessionID,
+		Persona:               aegis.PersonaAlice,
+		ScenarioID:            aegis.Scenario01PromptInjectionAndPII,
+		Posture:               aegis.AllBluePosture(),
+		Prompt:                "Triage customer P0 checkout 502 escalation email.",
+		CleanPIIOnly:          true,
+		RequireCold3LOConsent: true,
+	})
+	coldResp, err := srv.Client().Post(srv.URL+"/api/sessions/"+sessionID+"/turns/stream", "application/json", bytes.NewReader(coldTurnRaw))
+	if err != nil {
+		t.Fatalf("POST cold /turns/stream: %v", err)
+	}
+	coldSSEBytes, _ := io.ReadAll(coldResp.Body)
+	coldResp.Body.Close()
+	events, err := evals.ParseSSEStream(string(coldSSEBytes))
+	if err != nil {
+		t.Fatalf("ParseSSEStream(cold): %v", err)
+	}
+	coldTurn, err := evals.ValidateTurnStreamInvariants(events)
+	if err != nil {
+		t.Fatalf("ValidateTurnStreamInvariants(cold): %v", err)
+	}
+	if coldTurn.Outcome != aegis.OutcomeConsentRequired || coldTurn.ConsentChallenge == nil {
+		t.Fatalf("coldTurn = (%q, %+v), want OutcomeConsentRequired with ConsentChallenge", coldTurn.Outcome, coldTurn.ConsentChallenge)
+	}
+	if !reflect.DeepEqual(coldTurn.ConsentChallenge.Scopes, wantWorkspaceScopes) {
+		t.Errorf("coldTurn.ConsentChallenge.Scopes = %v, want %v", coldTurn.ConsentChallenge.Scopes, wantWorkspaceScopes)
+	}
+	if coldTurn.ConsentChallenge.CodeChallengeMethod != "S256" || !pkce43Re.MatchString(coldTurn.ConsentChallenge.CodeChallenge) {
+		t.Errorf("invalid S256 PKCE challenge on ConsentChallenge: method=%q challenge=%q", coldTurn.ConsentChallenge.CodeChallengeMethod, coldTurn.ConsentChallenge.CodeChallenge)
+	}
+	assertHasCardType(t, coldTurn.Cards, aegis.CardConsentChallenge)
+
+	// 2. Client generates RFC 7636 S256 code_verifier + code_challenge and initiates GET /oauth/google_gmail/authorize
+	clientVerifier := "aegis-phase4-eval-client-pkce-verifier-0123456789abcdef"
+	sum := sha256.Sum256([]byte(clientVerifier))
+	clientChallenge := base64.RawURLEncoding.EncodeToString(sum[:])
+
+	authReqURL := srv.URL + "/oauth/google_gmail/authorize?session_id=" + sessionID +
+		"&persona=alice&code_challenge=" + url.QueryEscape(clientChallenge) + "&code_challenge_method=S256"
+	authResp, err := srv.Client().Get(authReqURL)
+	if err != nil {
+		t.Fatalf("GET /oauth/google_gmail/authorize: %v", err)
+	}
+	var authChallenge aegis.ConsentChallenge
+	if err := json.NewDecoder(authResp.Body).Decode(&authChallenge); err != nil {
+		authResp.Body.Close()
+		t.Fatalf("Decode authorize response: %v", err)
+	}
+	authResp.Body.Close()
+	if authResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /oauth/google_gmail/authorize status = %d, want 200", authResp.StatusCode)
+	}
+	if authChallenge.CodeChallenge != clientChallenge || authChallenge.CodeChallengeMethod != "S256" {
+		t.Fatalf("authorize PKCE mismatch: got (%q, %q), want (%q, S256)", authChallenge.CodeChallenge, authChallenge.CodeChallengeMethod, clientChallenge)
+	}
+	parsedAuthURL, err := url.Parse(authChallenge.AuthURI)
+	if err != nil {
+		t.Fatalf("url.Parse(AuthURI): %v", err)
+	}
+	if parsedAuthURL.Query().Get("code_challenge") != clientChallenge || parsedAuthURL.Query().Get("code_challenge_method") != "S256" {
+		t.Errorf("AuthURI missing S256 PKCE query params: %s", authChallenge.AuthURI)
+	}
+
+	// 3. Tampered codeVerifier MUST be rejected with 400 Bad Request on both /oauth/grant and /oauth/{provider}/callback
+	tamperedRaw, _ := json.Marshal(aegis.OAuthGrantRequest{
+		Persona:      aegis.PersonaAlice,
+		Provider:     aegis.ProviderGoogleGmail,
+		Nonce:        authChallenge.Nonce,
+		CodeVerifier: clientVerifier + "-tampered",
+	})
+	tamperedResp, err := srv.Client().Post(srv.URL+"/api/sessions/"+sessionID+"/oauth/grant", "application/json", bytes.NewReader(tamperedRaw))
+	if err != nil {
+		t.Fatalf("POST tampered /oauth/grant: %v", err)
+	}
+	tamperedResp.Body.Close()
+	if tamperedResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("tampered /oauth/grant status = %d, want 400 Bad Request", tamperedResp.StatusCode)
+	}
+
+	jiraAuthResp, err := srv.Client().Get(srv.URL + "/oauth/atlassian_jira/authorize?session_id=" + sessionID + "&persona=alice&code_challenge=" + url.QueryEscape(clientChallenge) + "&code_challenge_method=S256")
+	if err != nil {
+		t.Fatalf("GET /oauth/atlassian_jira/authorize: %v", err)
+	}
+	var jiraChallenge aegis.ConsentChallenge
+	_ = json.NewDecoder(jiraAuthResp.Body).Decode(&jiraChallenge)
+	jiraAuthResp.Body.Close()
+
+	badCBResp, err := srv.Client().Get(srv.URL + "/oauth/atlassian_jira/callback?session_id=" + sessionID +
+		"&persona=alice&code=demo_code&state=" + url.QueryEscape(jiraChallenge.Nonce) +
+		"&code_verifier=" + url.QueryEscape(clientVerifier+"-wrong"))
+	if err != nil {
+		t.Fatalf("GET tampered /oauth/atlassian_jira/callback: %v", err)
+	}
+	badCBResp.Body.Close()
+	if badCBResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("tampered /oauth/atlassian_jira/callback status = %d, want 400 Bad Request", badCBResp.StatusCode)
+	}
+
+	missingStateCBResp, err := srv.Client().Get(srv.URL + "/oauth/atlassian_jira/callback?session_id=" + sessionID + "&persona=alice&code=demo_code")
+	if err != nil {
+		t.Fatalf("GET state-less /oauth/atlassian_jira/callback: %v", err)
+	}
+	missingStateCBResp.Body.Close()
+	if missingStateCBResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("state-less /oauth/atlassian_jira/callback status = %d, want 400 Bad Request", missingStateCBResp.StatusCode)
+	}
+
+	// 4. Valid codeVerifier with 1s TTL succeeds and stores token strictly in ephemeral in-memory vault (zero raw token leakage)
+	const sentinelBearer = "3lo-alice-google_gmail-eval-vault-secret-987654321"
+	validRaw, _ := json.Marshal(aegis.OAuthGrantRequest{
+		Persona:      aegis.PersonaAlice,
+		Provider:     aegis.ProviderGoogleGmail,
+		Nonce:        authChallenge.Nonce,
+		CodeVerifier: clientVerifier,
+		AccessToken:  sentinelBearer,
+		TTLSeconds:   1,
+	})
+	validResp, err := srv.Client().Post(srv.URL+"/api/sessions/"+sessionID+"/oauth/grant", "application/json", bytes.NewReader(validRaw))
+	if err != nil {
+		t.Fatalf("POST valid /oauth/grant: %v", err)
+	}
+	validBodyBytes, _ := io.ReadAll(validResp.Body)
+	validResp.Body.Close()
+	if validResp.StatusCode != http.StatusOK {
+		t.Fatalf("valid /oauth/grant status = %d, want 200; body=%s", validResp.StatusCode, string(validBodyBytes))
+	}
+	if strings.Contains(string(validBodyBytes), sentinelBearer) {
+		t.Fatalf("POST /oauth/grant leaked raw bearer token in response JSON")
+	}
+
+	// Replay of consumed nonce MUST be rejected with 400 Bad Request
+	replayResp, err := srv.Client().Post(srv.URL+"/api/sessions/"+sessionID+"/oauth/grant", "application/json", bytes.NewReader(validRaw))
+	if err != nil {
+		t.Fatalf("POST replay /oauth/grant: %v", err)
+	}
+	replayResp.Body.Close()
+	if replayResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("replay /oauth/grant status = %d, want 400 Bad Request", replayResp.StatusCode)
+	}
+
+	// Inspect GET /api/sessions/{id} non-secret EphemeralPKCEGrant metadata & zero raw token leakage
+	sessResp, err := srv.Client().Get(srv.URL + "/api/sessions/" + sessionID)
+	if err != nil {
+		t.Fatalf("GET /api/sessions/%s: %v", sessionID, err)
+	}
+	sessRawBytes, _ := io.ReadAll(sessResp.Body)
+	sessResp.Body.Close()
+	if strings.Contains(string(sessRawBytes), sentinelBearer) {
+		t.Fatalf("GET /api/sessions/%s leaked raw bearer token!", sessionID)
+	}
+	var snapBeforeExpiry aegis.SessionSnapshot
+	if err := json.Unmarshal(sessRawBytes, &snapBeforeExpiry); err != nil {
+		t.Fatalf("Unmarshal SessionSnapshot: %v", err)
+	}
+	var sawActiveGmailMeta bool
+	for _, eg := range snapBeforeExpiry.EphemeralGrants[aegis.PersonaAlice] {
+		if eg.Provider == aegis.ProviderGoogleGmail {
+			sawActiveGmailMeta = true
+			if eg.AuthMethod != "oauth2_pkce_s256" || !eg.PKCEVerified || eg.CodeChallengeMethod != "S256" {
+				t.Errorf("unexpected EphemeralPKCEGrant metadata: %+v", eg)
+			}
+			if d := eg.ExpiresAt.Sub(eg.IssuedAt); d != time.Second {
+				t.Errorf("grant TTL window = %v, want 1s", d)
+			}
+		} else if eg.AuthMethod != "warm_session_seed" || eg.PKCEVerified {
+			t.Errorf("expected non-PKCE warm seed grant %s to have AuthMethod=warm_session_seed and PKCEVerified=false, got %+v", eg.Provider, eg)
+		}
+	}
+	if !sawActiveGmailMeta {
+		t.Fatalf("expected active google_gmail entry in EphemeralGrants before TTL expiry; got %+v", snapBeforeExpiry.EphemeralGrants)
+	}
+
+	// 5. Warm SCENARIO-01 turn before 1s TTL expiry succeeds cleanly (using local fixture Gmail API override for sentinel bearer)
+	warmTurnRaw, _ := json.Marshal(aegis.TurnRequest{
+		SessionID:    sessionID,
+		Persona:      aegis.PersonaAlice,
+		ScenarioID:   aegis.Scenario01PromptInjectionAndPII,
+		Posture:      aegis.AllBluePosture(),
+		Prompt:       "Triage customer P0 checkout 502 escalation email.",
+		CleanPIIOnly: true,
+	})
+	warmResp, err := srv.Client().Post(srv.URL+"/api/sessions/"+sessionID+"/turns", "application/json", bytes.NewReader(warmTurnRaw))
+	if err != nil {
+		t.Fatalf("POST warm /turns: %v", err)
+	}
+	var warmTurn aegis.TurnResult
+	_ = json.NewDecoder(warmResp.Body).Decode(&warmTurn)
+	warmResp.Body.Close()
+	if warmTurn.Outcome != aegis.OutcomeDefendedSuccess {
+		t.Fatalf("warmTurn.Outcome = %q, want %q", warmTurn.Outcome, aegis.OutcomeDefendedSuccess)
+	}
+
+	// 6. Sleep past the 1s TTL, verify automatic pruning on GET /api/sessions/{id}, and verify next turn re-challenges with ConsentChallengeCard
+	time.Sleep(1200 * time.Millisecond)
+
+	expiredSessResp, err := srv.Client().Get(srv.URL + "/api/sessions/" + sessionID)
+	if err != nil {
+		t.Fatalf("GET /api/sessions/%s after TTL: %v", sessionID, err)
+	}
+	var snapAfterExpiry aegis.SessionSnapshot
+	_ = json.NewDecoder(expiredSessResp.Body).Decode(&snapAfterExpiry)
+	expiredSessResp.Body.Close()
+
+	for _, p := range snapAfterExpiry.GrantedProviders[aegis.PersonaAlice] {
+		if p == aegis.ProviderGoogleGmail {
+			t.Errorf("expired google_gmail grant was not pruned from GrantedProviders[alice]: %v", snapAfterExpiry.GrantedProviders[aegis.PersonaAlice])
+		}
+	}
+	for _, eg := range snapAfterExpiry.EphemeralGrants[aegis.PersonaAlice] {
+		if eg.Provider == aegis.ProviderGoogleGmail {
+			t.Errorf("expired google_gmail grant was not pruned from EphemeralGrants[alice]: %+v", snapAfterExpiry.EphemeralGrants[aegis.PersonaAlice])
+		}
+	}
+
+	rechallengeResp, err := srv.Client().Post(srv.URL+"/api/sessions/"+sessionID+"/turns", "application/json", bytes.NewReader(warmTurnRaw))
+	if err != nil {
+		t.Fatalf("POST post-TTL /turns: %v", err)
+	}
+	var rechallengeTurn aegis.TurnResult
+	_ = json.NewDecoder(rechallengeResp.Body).Decode(&rechallengeTurn)
+	rechallengeResp.Body.Close()
+	if rechallengeTurn.Outcome != aegis.OutcomeConsentRequired || rechallengeTurn.ConsentChallenge == nil || rechallengeTurn.ConsentChallenge.Provider != aegis.ProviderGoogleGmail {
+		t.Fatalf("post-TTL turn = (%q, %+v), want OutcomeConsentRequired for google_gmail", rechallengeTurn.Outcome, rechallengeTurn.ConsentChallenge)
+	}
+	assertHasCardType(t, rechallengeTurn.Cards, aegis.CardConsentChallenge)
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return fn(r)
+}
+
+func TestPhase4_AutoBridgedAtenetRouterRemediatorEval(t *testing.T) {
+	mockEgressProbeClient := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Host == "api.github.com" {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"name":"aegis-checkout-target"}`)),
+					Request:    req,
+				}, nil
+			}
+			return nil, &net.OpError{Op: "dial", Net: "tcp", Err: io.EOF}
+		}),
+	}
+
+	t.Run("InCluster_KUBERNETES_SERVICE_HOST_DispatchesAteTargetActorHeaderOnScenario04And05", func(t *testing.T) {
+		t.Setenv("KUBERNETES_SERVICE_HOST", "10.96.0.1")
+
+		actorLoopback := newLoopbackHTTPServer(t, aegis.NewRemediatorActorHandler(mockEgressProbeClient))
+		defer actorLoopback.Close()
+
+		var capturedHost, capturedPath, capturedActorHdr, capturedClassHdr string
+		inClusterClient := &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				capturedHost = req.URL.Host
+				capturedPath = req.URL.Path
+				capturedActorHdr = req.Header.Get("ate-target-actor")
+				capturedClassHdr = req.Header.Get("X-Substrate-Sandbox-Class")
+
+				forwardReq := req.Clone(req.Context())
+				parsedLoopback, _ := url.Parse(actorLoopback.URL + req.URL.Path)
+				forwardReq.URL = parsedLoopback
+				forwardReq.Host = parsedLoopback.Host
+				forwardReq.RequestURI = ""
+				return actorLoopback.Client().Transport.RoundTrip(forwardReq)
+			}),
+		}
+
+		rt := aegis.NewRuntime(aegis.RuntimeConfig{
+			LiveSubstrate: true,
+			HTTPClient:    inClusterClient,
+		})
+		appSrv := newLoopbackHTTPServer(t, aegis.NewHTTPHandler(rt))
+		defer appSrv.Close()
+
+		// SCENARIO-04 over HTTP
+		s4Raw, _ := json.Marshal(aegis.TurnRequest{
+			SessionID:  "eval-p4-incluster-s4",
+			Persona:    aegis.PersonaAlice,
+			ScenarioID: aegis.Scenario04AttenuatedA2ASandbox,
+			Posture:    aegis.AllBluePosture(),
+			Prompt:     "Verify checkout v2.4 patch in gVisor Sandbox Remediator.",
+		})
+		s4Resp, err := appSrv.Client().Post(appSrv.URL+"/api/sessions/eval-p4-incluster-s4/turns", "application/json", bytes.NewReader(s4Raw))
+		if err != nil {
+			t.Fatalf("POST SCENARIO-04: %v", err)
+		}
+		var s4Turn aegis.TurnResult
+		_ = json.NewDecoder(s4Resp.Body).Decode(&s4Turn)
+		s4Resp.Body.Close()
+
+		if s4Turn.Outcome != aegis.OutcomeDefendedSuccess {
+			t.Fatalf("SCENARIO-04 Outcome = %q, want %q", s4Turn.Outcome, aegis.OutcomeDefendedSuccess)
+		}
+		if capturedHost != "atenet-router.ate-system.svc.cluster.local" || capturedPath != "/sandbox/execute" {
+			t.Errorf("in-cluster target = %s%s, want atenet-router.ate-system.svc.cluster.local/sandbox/execute", capturedHost, capturedPath)
+		}
+		if capturedActorHdr != "aegis-system/remediator-1" {
+			t.Errorf("ate-target-actor header = %q, want aegis-system/remediator-1", capturedActorHdr)
+		}
+		if capturedClassHdr != "gvisor" {
+			t.Errorf("X-Substrate-Sandbox-Class header = %q, want gvisor", capturedClassHdr)
+		}
+
+		var sawActorWireHeader bool
+		for _, wr := range s4Turn.WireRecords {
+			if wr.ToolName == "substrate.gateway.execute_sandbox" && wr.Headers["ate-target-actor"] == "aegis-system/remediator-1" && wr.Provenance == aegis.ProvenanceLive {
+				sawActorWireHeader = true
+			}
+		}
+		if !sawActorWireHeader {
+			t.Errorf("WireRecords missing live substrate.gateway.execute_sandbox with ate-target-actor=aegis-system/remediator-1: %+v", s4Turn.WireRecords)
+		}
+
+		// SCENARIO-05 over HTTP (pauses for Step-Up confirmation after live Sandbox Remediator verification)
+		s5Raw, _ := json.Marshal(aegis.TurnRequest{
+			SessionID:  "eval-p4-incluster-s5",
+			Persona:    aegis.PersonaAlice,
+			ScenarioID: aegis.Scenario05FullChainZeroTrust,
+			Posture:    aegis.AllBluePosture(),
+			Prompt:     "Run full-chain incident triage and verify remediation patch.",
+		})
+		s5Resp, err := appSrv.Client().Post(appSrv.URL+"/api/sessions/eval-p4-incluster-s5/turns", "application/json", bytes.NewReader(s5Raw))
+		if err != nil {
+			t.Fatalf("POST SCENARIO-05: %v", err)
+		}
+		var s5Turn aegis.TurnResult
+		_ = json.NewDecoder(s5Resp.Body).Decode(&s5Turn)
+		s5Resp.Body.Close()
+		if s5Turn.Outcome != aegis.OutcomeApprovalRequired || s5Turn.StepUpConfirmation == nil {
+			t.Fatalf("SCENARIO-05 step 1 = (%q, %+v), want OutcomeApprovalRequired", s5Turn.Outcome, s5Turn.StepUpConfirmation)
+		}
+		assertBoundaryVerdict(t, s5Turn.BoundaryTrace, aegis.BoundaryCrossAgentA2A, aegis.VerdictAllowed)
+		assertBoundaryVerdict(t, s5Turn.BoundaryTrace, aegis.BoundarySandboxEgress, aegis.VerdictBlocked)
+	})
+
+	t.Run("LocalAutoBridge_KubectlInspectionAndLoopbackAtenetRouter", func(t *testing.T) {
+		t.Setenv("KUBERNETES_SERVICE_HOST", "")
+
+		var routerReceivedActorHdr string
+		actorHandler := aegis.NewRemediatorActorHandler(mockEgressProbeClient)
+		routerLoopback := newLoopbackHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			routerReceivedActorHdr = r.Header.Get("ate-target-actor")
+			actorHandler.ServeHTTP(w, r)
+		}))
+		defer routerLoopback.Close()
+
+		rt := aegis.NewRuntime(aegis.RuntimeConfig{
+			LiveSubstrate: true,
+			HTTPClient:    routerLoopback.Client(),
+		})
+		rt.SetSubstrateCommandRunner(func(_ context.Context, name string, args ...string) ([]byte, error) {
+			joined := name + " " + strings.Join(args, " ")
+			switch {
+			case strings.Contains(joined, "workerpools.ate.dev"):
+				return []byte(`{"items":[{"metadata":{"name":"aegis-remediator-pool","namespace":"aegis-system"},"spec":{"sandboxClasses":[{"name":"gvisor"}]},"status":{"readyWorkers":1}}]}`), nil
+			case strings.Contains(joined, "actors.ate.dev"):
+				return []byte(`{"metadata":{"name":"remediator-1","namespace":"aegis-system"},"spec":{"sandboxClass":"gvisor","preferredFidelity":"SNAPSHOT_FIDELITY_MEMORY"},"status":{"state":"ACTOR_STATE_SUSPENDED"}}`), nil
+			case strings.Contains(joined, "egresspolicies.ate.dev"):
+				return []byte(`{"metadata":{"name":"remediator-1","namespace":"aegis-system"},"spec":{"defaultAction":"DENY","rules":[{"https":{"hostnames":["api.github.com"]}}]}}`), nil
+			default:
+				return []byte(`{"items":[]}`), nil
+			}
+		})
+		rt.SetSubstrateRouterBridge(func(_ context.Context) (string, func(), error) {
+			return routerLoopback.URL, func() {}, nil
+		})
+
+		appSrv := newLoopbackHTTPServer(t, aegis.NewHTTPHandler(rt))
+		defer appSrv.Close()
+
+		streamRaw, _ := json.Marshal(aegis.TurnRequest{
+			SessionID:  "eval-p4-autobridge-s4",
+			Persona:    aegis.PersonaAlice,
+			ScenarioID: aegis.Scenario04AttenuatedA2ASandbox,
+			Posture:    aegis.AllBluePosture(),
+			Prompt:     "Verify checkout hotfix via auto-bridged svc/atenet-router.",
+		})
+		streamResp, err := appSrv.Client().Post(appSrv.URL+"/api/sessions/eval-p4-autobridge-s4/turns/stream", "application/json", bytes.NewReader(streamRaw))
+		if err != nil {
+			t.Fatalf("POST /turns/stream: %v", err)
+		}
+		sseRaw, _ := io.ReadAll(streamResp.Body)
+		streamResp.Body.Close()
+
+		events, err := evals.ParseSSEStream(string(sseRaw))
+		if err != nil {
+			t.Fatalf("ParseSSEStream: %v", err)
+		}
+		turn, err := evals.ValidateTurnStreamInvariants(events)
+		if err != nil {
+			t.Fatalf("ValidateTurnStreamInvariants: %v", err)
+		}
+		if turn.Outcome != aegis.OutcomeDefendedSuccess {
+			t.Fatalf("turn.Outcome = %q, want %q", turn.Outcome, aegis.OutcomeDefendedSuccess)
+		}
+		if routerReceivedActorHdr != "aegis-system/remediator-1" {
+			t.Errorf("routerReceivedActorHdr = %q, want aegis-system/remediator-1", routerReceivedActorHdr)
+		}
+
+		var sandboxCard *aegis.A2UICard
+		for i := range turn.Cards {
+			if turn.Cards[i].Type == aegis.CardSandboxExecution {
+				sandboxCard = &turn.Cards[i]
+				break
+			}
+		}
+		if sandboxCard == nil {
+			t.Fatalf("missing SandboxExecutionCard in %+v", turn.Cards)
+		}
+		if sandboxCard.Fields["Provenance"] != string(aegis.ProvenanceLive) {
+			t.Errorf("SandboxExecutionCard.Fields[Provenance] = %q, want LIVE", sandboxCard.Fields["Provenance"])
+		}
+		if sandboxCard.Fields["targetActor"] != "aegis-system/remediator-1" {
+			t.Errorf("SandboxExecutionCard.Fields[targetActor] = %q, want aegis-system/remediator-1", sandboxCard.Fields["targetActor"])
+		}
+		if sandboxCard.Fields["zeroEnvSecretsVerified"] != "true" {
+			t.Errorf("SandboxExecutionCard.Fields[zeroEnvSecretsVerified] = %q, want true", sandboxCard.Fields["zeroEnvSecretsVerified"])
+		}
+		if sandboxCard.Fields["githubAllowedProbe"] != "http:200" {
+			t.Errorf("SandboxExecutionCard.Fields[githubAllowedProbe] = %q, want http:200", sandboxCard.Fields["githubAllowedProbe"])
+		}
+		if !strings.HasPrefix(sandboxCard.Fields["evilExfilProbe"], "blocked") {
+			t.Errorf("SandboxExecutionCard.Fields[evilExfilProbe] = %q, want prefix blocked", sandboxCard.Fields["evilExfilProbe"])
+		}
+	})
+}
+
+
 
 

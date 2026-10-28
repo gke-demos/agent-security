@@ -437,6 +437,7 @@ func handleLive3LOErrorOrDenial(
 				Nonce:       consentErr.Nonce,
 				ResourceRef: spec.ResourceRef,
 			}
+			enrichConsentChallenge(ch)
 			trace = append(trace, BoundaryTraceEvent{
 				Order:      spec.TraceOrder,
 				Boundary:   BoundaryIdentity3LO,

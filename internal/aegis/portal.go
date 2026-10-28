@@ -36,20 +36,32 @@ type FixtureManifest struct {
 	MCPServers    []string `json:"mcpServers"`
 }
 
+func servePortalIndex(w http.ResponseWriter) {
+	data, err := portalStaticFS.ReadFile("static/index.html")
+	if err != nil {
+		http.Error(w, "portal index.html not found", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
 func registerPortalRoutes(mux *http.ServeMux, rt *Runtime) {
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
 			return
 		}
-		data, err := portalStaticFS.ReadFile("static/index.html")
-		if err != nil {
-			http.Error(w, "portal index.html not found", http.StatusInternalServerError)
+		servePortalIndex(w)
+	})
+
+	mux.HandleFunc("GET /about", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/about" {
+			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(data)
+		servePortalIndex(w)
 	})
 
 	mux.HandleFunc("GET /static/{file}", func(w http.ResponseWriter, r *http.Request) {
@@ -101,9 +113,10 @@ func registerPortalRoutes(mux *http.ServeMux, rt *Runtime) {
 		for _, persona := range []PersonaID{PersonaAlice, PersonaBob} {
 			for _, provider := range allProviders {
 				broker.Grant(r.Context(), OAuthGrantRequest{
-					SessionID: sessionID,
-					Persona:   persona,
-					Provider:  provider,
+					SessionID:  sessionID,
+					Persona:    persona,
+					Provider:   provider,
+					AuthMethod: "fixture_seed",
 				})
 			}
 		}
@@ -146,6 +159,15 @@ func registerPortalRoutes(mux *http.ServeMux, rt *Runtime) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"scenarios": canonicalScenarioDescriptors(),
 		})
+	})
+
+	mux.HandleFunc("GET /api/about/catalog", func(w http.ResponseWriter, r *http.Request) {
+		cat, err := rt.BuildArchitectureTopologyCatalog(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, cat)
 	})
 }
 

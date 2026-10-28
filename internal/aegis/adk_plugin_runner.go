@@ -43,6 +43,26 @@ var canonicalGovernedToolNames = []string{
 	"create_github_pull_request",
 }
 
+// Canonical lifecycle callback names registered on AegisSecurityPlugin (plugin.Config).
+var canonicalSecurityPluginCallbacks = []string{
+	"BeforeRun",
+	"BeforeModel",
+	"BeforeTool",
+	"AfterTool",
+	"AfterModel",
+	"OnEvent",
+}
+
+// CanonicalGovernedToolNames returns a copy of the canonical ADK Go v2 functiontool names.
+func CanonicalGovernedToolNames() []string {
+	return append([]string(nil), canonicalGovernedToolNames...)
+}
+
+// CanonicalSecurityPluginCallbacks returns a copy of the 6 AegisSecurityPlugin lifecycle hook names in execution order.
+func CanonicalSecurityPluginCallbacks() []string {
+	return append([]string(nil), canonicalSecurityPluginCallbacks...)
+}
+
 type plannedToolCall struct {
 	Name string
 	Args governedToolInput
@@ -59,40 +79,41 @@ type governedToolInput struct {
 type adkTurnExecutionState = adkActiveTurnContext
 
 type adkActiveTurnContext struct {
-	mu                     sync.Mutex
-	rt                     *Runtime
-	req                    TurnRequest
-	rawScenarioID          ScenarioID
-	adkUserID              string
-	adkSessionID           string
-	sink                   TurnEventSink
-	textDeltaEmitted       bool
-	isConfirmationResume   bool
-	confirmationResolution *ConfirmationResolution
-	resolvedStepUp         *StepUpConfirmation
-	plannedTools           []plannedToolCall
-	nextToolIdx            int
-	userPromptScreened     bool
+	mu                      sync.Mutex
+	rt                      *Runtime
+	req                     TurnRequest
+	rawScenarioID           ScenarioID
+	adkUserID               string
+	adkSessionID            string
+	sink                    TurnEventSink
+	textDeltaEmitted        bool
+	isConfirmationResume    bool
+	confirmationResolution  *ConfirmationResolution
+	resolvedStepUp          *StepUpConfirmation
+	plannedTools            []plannedToolCall
+	nextToolIdx             int
+	userPromptScreened      bool
 	sanitizedUserPromptText string
-	registryDiscovered     bool
-	loggedReadOnlyUAP      bool
-	cold3LOConsentChecked  bool
-	halted                 bool
-	redEmailExploited      bool
-	sharedSessionLeaked    bool
-	cleanPeerSummary       string
-	outcome                TurnOutcome
-	assistantText          string
-	sanitizedInputPreview  string
-	outboundCommentPreview string
-	cards                  []A2UICard
-	trace                  []BoundaryTraceEvent
-	wireRecords            []OutboundWireRecord
-	consentChallenge       *ConsentChallenge
-	stepUpConfirmation     *StepUpConfirmation
-	modelCallCount         int
-	pluginCallbacks        []string
-	executedTools          []string
+	registryDiscovered      bool
+	loggedReadOnlyUAP       bool
+	cold3LOConsentChecked   bool
+	halted                  bool
+	redEmailExploited       bool
+	sharedSessionLeaked     bool
+	cleanPeerSummary        string
+	liveSandboxResp         *SandboxExecutionResponse
+	outcome                 TurnOutcome
+	assistantText           string
+	sanitizedInputPreview   string
+	outboundCommentPreview  string
+	cards                   []A2UICard
+	trace                   []BoundaryTraceEvent
+	wireRecords             []OutboundWireRecord
+	consentChallenge        *ConsentChallenge
+	stepUpConfirmation      *StepUpConfirmation
+	modelCallCount          int
+	pluginCallbacks         []string
+	executedTools           []string
 }
 
 func (tc *adkActiveTurnContext) emitLocked(ev TurnStreamEvent) {
@@ -1056,6 +1077,9 @@ func executeGovernedSandboxDelegationTool(ctx context.Context, r *Runtime, tc *a
 		sandboxConfig := "gvisor-default"
 		if isLive && liveResp != nil {
 			stepProvenance = ProvenanceLive
+			tc.mu.Lock()
+			tc.liveSandboxResp = liveResp
+			tc.mu.Unlock()
 			if liveResp.WorkerPool != "" {
 				workerPool = liveResp.WorkerPool
 			}
@@ -1110,6 +1134,26 @@ func executeGovernedSandboxDelegationTool(ctx context.Context, r *Runtime, tc *a
 			},
 		)
 
+		stepMeta := map[string]string{
+			"apiVersion":          actor.APIVersion,
+			"sandboxClass":        actor.SandboxClass,
+			"preferredFidelity":   actor.PreferredFidelity,
+			"containerEnvSecrets": fmt.Sprintf("%d", len(actor.ContainerEnv)),
+			"allowedEgress":       "api.github.com",
+			"blockedEgress":       "https://evil.example.com/exfil",
+			"workerPool":          workerPool,
+			"sandboxConfig":       sandboxConfig,
+			"provenance":          string(stepProvenance),
+		}
+		if isLive && liveResp != nil {
+			stepMeta["targetActor"] = substrateTargetActor(r.Config())
+			for k, v := range liveResp.Metadata {
+				if strings.TrimSpace(v) != "" {
+					stepMeta[k] = v
+				}
+			}
+		}
+
 		tc.addStep(BoundaryTraceEvent{
 			Boundary:   BoundarySandboxEgress,
 			Shield:     "Sandbox Egress MITM (Agent Substrate v0.5.0)",
@@ -1118,17 +1162,7 @@ func executeGovernedSandboxDelegationTool(ctx context.Context, r *Runtime, tc *a
 			Verdict:    VerdictBlocked,
 			Provenance: stepProvenance,
 			Detail:     "Executed in gVisor Actor (SNAPSHOT_FIDELITY_MEMORY) with 0 env secrets; atenet MITM injected GitHub token for api.github.com and EgressPolicy blocked init() exfiltration to https://evil.example.com/exfil",
-			Metadata: map[string]string{
-				"apiVersion":          actor.APIVersion,
-				"sandboxClass":        actor.SandboxClass,
-				"preferredFidelity":   actor.PreferredFidelity,
-				"containerEnvSecrets": fmt.Sprintf("%d", len(actor.ContainerEnv)),
-				"allowedEgress":       "api.github.com",
-				"blockedEgress":       "https://evil.example.com/exfil",
-				"workerPool":          workerPool,
-				"sandboxConfig":       sandboxConfig,
-				"provenance":          string(stepProvenance),
-			},
+			Metadata:   stepMeta,
 		})
 	} else {
 		tc.addStep(BoundaryTraceEvent{
@@ -1241,7 +1275,52 @@ func executeGovernedCreatePRTool(ctx context.Context, r *Runtime, tc *adkActiveT
 }
 
 func buildAegisSecurityPlugin(r *Runtime) (*plugin.Plugin, error) {
-	return plugin.New(plugin.Config{
+	return plugin.New(r.securityPluginConfig())
+}
+
+func activePluginCallbacksFromConfig(cfg plugin.Config) []string {
+	var out []string
+	if cfg.OnUserMessageCallback != nil {
+		out = append(out, "OnUserMessage")
+	}
+	if cfg.BeforeRunCallback != nil {
+		out = append(out, "BeforeRun")
+	}
+	if cfg.BeforeAgentCallback != nil {
+		out = append(out, "BeforeAgent")
+	}
+	if cfg.BeforeModelCallback != nil {
+		out = append(out, "BeforeModel")
+	}
+	if cfg.OnModelErrorCallback != nil {
+		out = append(out, "OnModelError")
+	}
+	if cfg.BeforeToolCallback != nil {
+		out = append(out, "BeforeTool")
+	}
+	if cfg.AfterToolCallback != nil {
+		out = append(out, "AfterTool")
+	}
+	if cfg.OnToolErrorCallback != nil {
+		out = append(out, "OnToolError")
+	}
+	if cfg.AfterModelCallback != nil {
+		out = append(out, "AfterModel")
+	}
+	if cfg.AfterAgentCallback != nil {
+		out = append(out, "AfterAgent")
+	}
+	if cfg.AfterRunCallback != nil {
+		out = append(out, "AfterRun")
+	}
+	if cfg.OnEventCallback != nil {
+		out = append(out, "OnEvent")
+	}
+	return out
+}
+
+func (r *Runtime) securityPluginConfig() plugin.Config {
+	return plugin.Config{
 		Name: adkSecurityPluginName,
 		BeforeRunCallback: func(ctx agent.InvocationContext) (*genai.Content, error) {
 			tc := r.lookupActiveTurnFromContext(ctx, ctx.Session().ID())
@@ -1480,7 +1559,7 @@ func buildAegisSecurityPlugin(r *Runtime) (*plugin.Plugin, error) {
 			tc.sanitizeCardsInPlace()
 			return nil, nil
 		},
-	})
+	}
 }
 
 func (tc *adkActiveTurnContext) sanitizeCardsInPlace() {
@@ -1655,6 +1734,7 @@ func check3LOConsentBeforeTool(ctx agent.Context, r *Runtime, tc *adkActiveTurnC
 				Nonce:       consentErr.Nonce,
 				ResourceRef: resourceRef,
 			}
+			enrichConsentChallenge(ch)
 			tc.addStep(BoundaryTraceEvent{
 				Boundary:   BoundaryIdentity3LO,
 				Shield:     "Token Broker (3LO)",
@@ -1736,6 +1816,15 @@ func enforceStepUpBeforeTool(ctx agent.Context, tc *adkActiveTurnContext) (map[s
 		stepUp.ADKSessionID = tc.adkSessionID
 
 		if tc.req.ScenarioID == Scenario05FullChainZeroTrust {
+			s5TargetActor := ""
+			if tc.rt != nil {
+				s5TargetActor = substrateTargetActor(tc.rt.Config())
+			}
+			s5SandboxFields := map[string]string{}
+			populateSandboxMetadata(s5SandboxFields, map[string]string{
+				"peerResponseScreening": tc.cleanPeerSummary,
+				"targetActor":           s5TargetActor,
+			}, tc.liveSandboxResp)
 			sandboxCard, err := ValidateAndSanitizeA2UICard(A2UICard{
 				SurfaceID: "card-sandbox-s5",
 				MimeType:  "application/json+a2ui",
@@ -1745,14 +1834,7 @@ func enforceStepUpBeforeTool(ctx agent.Context, tc *adkActiveTurnContext) (map[s
 				Subtitle:  "Boundaries 5 & 6: Attenuated A2A v2 + Agent Substrate v0.5.0 Egress MITM",
 				Severity:  "SUCCESS",
 				Body:      "Sandbox Remediator verified TestCheckoutHotfix inside an Agent Substrate v0.5.0 gVisor Actor with zero env secrets, injected GitHub credentials out-of-sandbox via atenet Egress MITM, and blocked evil.example.com exfiltration.",
-				Fields: map[string]string{
-					"sandboxClass":          "gvisor",
-					"preferredFidelity":     "SNAPSHOT_FIDELITY_MEMORY",
-					"containerEnvSecrets":   "0",
-					"egressMitmAllowed":     "https://api.github.com (atenet header injection)",
-					"egressPolicyBlocked":   "https://evil.example.com/exfil (403 Forbidden)",
-					"peerResponseScreening": tc.cleanPeerSummary,
-				},
+				Fields:    s5SandboxFields,
 			}, tc.req.Posture)
 			if err != nil {
 				return nil, err
@@ -2802,6 +2884,17 @@ func finalizeTurnOutcomeAndCards(r *Runtime, tc *adkActiveTurnContext) []A2UICar
 					break
 				}
 			}
+			s4TargetActor := ""
+			if r != nil {
+				s4TargetActor = substrateTargetActor(r.Config())
+			}
+			s4SandboxFields := map[string]string{}
+			populateSandboxMetadata(s4SandboxFields, map[string]string{
+				"Provenance":            sandboxProvenance,
+				"a2aCredentialScrub":    "withoutCredentialParts (upstream 3LO stripped)",
+				"peerResponseScreening": tc.cleanPeerSummary,
+				"targetActor":           s4TargetActor,
+			}, tc.liveSandboxResp)
 			card, _ := ValidateAndSanitizeA2UICard(A2UICard{
 				SurfaceID: "card-sandbox-s4-blue",
 				MimeType:  "application/json+a2ui",
@@ -2811,16 +2904,7 @@ func finalizeTurnOutcomeAndCards(r *Runtime, tc *adkActiveTurnContext) []A2UICar
 				Subtitle:  "Boundaries 5 & 6: Attenuated A2A v2 + Agent Substrate v0.5.0 Egress MITM",
 				Severity:  "SUCCESS",
 				Body:      "Triage Orchestrator stripped upstream 3LO tokens before A2A delegation. Sandbox Remediator ran go test inside an Agent Substrate v0.5.0 gVisor Actor with zero container env secrets, injected GitHub credentials out-of-sandbox via atenet Egress MITM, blocked init() exfiltration to evil.example.com, and screened the returned peer summary via Model Armor.",
-				Fields: map[string]string{
-					"Provenance":            sandboxProvenance,
-					"sandboxClass":          "gvisor",
-					"preferredFidelity":     "SNAPSHOT_FIDELITY_MEMORY",
-					"containerEnvSecrets":   "0",
-					"egressMitmAllowed":     "https://api.github.com (atenet header injection)",
-					"egressPolicyBlocked":   "https://evil.example.com/exfil (403 Forbidden)",
-					"a2aCredentialScrub":    "withoutCredentialParts (upstream 3LO stripped)",
-					"peerResponseScreening": tc.cleanPeerSummary,
-				},
+				Fields:    s4SandboxFields,
 			}, tc.req.Posture)
 			tc.outcome = OutcomeDefendedSuccess
 			tc.assistantText = "Verified checkout v2.4 hotfix in Agent Substrate v0.5.0 gVisor sandbox. Upstream 3LO credentials were stripped on A2A handoff, evil.example.com exfiltration was blocked by EgressPolicy, and the peer A2A response was screened via Model Armor."
@@ -3106,6 +3190,40 @@ func hasCachedRestrictedToolOutputInHistory(contents []*genai.Content) bool {
 		}
 	}
 	return false
+}
+
+func populateSandboxMetadata(fields map[string]string, meta map[string]string, resp *SandboxExecutionResponse) {
+	if fields == nil {
+		return
+	}
+	fields["sandboxClass"] = "gvisor"
+	fields["preferredFidelity"] = "SNAPSHOT_FIDELITY_MEMORY"
+	fields["containerEnvSecrets"] = "0"
+	fields["egressMitmAllowed"] = "https://api.github.com (atenet header injection)"
+	fields["egressPolicyBlocked"] = "https://evil.example.com/exfil (403 Forbidden)"
+	for k, v := range meta {
+		if k == "targetActor" {
+			continue
+		}
+		fields[k] = v
+	}
+	if resp == nil {
+		return
+	}
+	fields["Provenance"] = string(ProvenanceLive)
+	if ta := strings.TrimSpace(meta["targetActor"]); ta != "" {
+		fields["targetActor"] = ta
+	} else if ta := strings.TrimSpace(resp.Metadata["targetActor"]); ta != "" {
+		fields["targetActor"] = ta
+	}
+	for _, key := range []string{"kernelSignature", "zeroEnvSecretsVerified", "githubAllowedProbe", "evilExfilProbe", "actorName", "sandboxPod"} {
+		if val := strings.TrimSpace(resp.Metadata[key]); val != "" {
+			fields[key] = val
+		}
+	}
+	if out := strings.TrimSpace(resp.TestOutput); out != "" {
+		fields["testOutput"] = out
+	}
 }
 
 func containsString(items []string, target string) bool {

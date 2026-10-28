@@ -24,13 +24,19 @@ spec:
           type: RuntimeDefault
       containers:
         - name: aegis-server
-          image: ghcr.io/gke-demos/agent-security/aegis-sre:latest
+          image: us-central1-docker.pkg.dev/PROJECT_ID/aegis/aegis-server:latest
           ports:
             - name: http
               containerPort: 8080
           env:
             - name: PORT
               value: "8080"
+            - name: LIVE_SUBSTRATE
+              value: "true"
+            - name: SUBSTRATE_GATEWAY_URL
+              value: "http://atenet-router.ate-system.svc.cluster.local/sandbox/execute"
+            - name: SUBSTRATE_TARGET_ACTOR
+              value: "aegis-system/remediator-1"
           readinessProbe:
             httpGet:
               path: /healthz
