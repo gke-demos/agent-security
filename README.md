@@ -23,10 +23,10 @@ Because managed enterprise portal trials expire monthly, AegisSRE provides a **D
 
 1. **Standalone GKE A2UI v0.9 Web Portal (`GET /` and `GET /about`)**:
    - **`GET /` (Incident Response Arena)**: Minimalist chat-first interface with progressive SSE streaming (`POST /api/sessions/{sessionId}/turns/stream`), inline collapsible 6-Boundary Security Trace drawers, `⌘K` Security Controls modal (5-Shield Red-vs-Blue posture toggles, `Alice` vs. `Bob` Persona Switcher, OAuth 2.0 + PKCE vault status), and an icon-only **Projector Light Mode** toggle (`aegis_theme` is the sole key ever stored in `localStorage`).
-   - **`GET /about` (`Architecture Topology Catalog`)**: Interactive visual architecture explorer backed by `GET /api/about/catalog` (verified against `docs/adr/0001`..`0013` via `VerifyArchitectureCatalogDrift`), featuring three visual canvas modules:
-     1. **Interactive 6-Boundary SVG Topology & Red-vs-Blue Packet-Pulse Simulator** (`B1`–`B6` click-to-inspect + animated `PASS` / `REDACTED` / `BLOCKED` / `STEP-UP` / `EXFILTRATED` hops),
-     2. **`AegisSecurityPlugin` 6-Callback State Machine & SSE Wire Preview** (`BeforeRun`, `BeforeModel`, `BeforeTool`, `AfterTool`, `AfterModel`, `OnEvent`),
-     3. **Live 8-Source Provenance (`LIVE` vs. `FIXTURE`), 8-Tool Governance Matrix, and 13 Accepted ADRs**.
+   - **`GET /about` (`Architecture Topology Catalog`)**: Progressive-disclosure 3-tab Architecture Workspace backed by `GET /api/about/catalog` (verified against `docs/adr/0001`..`0013` via `VerifyArchitectureCatalogDrift`), keeping strictly one focused conceptual lens visible at a time:
+     1. **`Security Topology`**: Single-screen 3-zone (`Ingress` / `Reasoning Core` / `Execution Planes`) 6-Boundary SVG canvas with 2-line node summaries, active-path dimming, top-layer active-hop callout badges, a unified scenario/posture toolbar with **`Run in Arena`** handoff, a horizontal step scrubber, and a Selected-Boundary Micro-Inspector,
+     2. **`ADK Plugin Flow`**: Non-wrapping horizontal `AegisSecurityPlugin` 6-callback + `adk_request_confirmation / tool.Run` pipeline with a 2-column hook rule inspector and a collapsed-by-default `TurnStreamEvent` SSE wire drawer,
+     3. **`System Reference`**: Segmented sub-switcher (`Governed Tools (8)`, `External Sources (8)`, `ADR Index (13)`) with compact click-to-expand rows and stage-safe `LIVE` vs. `FIXTURE` provenance labels that never expose personal Google Cloud project or cluster identifiers.
 2. **Gemini Enterprise A2A v2 Endpoint (`POST /a2a` & `GET /.well-known/agent-card.json`)**: Advertises `"text/plain"` input/output modes and `serverSideOauth2` token forwarding, deduplicates consecutive identical `TextPart`s sent by Discovery Engine, and binds forwarded user OAuth tokens into the caller's `Token Broker` partition.
 
 ---

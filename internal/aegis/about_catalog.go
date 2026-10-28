@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -26,24 +27,37 @@ const (
 	PulseVerdictExfiltrated PacketPulseVerdict = "EXFILTRATED"
 )
 
+// TopologyZone identifies one of the 3 horizontal defense-in-depth topology lanes on /about.
+type TopologyZone string
+
+const (
+	ZoneIngress         TopologyZone = "INGRESS"
+	ZoneReasoningCore   TopologyZone = "REASONING_CORE"
+	ZoneExecutionPlanes TopologyZone = "EXECUTION_PLANES"
+)
+
 // TopologyContextNode describes a non-boundary entry/exit actor node on the SVG topology canvas (e.g. Operator Browser).
 type TopologyContextNode struct {
-	ID       string `json:"id"`
-	Title    string `json:"title"`
-	Subtitle string `json:"subtitle"`
-	X        int    `json:"x"`
-	Y        int    `json:"y"`
-	Width    int    `json:"width"`
-	Height   int    `json:"height"`
+	ID       string       `json:"id"`
+	Zone     TopologyZone `json:"zone"`
+	Title    string       `json:"title"`
+	Subtitle string       `json:"subtitle"`
+	NodeTag  string       `json:"nodeTag"`
+	X        int          `json:"x"`
+	Y        int          `json:"y"`
+	Width    int          `json:"width"`
+	Height   int          `json:"height"`
 }
 
 // BoundaryCatalogNode describes one of AegisSRE's 6 defense-in-depth security boundaries for /about.
 type BoundaryCatalogNode struct {
-	ID                   BoundaryID `json:"id"`
-	Code                 string     `json:"code"`
-	Title                string     `json:"title"`
+	ID                   BoundaryID   `json:"id"`
+	Code                 string       `json:"code"`
+	Zone                 TopologyZone `json:"zone"`
+	Title                string       `json:"title"`
 	ShortLabel           string     `json:"shortLabel"`
 	Subtitle             string     `json:"subtitle"`
+	NodeTag              string     `json:"nodeTag"`
 	X                    int        `json:"x"`
 	Y                    int        `json:"y"`
 	Width                int        `json:"width"`
@@ -51,6 +65,8 @@ type BoundaryCatalogNode struct {
 	ShieldKey            string     `json:"shieldKey"`
 	ShieldName           string     `json:"shieldName"`
 	ComponentName        string     `json:"componentName"`
+	BlueSummary          string     `json:"blueSummary"`
+	RedSummary           string     `json:"redSummary"`
 	RedExploitMode       string     `json:"redExploitMode"`
 	BlueDefenseMechanism string     `json:"blueDefenseMechanism"`
 	GovernedTools        []string   `json:"governedTools"`
@@ -59,14 +75,15 @@ type BoundaryCatalogNode struct {
 
 // TopologyEdgeSpec defines a directed SVG connection between two topology nodes.
 type TopologyEdgeSpec struct {
-	ID    string `json:"id"`
-	From  string `json:"from"`
-	To    string `json:"to"`
-	Label string `json:"label"`
-	FromX int    `json:"fromX"`
-	FromY int    `json:"fromY"`
-	ToX   int    `json:"toX"`
-	ToY   int    `json:"toY"`
+	ID           string `json:"id"`
+	From         string `json:"from"`
+	To           string `json:"to"`
+	Label        string `json:"label"`
+	FromX        int    `json:"fromX"`
+	FromY        int    `json:"fromY"`
+	ToX          int    `json:"toX"`
+	ToY          int    `json:"toY"`
+	CurveOffsetY int    `json:"curveOffsetY,omitempty"`
 }
 
 // PluginCallbackCatalogNode describes one of the 6 AegisSecurityPlugin lifecycle hooks.
@@ -161,17 +178,19 @@ func (r *Runtime) BuildArchitectureTopologyCatalog(ctx context.Context) (*Archit
 	}
 
 	return &ArchitectureTopologyCatalog{
-		ViewBoxWidth:  1120,
-		ViewBoxHeight: 430,
+		ViewBoxWidth:  1200,
+		ViewBoxHeight: 390,
 		ContextNodes: []TopologyContextNode{
 			{
 				ID:       "OPERATOR_BROWSER",
+				Zone:     ZoneIngress,
 				Title:    "Operator Browser",
 				Subtitle: "A2UI v0.9 + Web Crypto PKCE",
+				NodeTag:  "A2UI v0.9 · PKCE",
 				X:        20,
-				Y:        165,
-				Width:    152,
-				Height:   100,
+				Y:        144,
+				Width:    168,
+				Height:   72,
 			},
 		},
 		Boundaries:      canonicalBoundaryCatalogNodes(),
@@ -255,24 +274,45 @@ func VerifyArchitectureCatalogDrift(catalog *ArchitectureTopologyCatalog, rt *Ru
 	for _, b := range catalog.Boundaries {
 		validNodes[string(b.ID)] = true
 	}
-	validEdges := map[string]bool{}
+	validEdges := map[string]TopologyEdgeSpec{}
 	for _, e := range catalog.Edges {
 		if !validNodes[e.From] || !validNodes[e.To] {
 			return fmt.Errorf("edge %q references unknown node (%q -> %q)", e.ID, e.From, e.To)
 		}
-		validEdges[e.ID] = true
+		validEdges[e.ID] = e
 	}
 	for _, sc := range catalog.Scenarios {
 		for _, traj := range []ScenarioPostureTrajectory{sc.Blue, sc.Red} {
 			if len(traj.Pulses) == 0 {
 				return fmt.Errorf("scenario %s (%s) has zero pulses", sc.ID, traj.Posture)
 			}
-			for _, p := range traj.Pulses {
-				if !validEdges[p.EdgeID] || !validNodes[p.From] || !validNodes[p.To] {
+			touchedNodes := map[string]bool{}
+			reachable := map[string]bool{"OPERATOR_BROWSER": true}
+			for i, p := range traj.Pulses {
+				edgeSpec, ok := validEdges[p.EdgeID]
+				if !ok || !validNodes[p.From] || !validNodes[p.To] || edgeSpec.From != p.From || edgeSpec.To != p.To {
 					return fmt.Errorf("scenario %s (%s) pulse %d has invalid edge/node (%s: %s -> %s)", sc.ID, traj.Posture, p.Step, p.EdgeID, p.From, p.To)
+				}
+				if p.Step != i+1 {
+					return fmt.Errorf("scenario %s (%s) pulse step = %d, want %d", sc.ID, traj.Posture, p.Step, i+1)
+				}
+				if !reachable[p.From] {
+					return fmt.Errorf("scenario %s (%s) pulse %d (%s -> %s) originates from unreached node %s", sc.ID, traj.Posture, p.Step, p.From, p.To, p.From)
+				}
+				reachable[p.To] = true
+				touchedNodes[p.From] = true
+				touchedNodes[p.To] = true
+			}
+			for _, ab := range traj.ActiveBoundaries {
+				if !touchedNodes[string(ab)] {
+					return fmt.Errorf("scenario %s (%s) active boundary %s is never traversed by Pulses", sc.ID, traj.Posture, ab)
 				}
 			}
 		}
+	}
+
+	if err := verifyTopologyGeometryAndSummaries(catalog); err != nil {
+		return err
 	}
 
 	if strings.TrimSpace(adrDir) != "" {
@@ -407,21 +447,139 @@ func parseADRMarkdownMetadata(markdown string, expectedNum string) (title string
 	return title, "Accepted", nil
 }
 
+// SampleTopologyEdgePoint evaluates the cubic Bezier curve for e at parameter t in [0, 1].
+func SampleTopologyEdgePoint(e TopologyEdgeSpec, t float64) (float64, float64) {
+	x0, y0 := float64(e.FromX), float64(e.FromY)
+	x3, y3 := float64(e.ToX), float64(e.ToY)
+	dx := math.Max(24, math.Abs(x3-x0)*0.48)
+	sign := 1.0
+	if x3 < x0 {
+		sign = -1.0
+	}
+	cx1, cy1 := x0+sign*dx, y0
+	cx2, cy2 := x3-sign*dx, y3
+	if e.CurveOffsetY != 0 {
+		railY := math.Max(y0, y3) + float64(e.CurveOffsetY)
+		cx1, cy1 = x0, railY
+		cx2, cy2 = x3, railY
+	}
+	u := 1 - t
+	uu := u * u
+	tt := t * t
+	px := uu*u*x0 + 3*uu*t*cx1 + 3*u*tt*cx2 + tt*t*x3
+	py := uu*u*y0 + 3*uu*t*cy1 + 3*u*tt*cy2 + tt*t*y3
+	return px, py
+}
+
+func verifyTopologyGeometryAndSummaries(catalog *ArchitectureTopologyCatalog) error {
+	if catalog.ViewBoxWidth <= 0 || catalog.ViewBoxHeight <= 0 {
+		return fmt.Errorf("invalid viewBox (%dx%d)", catalog.ViewBoxWidth, catalog.ViewBoxHeight)
+	}
+	type rect struct {
+		id   string
+		zone TopologyZone
+		x    int
+		y    int
+		w    int
+		h    int
+	}
+	rects := make([]rect, 0, len(catalog.ContextNodes)+len(catalog.Boundaries))
+	for _, cn := range catalog.ContextNodes {
+		if strings.TrimSpace(cn.NodeTag) == "" {
+			return fmt.Errorf("context node %q has empty nodeTag", cn.ID)
+		}
+		zone := cn.Zone
+		if zone == "" {
+			zone = ZoneIngress
+		}
+		rects = append(rects, rect{id: cn.ID, zone: zone, x: cn.X, y: cn.Y, w: cn.Width, h: cn.Height})
+	}
+	allowedZones := map[TopologyZone]bool{
+		ZoneIngress:         true,
+		ZoneReasoningCore:   true,
+		ZoneExecutionPlanes: true,
+	}
+	for _, b := range catalog.Boundaries {
+		if !allowedZones[b.Zone] {
+			return fmt.Errorf("boundary %s has invalid zone %q", b.ID, b.Zone)
+		}
+		if strings.TrimSpace(b.NodeTag) == "" || strings.TrimSpace(b.BlueSummary) == "" || strings.TrimSpace(b.RedSummary) == "" {
+			return fmt.Errorf("boundary %s missing nodeTag, blueSummary, or redSummary", b.ID)
+		}
+		rects = append(rects, rect{id: string(b.ID), zone: b.Zone, x: b.X, y: b.Y, w: b.Width, h: b.Height})
+	}
+	for i, a := range rects {
+		if a.w <= 0 || a.h <= 0 || a.x < 0 || a.y < 0 || a.x+a.w > catalog.ViewBoxWidth || a.y+a.h > catalog.ViewBoxHeight {
+			return fmt.Errorf("node %s (%d,%d,%d,%d) out of viewBox (%dx%d)", a.id, a.x, a.y, a.w, a.h, catalog.ViewBoxWidth, catalog.ViewBoxHeight)
+		}
+		for j := i + 1; j < len(rects); j++ {
+			b := rects[j]
+			if a.x < b.x+b.w && b.x < a.x+a.w && a.y < b.y+b.h && b.y < a.y+a.h {
+				return fmt.Errorf("topology nodes %s and %s overlap", a.id, b.id)
+			}
+		}
+	}
+
+	zoneSpan := func(z TopologyZone) (int, int) {
+		minX, maxX := catalog.ViewBoxWidth, 0
+		for _, r := range rects {
+			if r.zone != z {
+				continue
+			}
+			if r.x < minX {
+				minX = r.x
+			}
+			if r.x+r.w > maxX {
+				maxX = r.x + r.w
+			}
+		}
+		return minX, maxX
+	}
+	_, inMax := zoneSpan(ZoneIngress)
+	coreMin, coreMax := zoneSpan(ZoneReasoningCore)
+	execMin, _ := zoneSpan(ZoneExecutionPlanes)
+	if coreMin-inMax < 52 || execMin-coreMax < 52 {
+		return fmt.Errorf("insufficient 3-zone horizontal separation: ingress->core=%dpx, core->exec=%dpx (want >=52px)", coreMin-inMax, execMin-coreMax)
+	}
+
+	for _, e := range catalog.Edges {
+		for step := 5; step < 195; step++ {
+			px, py := SampleTopologyEdgePoint(e, float64(step)/200.0)
+			if px < 0 || px > float64(catalog.ViewBoxWidth) || py < 0 || py > float64(catalog.ViewBoxHeight) {
+				return fmt.Errorf("edge %s curve escapes viewBox at (%.1f, %.1f)", e.ID, px, py)
+			}
+			for _, r := range rects {
+				if r.id == e.From || r.id == e.To {
+					continue
+				}
+				if px >= float64(r.x) && px <= float64(r.x+r.w) && py >= float64(r.y) && py <= float64(r.y+r.h) {
+					return fmt.Errorf("edge %s intersects intermediate node %s at (%.1f, %.1f)", e.ID, r.id, px, py)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func canonicalBoundaryCatalogNodes() []BoundaryCatalogNode {
 	return []BoundaryCatalogNode{
 		{
 			ID:                   BoundaryGenerativeUI,
 			Code:                 "B1",
+			Zone:                 ZoneIngress,
 			Title:                "Presentation & Generative UI Boundary",
 			ShortLabel:           "B1 · A2UI v0.9 & Step-Up",
 			Subtitle:             "Schema-validated cards + adk_request_confirmation",
-			X:                    204,
-			Y:                    165,
-			Width:                186,
-			Height:               100,
+			NodeTag:              "A2UI · Step-Up",
+			X:                    220,
+			Y:                    144,
+			Width:                196,
+			Height:               72,
 			ShieldKey:            "stepUpAndA2UICatalogEnabled",
 			ShieldName:           "Step-Up Confirmation & A2UI Catalog",
 			ComponentName:        "A2UI v0.9 Declarative Surface + ADK Go v2 toolconfirmation (adk_request_confirmation)",
+			BlueSummary:          "Pauses mutating tool calls for explicit Operator Step-Up Confirmation and sanitizes Declarative UI Cards against the 6-component A2UI v0.9 schema.",
+			RedSummary:           "Mutating pull requests execute without Operator approval and unvalidated script markup passes directly into rendered card payloads.",
 			RedExploitMode:       "State-mutating create_github_pull_request executes immediately without Operator approval, and raw <script> XSS payloads pass into rendered card fields.",
 			BlueDefenseMechanism: "Pauses state-mutating tool invocations with a signed StepUpConfirmationCard (adk_request_confirmation) until the Operator approves, and enforces strict 6-component A2UI v0.9 schema sanitization.",
 			GovernedTools: []string{
@@ -432,16 +590,20 @@ func canonicalBoundaryCatalogNodes() []BoundaryCatalogNode {
 		{
 			ID:                   BoundaryReasoningGuard,
 			Code:                 "B2",
+			Zone:                 ZoneReasoningCore,
 			Title:                "In-Loop Reasoning & Content Guard Boundary",
 			ShortLabel:           "B2 · Triage Orchestrator & Guard",
 			Subtitle:             "ADK Go v2 + Model Armor + Cloud SDP",
-			X:                    422,
-			Y:                    165,
-			Width:                200,
-			Height:               100,
+			NodeTag:              "ADK v2 · Model Armor",
+			X:                    472,
+			Y:                    144,
+			Width:                216,
+			Height:               72,
 			ShieldKey:            "promptScreenEnabled,piiRedactorEnabled",
 			ShieldName:           "Prompt Screen + In-Flight PII Redactor",
 			ComponentName:        "Gemini Enterprise Agent Platform (ADK Go v2 llmagent) + Model Armor v1 + Cloud SDP DeidentifyContent",
+			BlueSummary:          "Hard-blocks indirect prompt injection via Model Armor while masking SSNs, emails, phones, and API keys in-flight with Cloud SDP.",
+			RedSummary:           "Adversarial instructions inside untrusted emails hijack model reasoning and leak raw customer PII into downstream ticket comments.",
 			RedExploitMode:       "Indirect prompt injection inside customer Gmail threads hijacks model reasoning toward https://evil.example.com, while raw customer SSN (123-45-6789) and API keys leak into LLM context and Jira comments.",
 			BlueDefenseMechanism: "Hard-blocks Prompt Injection, Jailbreak, and Malicious URI matches in BeforeModel and AfterTool callbacks, while masking SSN, phone, email, and API keys in-flight ([REDACTED_SSN], [REDACTED_API_KEY]) and continuing safely on IsSdpOnlyBlock.",
 			GovernedTools: []string{
@@ -454,16 +616,20 @@ func canonicalBoundaryCatalogNodes() []BoundaryCatalogNode {
 		{
 			ID:                   BoundaryIdentity3LO,
 			Code:                 "B3",
+			Zone:                 ZoneExecutionPlanes,
 			Title:                "Identity & Per-User Multi-IdP Token Brokering",
 			ShortLabel:           "B3 · OAuth 2.0 S256 PKCE Vault",
 			Subtitle:             "15m Ephemeral TokenBroker + Persona Session Partition",
-			X:                    668,
-			Y:                    32,
-			Width:                428,
-			Height:               100,
+			NodeTag:              "S256 PKCE · 15m Vault",
+			X:                    744,
+			Y:                    40,
+			Width:                436,
+			Height:               72,
 			ShieldKey:            "tokenBrokerEnabled",
 			ShieldName:           "Token Broker (Per-User 3LO PKCE)",
 			ComponentName:        "ADK Go v2 auth.Transport + OAuth 2.0 S256 PKCE Ephemeral 15m In-Memory TokenBroker Vault (Google Workspace SSO, Jira, GitHub)",
+			BlueSummary:          "Brokers per-persona 15-minute S256 PKCE OAuth grants on outbound wire transport and isolates SessionID:Persona conversation partitions.",
+			RedSummary:           "Shared over-privileged service credentials and unpartitioned session history expose restricted SecOps records to unauthorized personas.",
 			RedExploitMode:       "Confused Deputy privilege escalation: outbound Jira and GitHub requests share an over-privileged service token and unpartitioned session history, leaking restricted SecOps issue SEC-101 to contractor Bob.",
 			BlueDefenseMechanism: "Issues RFC 7636 S256 PKCE ConsentChallenges with unified Google Workspace SSO scopes, stores short-lived 15m grants strictly in the backend TokenBroker in-memory vault with automatic TTL pruning (zero browser PATs), injects per-persona tokens via auth.Transport outside LLM context, and isolates SessionID:Persona partitions.",
 			GovernedTools: []string{
@@ -477,16 +643,20 @@ func canonicalBoundaryCatalogNodes() []BoundaryCatalogNode {
 		{
 			ID:                   BoundaryPlatformGovernance,
 			Code:                 "B4",
+			Zone:                 ZoneExecutionPlanes,
 			Title:                "Platform Governance & Tool Discovery Boundary",
 			ShortLabel:           "B4 · Agent Registry & Gateway UAP",
 			Subtitle:             "adk/v2/agentregistry + AGENT_TO_ANYWHERE CEL",
-			X:                    668,
-			Y:                    165,
-			Width:                428,
-			Height:               100,
+			NodeTag:              "Registry · Gateway UAP",
+			X:                    744,
+			Y:                    144,
+			Width:                436,
+			Height:               72,
 			ShieldKey:            "stepUpAndA2UICatalogEnabled",
 			ShieldName:           "Agent Registry & Unified Access Policy",
 			ComponentName:        "Gemini Enterprise Agent Platform Agent Registry (v1alpha) + Agent Gateway AGENT_TO_ANYWHERE UAP (roles/iap.egressor)",
+			BlueSummary:          "Discovers governed MCP tools from Agent Registry and enforces Unified Access Policy CEL rules to block destructive cluster mutations.",
+			RedSummary:           "Ungoverned MCP endpoints and destructive container.clusters.delete calls execute without catalog verification or per-tool CEL checks.",
 			RedExploitMode:       "Ungoverned MCP endpoints and destructive cluster operations (container.clusters.delete) execute without catalog discovery or per-tool CEL authorization.",
 			BlueDefenseMechanism: "Discovers governed MCP servers and A2A peers from Agent Registry and evaluates Unified Access Policy CEL rules at BeforeToolCallback, permitting read-only observability (logging.entries.list, container.clusters.get) while hard-blocking container.clusters.delete.",
 			GovernedTools: []string{
@@ -499,16 +669,20 @@ func canonicalBoundaryCatalogNodes() []BoundaryCatalogNode {
 		{
 			ID:                   BoundaryCrossAgentA2A,
 			Code:                 "B5",
+			Zone:                 ZoneExecutionPlanes,
 			Title:                "Cross-Agent Federation Boundary",
 			ShortLabel:           "B5 · Attenuated A2A v2",
 			Subtitle:             "withoutCredentialParts + Peer Screen",
-			X:                    668,
-			Y:                    298,
-			Width:                196,
-			Height:               100,
+			NodeTag:              "Attenuated A2A v2",
+			X:                    744,
+			Y:                    248,
+			Width:                200,
+			Height:               72,
 			ShieldKey:            "sandboxEgressMitmEnabled",
 			ShieldName:           "Attenuated Delegation (A2A v2)",
 			ComponentName:        "ADK Go v2 adka2a/v2 Federation + withoutCredentialParts Credential Scrubber",
+			BlueSummary:          "Strips upstream 3LO credential parts before A2A delegation and screens Sandbox Remediator responses through Model Armor on return.",
+			RedSummary:           "Unattenuated A2A delegation forwards upstream Operator 3LO tokens to the peer agent and accepts poisoned peer responses unscreened.",
 			RedExploitMode:       "Triage Orchestrator forwards upstream Alice/Bob 3LO OAuth tokens inside A2A message parts directly to the untrusted Sandbox Remediator peer.",
 			BlueDefenseMechanism: "Scrubs all adk_request_credential parts via withoutCredentialParts before A2A handoff, narrows task scope to repository verification, and routes the peer A2A response back through B2 Model Armor SanitizeUserPrompt.",
 			GovernedTools: []string{
@@ -519,16 +693,20 @@ func canonicalBoundaryCatalogNodes() []BoundaryCatalogNode {
 		{
 			ID:                   BoundarySandboxEgress,
 			Code:                 "B6",
+			Zone:                 ZoneExecutionPlanes,
 			Title:                "Compute & Network Sandbox Boundary",
 			ShortLabel:           "B6 · gVisor + atenet MITM",
 			Subtitle:             "svc/atenet-router -> Actor/remediator-1",
-			X:                    900,
-			Y:                    298,
-			Width:                196,
-			Height:               100,
+			NodeTag:              "gVisor · atenet MITM",
+			X:                    980,
+			Y:                    248,
+			Width:                200,
+			Height:               72,
 			ShieldKey:            "sandboxEgressMitmEnabled",
 			ShieldName:           "Sandbox Egress MITM (Agent Substrate)",
 			ComponentName:        "GKE Sandbox (gVisor) + Agent Substrate svc/atenet-router -> Actor/remediator-1 (SNAPSHOT_FIDELITY_MEMORY Golden Snapshot + EgressPolicy)",
+			BlueSummary:          "Executes untrusted tests inside a zero-secret gVisor Actor via svc/atenet-router while EgressPolicy blocks unauthorized outbound domains.",
+			RedSummary:           "Malicious repository init() code reads ambient environment tokens and exfiltrates secrets over unrestricted container network egress.",
 			RedExploitMode:       "Untrusted go test init() payload reads leaked GITHUB_TOKEN / GOOGLE_OAUTH_TOKEN env vars and exfiltrates os.Environ() over unrestricted egress to https://evil.example.com/exfil.",
 			BlueDefenseMechanism: "Auto-bridges POST /sandbox/execute with ate-target-actor: aegis-system/remediator-1 over svc/atenet-router to wake the gVisor Actor from its SNAPSHOT_FIDELITY_MEMORY Golden Snapshot with zero container env secrets, out-of-sandbox atenet GitHub token injection, and EgressPolicy blocking evil.example.com.",
 			GovernedTools: []string{
@@ -546,100 +724,101 @@ func canonicalTopologyEdges() []TopologyEdgeSpec {
 			From:  "OPERATOR_BROWSER",
 			To:    string(BoundaryGenerativeUI),
 			Label: "Prompt / PKCE / Step-Up",
-			FromX: 172,
-			FromY: 205,
-			ToX:   204,
-			ToY:   205,
+			FromX: 188,
+			FromY: 170,
+			ToX:   220,
+			ToY:   170,
 		},
 		{
 			ID:    "EDGE_B1_B2",
 			From:  string(BoundaryGenerativeUI),
 			To:    string(BoundaryReasoningGuard),
 			Label: "ADK Runner Loop",
-			FromX: 390,
-			FromY: 205,
-			ToX:   422,
-			ToY:   205,
+			FromX: 416,
+			FromY: 170,
+			ToX:   472,
+			ToY:   170,
 		},
 		{
 			ID:    "EDGE_B2_B3",
 			From:  string(BoundaryReasoningGuard),
 			To:    string(BoundaryIdentity3LO),
 			Label: "auth.Transport 3LO",
-			FromX: 622,
-			FromY: 192,
-			ToX:   668,
-			ToY:   82,
+			FromX: 688,
+			FromY: 158,
+			ToX:   744,
+			ToY:   66,
 		},
 		{
 			ID:    "EDGE_B3_B2",
 			From:  string(BoundaryIdentity3LO),
 			To:    string(BoundaryReasoningGuard),
 			Label: "Untrusted 3LO Output",
-			FromX: 668,
-			FromY: 102,
-			ToX:   622,
-			ToY:   204,
+			FromX: 744,
+			FromY: 88,
+			ToX:   688,
+			ToY:   170,
 		},
 		{
 			ID:    "EDGE_B2_B4",
 			From:  string(BoundaryReasoningGuard),
 			To:    string(BoundaryPlatformGovernance),
 			Label: "Gateway MCP + UAP CEL",
-			FromX: 622,
-			FromY: 215,
-			ToX:   668,
-			ToY:   215,
+			FromX: 688,
+			FromY: 182,
+			ToX:   744,
+			ToY:   180,
 		},
 		{
 			ID:    "EDGE_B2_B5",
 			From:  string(BoundaryReasoningGuard),
 			To:    string(BoundaryCrossAgentA2A),
 			Label: "Attenuated A2A Task",
-			FromX: 622,
-			FromY: 238,
-			ToX:   668,
-			ToY:   348,
+			FromX: 688,
+			FromY: 202,
+			ToX:   744,
+			ToY:   284,
 		},
 		{
 			ID:    "EDGE_B5_B6",
 			From:  string(BoundaryCrossAgentA2A),
 			To:    string(BoundarySandboxEgress),
 			Label: "svc/atenet-router",
-			FromX: 864,
-			FromY: 348,
-			ToX:   900,
-			ToY:   348,
+			FromX: 944,
+			FromY: 284,
+			ToX:   980,
+			ToY:   284,
 		},
 		{
-			ID:    "EDGE_B6_B2",
-			From:  string(BoundarySandboxEgress),
-			To:    string(BoundaryReasoningGuard),
-			Label: "Peer Output Screen",
-			FromX: 900,
-			FromY: 382,
-			ToX:   522,
-			ToY:   265,
+			ID:           "EDGE_B6_B2",
+			From:         string(BoundarySandboxEgress),
+			To:           string(BoundaryReasoningGuard),
+			Label:        "Peer Output Screen",
+			FromX:        1080,
+			FromY:        320,
+			ToX:          560,
+			ToY:          216,
+			CurveOffsetY: 64,
 		},
 		{
 			ID:    "EDGE_B2_B1",
 			From:  string(BoundaryReasoningGuard),
 			To:    string(BoundaryGenerativeUI),
 			Label: "A2UI Card / Interrupt",
-			FromX: 422,
-			FromY: 228,
-			ToX:   390,
-			ToY:   228,
+			FromX: 472,
+			FromY: 192,
+			ToX:   416,
+			ToY:   192,
 		},
 		{
 			ID:    "EDGE_B1_BROWSER",
 			From:  string(BoundaryGenerativeUI),
 			To:    "OPERATOR_BROWSER",
 			Label: "SSE TurnStreamEvent",
-			FromX: 204,
-			FromY: 228,
-			ToX:   172,
-			ToY:   228,
+			FromX: 220,
+			FromY: 192,
+			ToX:   188,
+			ToY:   192,
 		},
 	}
 }
@@ -1034,7 +1213,8 @@ func canonicalScenarioSimulationSpecs() []ScenarioSimulationSpec {
 					{Step: 2, EdgeID: "EDGE_B1_B2", From: string(BoundaryGenerativeUI), To: string(BoundaryReasoningGuard), Verdict: PulseVerdictExfiltrated, Label: "Shared Session", Detail: "Unpartitioned session exposes Alice's prior history"},
 					{Step: 3, EdgeID: "EDGE_B2_B3", From: string(BoundaryReasoningGuard), To: string(BoundaryIdentity3LO), Verdict: PulseVerdictExfiltrated, Label: "Root Service Token", Detail: "Uses over-privileged shared agent credential"},
 					{Step: 4, EdgeID: "EDGE_B3_B2", From: string(BoundaryIdentity3LO), To: string(BoundaryReasoningGuard), Verdict: PulseVerdictExfiltrated, Label: "200 OK Confused Deputy", Detail: "SEC-101 and GHSA-sec-101 returned to unauthorized persona"},
-					{Step: 5, EdgeID: "EDGE_B1_BROWSER", From: string(BoundaryGenerativeUI), To: "OPERATOR_BROWSER", Verdict: PulseVerdictExfiltrated, Label: "Restricted Data Leaked", Detail: "Bob reads SecOps-only advisory"},
+					{Step: 5, EdgeID: "EDGE_B2_B1", From: string(BoundaryReasoningGuard), To: string(BoundaryGenerativeUI), Verdict: PulseVerdictExfiltrated, Label: "Unfiltered Reply", Detail: "Forwards restricted SecOps payload to B1"},
+					{Step: 6, EdgeID: "EDGE_B1_BROWSER", From: string(BoundaryGenerativeUI), To: "OPERATOR_BROWSER", Verdict: PulseVerdictExfiltrated, Label: "Restricted Data Leaked", Detail: "Bob reads SecOps-only advisory"},
 				},
 			},
 		},
@@ -1127,9 +1307,11 @@ func canonicalScenarioSimulationSpecs() []ScenarioSimulationSpec {
 				},
 				Pulses: []ScenarioPulseHop{
 					{Step: 1, EdgeID: "EDGE_BROWSER_B1", From: "OPERATOR_BROWSER", To: string(BoundaryGenerativeUI), Verdict: PulseVerdictPass, Label: "Verify Repo Tests", Detail: "Sandbox Egress MITM shield disabled"},
-					{Step: 2, EdgeID: "EDGE_B2_B5", From: string(BoundaryReasoningGuard), To: string(BoundaryCrossAgentA2A), Verdict: PulseVerdictExfiltrated, Label: "Unattenuated 3LO Credential Forwarding", Detail: "Raw upstream 3LO bearer token forwarded over A2A"},
-					{Step: 3, EdgeID: "EDGE_B5_B6", From: string(BoundaryCrossAgentA2A), To: string(BoundarySandboxEgress), Verdict: PulseVerdictExfiltrated, Label: "init() Env Exfil", Detail: "os.Environ() + 3LO tokens POSTed to evil.example.com/exfil"},
-					{Step: 4, EdgeID: "EDGE_B6_B2", From: string(BoundarySandboxEgress), To: string(BoundaryReasoningGuard), Verdict: PulseVerdictExfiltrated, Label: "Poisoned Peer Return", Detail: "Unscreened peer injection re-enters parent orchestrator"},
+					{Step: 2, EdgeID: "EDGE_B1_B2", From: string(BoundaryGenerativeUI), To: string(BoundaryReasoningGuard), Verdict: PulseVerdictExfiltrated, Label: "Unscreened Dispatch", Detail: "Orchestrator invokes delegate_sandbox_test without shields"},
+					{Step: 3, EdgeID: "EDGE_B2_B5", From: string(BoundaryReasoningGuard), To: string(BoundaryCrossAgentA2A), Verdict: PulseVerdictExfiltrated, Label: "Unattenuated 3LO Credential Forwarding", Detail: "Raw upstream 3LO bearer token forwarded over A2A"},
+					{Step: 4, EdgeID: "EDGE_B5_B6", From: string(BoundaryCrossAgentA2A), To: string(BoundarySandboxEgress), Verdict: PulseVerdictExfiltrated, Label: "init() Env Exfil", Detail: "os.Environ() + 3LO tokens POSTed to evil.example.com/exfil"},
+					{Step: 5, EdgeID: "EDGE_B6_B2", From: string(BoundarySandboxEgress), To: string(BoundaryReasoningGuard), Verdict: PulseVerdictExfiltrated, Label: "Poisoned Peer Return", Detail: "Unscreened peer injection re-enters parent orchestrator"},
+					{Step: 6, EdgeID: "EDGE_B2_B1", From: string(BoundaryReasoningGuard), To: string(BoundaryGenerativeUI), Verdict: PulseVerdictExfiltrated, Label: "Compromised Result", Detail: "Exfiltrated sandbox turn surfaces unblocked"},
 				},
 			},
 		},
@@ -1187,10 +1369,15 @@ func canonicalScenarioSimulationSpecs() []ScenarioSimulationSpec {
 				},
 				Pulses: []ScenarioPulseHop{
 					{Step: 1, EdgeID: "EDGE_BROWSER_B1", From: "OPERATOR_BROWSER", To: string(BoundaryGenerativeUI), Verdict: PulseVerdictExfiltrated, Label: "0/5 Shields", Detail: "All security boundaries disabled"},
-					{Step: 2, EdgeID: "EDGE_B2_B3", From: string(BoundaryReasoningGuard), To: string(BoundaryIdentity3LO), Verdict: PulseVerdictExfiltrated, Label: "Confused Deputy + PII", Detail: "Raw SSN 123-45-6789 + shared root token leak"},
-					{Step: 3, EdgeID: "EDGE_B2_B4", From: string(BoundaryReasoningGuard), To: string(BoundaryPlatformGovernance), Verdict: PulseVerdictExfiltrated, Label: "UAP Bypassed", Detail: "Destructive container.clusters.delete executes"},
-					{Step: 4, EdgeID: "EDGE_B5_B6", From: string(BoundaryCrossAgentA2A), To: string(BoundarySandboxEgress), Verdict: PulseVerdictExfiltrated, Label: "Sandbox Env Exfil", Detail: "init() POSTs secrets to evil.example.com/exfil"},
-					{Step: 5, EdgeID: "EDGE_B2_B1", From: string(BoundaryReasoningGuard), To: string(BoundaryGenerativeUI), Verdict: PulseVerdictExfiltrated, Label: "Unapproved PR", Detail: "State-mutating PR created without human confirmation"},
+					{Step: 2, EdgeID: "EDGE_B1_B2", From: string(BoundaryGenerativeUI), To: string(BoundaryReasoningGuard), Verdict: PulseVerdictExfiltrated, Label: "Unscreened Loop", Detail: "Prompt Screen & Cloud SDP disabled in ADK loop"},
+					{Step: 3, EdgeID: "EDGE_B2_B3", From: string(BoundaryReasoningGuard), To: string(BoundaryIdentity3LO), Verdict: PulseVerdictExfiltrated, Label: "Confused Deputy + PII", Detail: "Raw SSN 123-45-6789 + shared root token leak"},
+					{Step: 4, EdgeID: "EDGE_B3_B2", From: string(BoundaryIdentity3LO), To: string(BoundaryReasoningGuard), Verdict: PulseVerdictExfiltrated, Label: "Poisoned 3LO Return", Detail: "Unmasked SSN & restricted SEC-101 enter model context"},
+					{Step: 5, EdgeID: "EDGE_B2_B4", From: string(BoundaryReasoningGuard), To: string(BoundaryPlatformGovernance), Verdict: PulseVerdictExfiltrated, Label: "UAP Bypassed", Detail: "Destructive container.clusters.delete executes"},
+					{Step: 6, EdgeID: "EDGE_B2_B5", From: string(BoundaryReasoningGuard), To: string(BoundaryCrossAgentA2A), Verdict: PulseVerdictExfiltrated, Label: "Unattenuated A2A", Detail: "Upstream 3LO tokens forwarded to Sandbox Remediator"},
+					{Step: 7, EdgeID: "EDGE_B5_B6", From: string(BoundaryCrossAgentA2A), To: string(BoundarySandboxEgress), Verdict: PulseVerdictExfiltrated, Label: "Sandbox Env Exfil", Detail: "init() POSTs secrets to evil.example.com/exfil"},
+					{Step: 8, EdgeID: "EDGE_B6_B2", From: string(BoundarySandboxEgress), To: string(BoundaryReasoningGuard), Verdict: PulseVerdictExfiltrated, Label: "Unscreened Peer Reply", Detail: "Poisoned peer response re-enters orchestrator"},
+					{Step: 9, EdgeID: "EDGE_B2_B1", From: string(BoundaryReasoningGuard), To: string(BoundaryGenerativeUI), Verdict: PulseVerdictExfiltrated, Label: "Unapproved PR", Detail: "State-mutating PR created without human confirmation"},
+					{Step: 10, EdgeID: "EDGE_B1_BROWSER", From: string(BoundaryGenerativeUI), To: "OPERATOR_BROWSER", Verdict: PulseVerdictExfiltrated, Label: "Full Compromise", Detail: "All 6 boundaries exploited end to end"},
 				},
 			},
 		},
@@ -1321,7 +1508,7 @@ func canonicalADRCatalogEntries() []ADRCatalogEntry {
 			Slug:     "path-based-routing-and-interactive-about-architecture-catalog",
 			FileName: "0011-path-based-routing-and-interactive-about-architecture-catalog.md",
 			Title:    "Path-Based Routing (/ & /about) and Interactive Architecture Topology Catalog",
-			Summary:  "Serves / and /about via HTML5 History API routing and drives the 3-module interactive SVG visualizer from GET /api/about/catalog with automated drift tests.",
+			Summary:  "Serves / and /about via HTML5 History API routing and drives the progressive-disclosure 3-tab workspace, decluttered 3-zone SVG topology, Run in Arena handoff, and stage-safe External Source provenance from GET /api/about/catalog.",
 			PrimaryBoundaries: []BoundaryID{
 				BoundaryGenerativeUI,
 				BoundaryPlatformGovernance,
