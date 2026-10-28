@@ -342,6 +342,7 @@ type RuntimeConfig struct {
 	JiraRestrictedKey          string
 	JiraPublicKey              string
 	SubstrateGatewayURL        string
+	SubstrateTargetActor       string
 	LiveSubstrate              bool
 	AliceGitHubToken           string
 	BobGitHubToken             string

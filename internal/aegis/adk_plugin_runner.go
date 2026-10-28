@@ -81,6 +81,7 @@ type adkActiveTurnContext struct {
 	redEmailExploited      bool
 	sharedSessionLeaked    bool
 	cleanPeerSummary       string
+	liveSandboxResp        *SandboxExecutionResponse
 	outcome                TurnOutcome
 	assistantText          string
 	sanitizedInputPreview  string
@@ -1056,6 +1057,9 @@ func executeGovernedSandboxDelegationTool(ctx context.Context, r *Runtime, tc *a
 		sandboxConfig := "gvisor-default"
 		if isLive && liveResp != nil {
 			stepProvenance = ProvenanceLive
+			tc.mu.Lock()
+			tc.liveSandboxResp = liveResp
+			tc.mu.Unlock()
 			if liveResp.WorkerPool != "" {
 				workerPool = liveResp.WorkerPool
 			}
@@ -1110,6 +1114,26 @@ func executeGovernedSandboxDelegationTool(ctx context.Context, r *Runtime, tc *a
 			},
 		)
 
+		stepMeta := map[string]string{
+			"apiVersion":          actor.APIVersion,
+			"sandboxClass":        actor.SandboxClass,
+			"preferredFidelity":   actor.PreferredFidelity,
+			"containerEnvSecrets": fmt.Sprintf("%d", len(actor.ContainerEnv)),
+			"allowedEgress":       "api.github.com",
+			"blockedEgress":       "https://evil.example.com/exfil",
+			"workerPool":          workerPool,
+			"sandboxConfig":       sandboxConfig,
+			"provenance":          string(stepProvenance),
+		}
+		if isLive && liveResp != nil {
+			stepMeta["targetActor"] = substrateTargetActor(r.Config())
+			for k, v := range liveResp.Metadata {
+				if strings.TrimSpace(v) != "" {
+					stepMeta[k] = v
+				}
+			}
+		}
+
 		tc.addStep(BoundaryTraceEvent{
 			Boundary:   BoundarySandboxEgress,
 			Shield:     "Sandbox Egress MITM (Agent Substrate v0.5.0)",
@@ -1118,17 +1142,7 @@ func executeGovernedSandboxDelegationTool(ctx context.Context, r *Runtime, tc *a
 			Verdict:    VerdictBlocked,
 			Provenance: stepProvenance,
 			Detail:     "Executed in gVisor Actor (SNAPSHOT_FIDELITY_MEMORY) with 0 env secrets; atenet MITM injected GitHub token for api.github.com and EgressPolicy blocked init() exfiltration to https://evil.example.com/exfil",
-			Metadata: map[string]string{
-				"apiVersion":          actor.APIVersion,
-				"sandboxClass":        actor.SandboxClass,
-				"preferredFidelity":   actor.PreferredFidelity,
-				"containerEnvSecrets": fmt.Sprintf("%d", len(actor.ContainerEnv)),
-				"allowedEgress":       "api.github.com",
-				"blockedEgress":       "https://evil.example.com/exfil",
-				"workerPool":          workerPool,
-				"sandboxConfig":       sandboxConfig,
-				"provenance":          string(stepProvenance),
-			},
+			Metadata:   stepMeta,
 		})
 	} else {
 		tc.addStep(BoundaryTraceEvent{
@@ -1736,6 +1750,15 @@ func enforceStepUpBeforeTool(ctx agent.Context, tc *adkActiveTurnContext) (map[s
 		stepUp.ADKSessionID = tc.adkSessionID
 
 		if tc.req.ScenarioID == Scenario05FullChainZeroTrust {
+			s5SandboxFields := map[string]string{
+				"sandboxClass":          "gvisor",
+				"preferredFidelity":     "SNAPSHOT_FIDELITY_MEMORY",
+				"containerEnvSecrets":   "0",
+				"egressMitmAllowed":     "https://api.github.com (atenet header injection)",
+				"egressPolicyBlocked":   "https://evil.example.com/exfil (403 Forbidden)",
+				"peerResponseScreening": tc.cleanPeerSummary,
+			}
+			populateLiveSandboxCardFields(s5SandboxFields, tc.rt, tc.liveSandboxResp)
 			sandboxCard, err := ValidateAndSanitizeA2UICard(A2UICard{
 				SurfaceID: "card-sandbox-s5",
 				MimeType:  "application/json+a2ui",
@@ -1745,14 +1768,7 @@ func enforceStepUpBeforeTool(ctx agent.Context, tc *adkActiveTurnContext) (map[s
 				Subtitle:  "Boundaries 5 & 6: Attenuated A2A v2 + Agent Substrate v0.5.0 Egress MITM",
 				Severity:  "SUCCESS",
 				Body:      "Sandbox Remediator verified TestCheckoutHotfix inside an Agent Substrate v0.5.0 gVisor Actor with zero env secrets, injected GitHub credentials out-of-sandbox via atenet Egress MITM, and blocked evil.example.com exfiltration.",
-				Fields: map[string]string{
-					"sandboxClass":          "gvisor",
-					"preferredFidelity":     "SNAPSHOT_FIDELITY_MEMORY",
-					"containerEnvSecrets":   "0",
-					"egressMitmAllowed":     "https://api.github.com (atenet header injection)",
-					"egressPolicyBlocked":   "https://evil.example.com/exfil (403 Forbidden)",
-					"peerResponseScreening": tc.cleanPeerSummary,
-				},
+				Fields:    s5SandboxFields,
 			}, tc.req.Posture)
 			if err != nil {
 				return nil, err
@@ -2802,6 +2818,17 @@ func finalizeTurnOutcomeAndCards(r *Runtime, tc *adkActiveTurnContext) []A2UICar
 					break
 				}
 			}
+			s4SandboxFields := map[string]string{
+				"Provenance":            sandboxProvenance,
+				"sandboxClass":          "gvisor",
+				"preferredFidelity":     "SNAPSHOT_FIDELITY_MEMORY",
+				"containerEnvSecrets":   "0",
+				"egressMitmAllowed":     "https://api.github.com (atenet header injection)",
+				"egressPolicyBlocked":   "https://evil.example.com/exfil (403 Forbidden)",
+				"a2aCredentialScrub":    "withoutCredentialParts (upstream 3LO stripped)",
+				"peerResponseScreening": tc.cleanPeerSummary,
+			}
+			populateLiveSandboxCardFields(s4SandboxFields, r, tc.liveSandboxResp)
 			card, _ := ValidateAndSanitizeA2UICard(A2UICard{
 				SurfaceID: "card-sandbox-s4-blue",
 				MimeType:  "application/json+a2ui",
@@ -2811,16 +2838,7 @@ func finalizeTurnOutcomeAndCards(r *Runtime, tc *adkActiveTurnContext) []A2UICar
 				Subtitle:  "Boundaries 5 & 6: Attenuated A2A v2 + Agent Substrate v0.5.0 Egress MITM",
 				Severity:  "SUCCESS",
 				Body:      "Triage Orchestrator stripped upstream 3LO tokens before A2A delegation. Sandbox Remediator ran go test inside an Agent Substrate v0.5.0 gVisor Actor with zero container env secrets, injected GitHub credentials out-of-sandbox via atenet Egress MITM, blocked init() exfiltration to evil.example.com, and screened the returned peer summary via Model Armor.",
-				Fields: map[string]string{
-					"Provenance":            sandboxProvenance,
-					"sandboxClass":          "gvisor",
-					"preferredFidelity":     "SNAPSHOT_FIDELITY_MEMORY",
-					"containerEnvSecrets":   "0",
-					"egressMitmAllowed":     "https://api.github.com (atenet header injection)",
-					"egressPolicyBlocked":   "https://evil.example.com/exfil (403 Forbidden)",
-					"a2aCredentialScrub":    "withoutCredentialParts (upstream 3LO stripped)",
-					"peerResponseScreening": tc.cleanPeerSummary,
-				},
+				Fields:    s4SandboxFields,
 			}, tc.req.Posture)
 			tc.outcome = OutcomeDefendedSuccess
 			tc.assistantText = "Verified checkout v2.4 hotfix in Agent Substrate v0.5.0 gVisor sandbox. Upstream 3LO credentials were stripped on A2A handoff, evil.example.com exfiltration was blocked by EgressPolicy, and the peer A2A response was screened via Model Armor."
@@ -3106,6 +3124,24 @@ func hasCachedRestrictedToolOutputInHistory(contents []*genai.Content) bool {
 		}
 	}
 	return false
+}
+
+func populateLiveSandboxCardFields(fields map[string]string, r *Runtime, liveResp *SandboxExecutionResponse) {
+	if fields == nil || liveResp == nil {
+		return
+	}
+	fields["Provenance"] = string(ProvenanceLive)
+	if r != nil {
+		fields["targetActor"] = substrateTargetActor(r.Config())
+	}
+	for _, key := range []string{"kernelSignature", "zeroEnvSecretsVerified", "githubAllowedProbe", "evilExfilProbe", "actorName", "sandboxPod"} {
+		if val := strings.TrimSpace(liveResp.Metadata[key]); val != "" {
+			fields[key] = val
+		}
+	}
+	if out := strings.TrimSpace(liveResp.TestOutput); out != "" {
+		fields["testOutput"] = out
+	}
 }
 
 func containsString(items []string, target string) bool {
