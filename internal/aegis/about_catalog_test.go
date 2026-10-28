@@ -958,3 +958,341 @@ func TestPortal_AboutInteractiveVisualizerModulesAndSecurityHygiene(t *testing.T
 		}
 	}
 }
+
+func extractHTMLOpeningTagByID(html, elemID string) (string, bool) {
+	needle := `id="` + elemID + `"`
+	idx := strings.Index(html, needle)
+	if idx < 0 {
+		return "", false
+	}
+	start := strings.LastIndex(html[:idx], "<")
+	endRel := strings.Index(html[idx:], ">")
+	if start < 0 || endRel < 0 {
+		return "", false
+	}
+	return html[start : idx+endRel+1], true
+}
+
+func TestPortal_AboutSingleLensThreeTabWorkspace(t *testing.T) {
+	rt := aegis.NewRuntime(aegis.RuntimeConfig{})
+	srv := newLoopbackServer(t, aegis.NewHTTPHandler(rt))
+
+	resp, err := http.Get(srv.URL + "/about")
+	if err != nil {
+		t.Fatalf("GET /about error: %v", err)
+	}
+	bodyBytes, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read /about HTML: %v", err)
+	}
+	html := string(bodyBytes)
+
+	jsResp, err := http.Get(srv.URL + "/static/app.js")
+	if err != nil {
+		t.Fatalf("GET /static/app.js error: %v", err)
+	}
+	jsBytes, err := io.ReadAll(jsResp.Body)
+	jsResp.Body.Close()
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	js := string(jsBytes)
+
+	// 1. Slim single-row header replaces tall 5-stat-pill hero banner
+	if strings.Contains(html, "about-stat-pill") {
+		t.Errorf("expected slim single-row /about header without 5-stat-pill hero clutter")
+	}
+	for _, wantTabMarkup := range []string{
+		`id="about-workspace-tabs"`,
+		`id="about-tab-topology"`,
+		`data-about-tab="topology"`,
+		`Security Topology`,
+		`id="about-tab-lifecycle"`,
+		`data-about-tab="lifecycle"`,
+		`ADK Plugin Flow`,
+		`id="about-tab-reference"`,
+		`data-about-tab="reference"`,
+		`System Reference`,
+	} {
+		if !strings.Contains(html, wantTabMarkup) {
+			t.Errorf("/about HTML missing workspace tab markup %q", wantTabMarkup)
+		}
+	}
+
+	// 2. Progressive disclosure on initial load: Security Topology visible; ADK Plugin Flow & System Reference hidden
+	topoTag, ok := extractHTMLOpeningTagByID(html, "about-topology-module")
+	if !ok {
+		t.Fatalf("missing #about-topology-module opening tag")
+	}
+	if strings.Contains(topoTag, " hidden") {
+		t.Errorf("expected #about-topology-module to be visible on load, got tag %q", topoTag)
+	}
+
+	for _, hiddenID := range []string{"about-lifecycle-module", "about-governance-module"} {
+		openTag, found := extractHTMLOpeningTagByID(html, hiddenID)
+		if !found {
+			t.Fatalf("missing #%s opening tag", hiddenID)
+		}
+		if !strings.Contains(openTag, " hidden") {
+			t.Errorf("expected #%s to carry hidden attribute on initial load, got tag %q", hiddenID, openTag)
+		}
+	}
+
+	// 3. Client-side progressive-disclosure tab switching without query parameters
+	for _, wantJS := range []string{
+		"function switchAboutWorkspace(",
+		`switchAboutWorkspace("reference")`,
+		`switchAboutWorkspace("topology")`,
+		"function jumpToAboutTool(",
+	} {
+		if !strings.Contains(js, wantJS) {
+			t.Errorf("app.js missing progressive-disclosure workspace switcher logic %q", wantJS)
+		}
+	}
+	if strings.Contains(js, "?tab=") {
+		t.Errorf("app.js must not use query-parameter tab routing (?tab=)")
+	}
+}
+
+func TestPortal_AboutUnifiedToolbarAndRunInArenaHandoff(t *testing.T) {
+	rt := aegis.NewRuntime(aegis.RuntimeConfig{})
+	srv := newLoopbackServer(t, aegis.NewHTTPHandler(rt))
+
+	resp, err := http.Get(srv.URL + "/about")
+	if err != nil {
+		t.Fatalf("GET /about error: %v", err)
+	}
+	bodyBytes, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read /about HTML: %v", err)
+	}
+	html := string(bodyBytes)
+
+	jsResp, err := http.Get(srv.URL + "/static/app.js")
+	if err != nil {
+		t.Fatalf("GET /static/app.js error: %v", err)
+	}
+	jsBytes, err := io.ReadAll(jsResp.Body)
+	jsResp.Body.Close()
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	js := string(jsBytes)
+
+	// 1. Unified single-row toolbar above SVG stage with scenario pills, posture switch, Replay, and Run in Arena
+	for _, wantHTML := range []string{
+		`class="topology-toolbar"`,
+		`id="topology-scenario-pills"`,
+		`id="btn-sim-posture-blue"`,
+		`id="btn-sim-posture-red"`,
+		`id="btn-sim-replay"`,
+		`id="btn-run-in-arena"`,
+		`Run in Arena`,
+	} {
+		if !strings.Contains(html, wantHTML) {
+			t.Errorf("/about HTML missing unified toolbar element %q", wantHTML)
+		}
+	}
+
+	toolbarIdx := strings.Index(html, `class="topology-toolbar"`)
+	stageIdx := strings.Index(html, `id="about-topology-svg-stage"`)
+	if toolbarIdx < 0 || stageIdx < 0 || toolbarIdx > stageIdx {
+		t.Errorf("expected .topology-toolbar (%d) to appear directly above #about-topology-svg-stage (%d)", toolbarIdx, stageIdx)
+	}
+
+	// 2. Compact 1-line scenario pill labels S1..S5 + Run in Arena handoff logic in app.js
+	for _, wantJS := range []string{
+		"S1 · Prompt & PII",
+		"S2 · 3LO Vault",
+		"S3 · UAP & Step-Up",
+		"S4 · A2A Sandbox",
+		"S5 · Full Chain",
+		"async function runAboutScenarioInArena(",
+		"btn-run-in-arena",
+		"syncShieldUI()",
+		"syncPersonaAndVaultUI()",
+		"persistPosture()",
+		`navigateToRoute("/", true)`,
+		"selectScenarioAndFillPrompt(",
+	} {
+		if !strings.Contains(js, wantJS) {
+			t.Errorf("app.js missing toolbar or Run-in-Arena handoff snippet %q", wantJS)
+		}
+	}
+
+	fnIdx := strings.Index(js, "async function runAboutScenarioInArena(")
+	if fnIdx >= 0 {
+		endIdx := strings.Index(js[fnIdx:], "\n  function ")
+		if endIdx < 0 {
+			endIdx = len(js) - fnIdx
+		}
+		fnBody := js[fnIdx : fnIdx+endIdx]
+		if strings.Contains(fnBody, "executeTurn(") {
+			t.Errorf("runAboutScenarioInArena must NOT auto-submit turns via executeTurn()")
+		}
+	}
+}
+
+func TestPortal_AboutDeclutteredThreeZoneSVGAndActivePathDimming(t *testing.T) {
+	rt := aegis.NewRuntime(aegis.RuntimeConfig{})
+	srv := newLoopbackServer(t, aegis.NewHTTPHandler(rt))
+
+	jsResp, err := http.Get(srv.URL + "/static/app.js")
+	if err != nil {
+		t.Fatalf("GET /static/app.js error: %v", err)
+	}
+	jsBytes, err := io.ReadAll(jsResp.Body)
+	jsResp.Body.Close()
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	js := string(jsBytes)
+
+	cssResp, err := http.Get(srv.URL + "/static/styles.css")
+	if err != nil {
+		t.Fatalf("GET /static/styles.css error: %v", err)
+	}
+	cssBytes, err := io.ReadAll(cssResp.Body)
+	cssResp.Body.Close()
+	if err != nil {
+		t.Fatalf("read styles.css: %v", err)
+	}
+	css := string(cssBytes)
+
+	// 1. Zero permanent idle edge label pills in base edges layer & zero 3rd/4th SVG node lines
+	for _, forbiddenJS := range []string{
+		"topo-edge-label-bg",
+		"topo-edge-label-text",
+		"CLIENT SURFACE",
+		`" ADRs"`,
+		"cy1 = 434",
+	} {
+		if strings.Contains(js, forbiddenJS) {
+			t.Errorf("app.js still contains cluttered/stale SVG rendering artifact %q", forbiddenJS)
+		}
+	}
+	if strings.Contains(css, ".topo-edge-label-bg") || strings.Contains(css, ".topo-edge-label-text") {
+		t.Errorf("styles.css must not style permanent idle edge label pills")
+	}
+
+	// 2. Three-zone headers, curveOffsetY routing, 2-line nodeTag + status dot, active-path dimming, and top-layer hop callout
+	for _, wantJS := range []string{
+		"INGRESS",
+		"REASONING CORE",
+		"EXECUTION PLANES",
+		"edge.curveOffsetY",
+		"b.nodeTag",
+		"cn.nodeTag",
+		"node-status-dot",
+		"inactive-scenario",
+		"inactive-edge",
+		"topo-hop-callout",
+	} {
+		if !strings.Contains(js, wantJS) {
+			t.Errorf("app.js missing decluttered 3-zone SVG hook %q", wantJS)
+		}
+	}
+
+	for _, wantCSS := range []string{
+		".topo-zone-label",
+		".node-status-dot",
+		".topo-boundary-node.inactive-scenario",
+		".topo-edge-base.inactive-edge",
+		".topo-hop-callout",
+	} {
+		if !strings.Contains(css, wantCSS) {
+			t.Errorf("styles.css missing decluttered 3-zone SVG class %q", wantCSS)
+		}
+	}
+}
+
+func TestPortal_AboutHorizontalScrubberAndMicroInspector(t *testing.T) {
+	rt := aegis.NewRuntime(aegis.RuntimeConfig{})
+	srv := newLoopbackServer(t, aegis.NewHTTPHandler(rt))
+
+	resp, err := http.Get(srv.URL + "/about")
+	if err != nil {
+		t.Fatalf("GET /about error: %v", err)
+	}
+	bodyBytes, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read /about HTML: %v", err)
+	}
+	html := string(bodyBytes)
+
+	jsResp, err := http.Get(srv.URL + "/static/app.js")
+	if err != nil {
+		t.Fatalf("GET /static/app.js error: %v", err)
+	}
+	jsBytes, err := io.ReadAll(jsResp.Body)
+	jsResp.Body.Close()
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	js := string(jsBytes)
+
+	cssResp, err := http.Get(srv.URL + "/static/styles.css")
+	if err != nil {
+		t.Fatalf("GET /static/styles.css error: %v", err)
+	}
+	cssBytes, err := io.ReadAll(cssResp.Body)
+	cssResp.Body.Close()
+	if err != nil {
+		t.Fatalf("read styles.css: %v", err)
+	}
+	css := string(cssBytes)
+
+	// 1. Standalone trajectory banner and tall 2-column bottom grid are replaced by horizontal scrubber + micro-inspector
+	for _, removedHTML := range []string{
+		`id="topology-trajectory-banner"`,
+		`class="topology-bottom-grid"`,
+	} {
+		if strings.Contains(html, removedHTML) {
+			t.Errorf("/about HTML still contains tall pre-Phase-5 layout block %q", removedHTML)
+		}
+	}
+	for _, wantHTML := range []string{
+		`class="topology-scrubber-bar"`,
+		`id="topology-pulse-log"`,
+		`id="pulse-step-counter"`,
+		`id="pulse-hop-readout"`,
+		`id="boundary-inspector-card"`,
+	} {
+		if !strings.Contains(html, wantHTML) {
+			t.Errorf("/about HTML missing horizontal scrubber or micro-inspector mount %q", wantHTML)
+		}
+	}
+
+	// 2. Micro-inspector uses concise blueSummary / redSummary + clickable governed tool & ADR jump pills
+	for _, wantJS := range []string{
+		"boundary.blueSummary",
+		"boundary.redSummary",
+		"about-tool-jump-btn",
+		"jumpToAboutTool(",
+		"about-adr-jump-btn",
+		"jumpToAboutADR(",
+		"scrubber-step-arrow",
+		"selectAboutPulseHop(",
+	} {
+		if !strings.Contains(js, wantJS) {
+			t.Errorf("app.js missing horizontal scrubber or micro-inspector hook %q", wantJS)
+		}
+	}
+	if strings.Contains(js, `getElementById("topology-trajectory-banner")`) {
+		t.Errorf("app.js still references removed #topology-trajectory-banner")
+	}
+
+	for _, wantCSS := range []string{
+		".topology-scrubber-bar",
+		".pulse-hop-readout",
+		".scrubber-step-arrow",
+		".about-tool-jump-btn",
+	} {
+		if !strings.Contains(css, wantCSS) {
+			t.Errorf("styles.css missing horizontal scrubber or micro-inspector class %q", wantCSS)
+		}
+	}
+}
