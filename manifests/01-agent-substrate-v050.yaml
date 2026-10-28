@@ -13,6 +13,7 @@ metadata:
   namespace: aegis-system
   labels:
     app.kubernetes.io/name: sandbox-remediator
+    workload: aegis-remediator-pool
 spec:
   replicas: 1
   workerImage: ${SUBSTRATE_WORKER_IMAGE}
@@ -23,6 +24,7 @@ spec:
   template:
     labels:
       app.kubernetes.io/name: sandbox-remediator
+      workload: aegis-remediator-pool
     resources:
       requests:
         cpu: "500m"

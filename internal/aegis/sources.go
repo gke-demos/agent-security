@@ -68,6 +68,7 @@ func ConfigFromEnvWithLookup(getenv func(string) string, ghTokenFn func() string
 		JiraRestrictedKey:          strings.TrimSpace(getenv("JIRA_RESTRICTED_KEY")),
 		JiraPublicKey:              strings.TrimSpace(getenv("JIRA_PUBLIC_KEY")),
 		SubstrateGatewayURL:        strings.TrimSpace(getenv("SUBSTRATE_GATEWAY_URL")),
+		SubstrateTargetActor:       firstNonEmpty(strings.TrimSpace(getenv("SUBSTRATE_TARGET_ACTOR")), defaultSubstrateTargetActor),
 		LiveSubstrate:              parseBoolEnv(getenv("LIVE_SUBSTRATE")),
 		AliceGitHubToken:           strings.TrimSpace(getenv("ALICE_GITHUB_TOKEN")),
 		BobGitHubToken:             strings.TrimSpace(getenv("BOB_GITHUB_TOKEN")),

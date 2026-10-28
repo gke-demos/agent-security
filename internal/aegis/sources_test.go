@@ -179,6 +179,7 @@ func TestRuntimeConfigFromEnv(t *testing.T) {
 	t.Setenv("JIRA_RESTRICTED_KEY", "SEC-999")
 	t.Setenv("JIRA_PUBLIC_KEY", "PUB-888")
 	t.Setenv("SUBSTRATE_GATEWAY_URL", "http://127.0.0.1:8088")
+	t.Setenv("SUBSTRATE_TARGET_ACTOR", "aegis-system/remediator-custom")
 	t.Setenv("LIVE_SUBSTRATE", "true")
 	t.Setenv("ALICE_GITHUB_TOKEN", "alice-gh-tok")
 	t.Setenv("BOB_GITHUB_TOKEN", "bob-gh-tok")
@@ -209,6 +210,7 @@ func TestRuntimeConfigFromEnv(t *testing.T) {
 		cfg.JiraRestrictedKey != "SEC-999" ||
 		cfg.JiraPublicKey != "PUB-888" ||
 		cfg.SubstrateGatewayURL != "http://127.0.0.1:8088" ||
+		cfg.SubstrateTargetActor != "aegis-system/remediator-custom" ||
 		!cfg.LiveSubstrate ||
 		cfg.AliceGitHubToken != "alice-gh-tok" ||
 		cfg.BobGitHubToken != "bob-gh-tok" ||
@@ -250,6 +252,9 @@ func TestConfigFromEnv_AutoDefaultsAndGitHubTokenResolution(t *testing.T) {
 	}
 	if cfg1.AliceGitHubToken != "gho_resolved_from_cli_123" {
 		t.Errorf("cfg1.AliceGitHubToken = %q, want gho_resolved_from_cli_123", cfg1.AliceGitHubToken)
+	}
+	if cfg1.SubstrateTargetActor != "aegis-system/remediator-1" {
+		t.Errorf("cfg1.SubstrateTargetActor = %q, want aegis-system/remediator-1", cfg1.SubstrateTargetActor)
 	}
 
 	// 2. Custom GOOGLE_CLOUD_LOCATION flows into regional ModelArmorEndpoint
