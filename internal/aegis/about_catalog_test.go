@@ -3,6 +3,7 @@ package aegis_test
 import (
 	"encoding/json"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -282,6 +283,262 @@ func TestArchitectureTopologyCatalog_BoundariesCallbacksToolsAndLiveSources(t *t
 	}
 }
 
+func evalCubicPoint(x0, y0, cx1, cy1, cx2, cy2, x3, y3, t float64) (float64, float64) {
+	u := 1 - t
+	tt := t * t
+	uu := u * u
+	uuu := uu * u
+	ttt := tt * t
+	return uuu*x0 + 3*uu*t*cx1 + 3*u*tt*cx2 + ttt*x3,
+		uuu*y0 + 3*uu*t*cy1 + 3*u*tt*cy2 + ttt*y3
+}
+
+func TestArchitectureTopologyCatalog_ThreeZoneGeometryMicroSummariesAndNonCrossingEdges(t *testing.T) {
+	rt := aegis.NewRuntime(aegis.RuntimeConfig{})
+	srv := newLoopbackServer(t, aegis.NewHTTPHandler(rt))
+
+	resp, err := http.Get(srv.URL + "/api/about/catalog")
+	if err != nil {
+		t.Fatalf("GET /api/about/catalog error: %v", err)
+	}
+	rawBytes, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read catalog body: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	rawJSON := string(rawBytes)
+	for _, wantJSONKey := range []string{
+		`"nodeTag"`,
+		`"zone"`,
+		`"blueSummary"`,
+		`"redSummary"`,
+		`"curveOffsetY"`,
+	} {
+		if !strings.Contains(rawJSON, wantJSONKey) {
+			t.Errorf("GET /api/about/catalog JSON missing required key %s", wantJSONKey)
+		}
+	}
+
+	var catalog aegis.ArchitectureTopologyCatalog
+	if err := json.Unmarshal(rawBytes, &catalog); err != nil {
+		t.Fatalf("unmarshal ArchitectureTopologyCatalog: %v", err)
+	}
+
+	if catalog.ViewBoxWidth != 1200 {
+		t.Errorf("ViewBoxWidth = %d, want 1200", catalog.ViewBoxWidth)
+	}
+	if catalog.ViewBoxHeight != 390 && catalog.ViewBoxHeight != 400 {
+		t.Errorf("ViewBoxHeight = %d, want 390 or 400", catalog.ViewBoxHeight)
+	}
+
+	type nodeBox struct {
+		id   string
+		zone string
+		x    int
+		y    int
+		w    int
+		h    int
+	}
+	boxes := make([]nodeBox, 0, len(catalog.ContextNodes)+len(catalog.Boundaries))
+	byID := map[string]nodeBox{}
+
+	if len(catalog.ContextNodes) == 0 {
+		t.Fatalf("expected OPERATOR_BROWSER context node")
+	}
+	for _, cn := range catalog.ContextNodes {
+		if strings.TrimSpace(cn.NodeTag) == "" {
+			t.Errorf("ContextNode %q missing NodeTag", cn.ID)
+		}
+		nb := nodeBox{id: cn.ID, zone: "INGRESS", x: cn.X, y: cn.Y, w: cn.Width, h: cn.Height}
+		if cn.Zone != "" {
+			nb.zone = cn.Zone
+		}
+		boxes = append(boxes, nb)
+		byID[cn.ID] = nb
+	}
+
+	wantBoundaryZone := map[aegis.BoundaryID]string{
+		aegis.BoundaryGenerativeUI:       "INGRESS",
+		aegis.BoundaryReasoningGuard:     "REASONING_CORE",
+		aegis.BoundaryIdentity3LO:        "EXECUTION_PLANES",
+		aegis.BoundaryPlatformGovernance: "EXECUTION_PLANES",
+		aegis.BoundaryCrossAgentA2A:      "EXECUTION_PLANES",
+		aegis.BoundarySandboxEgress:      "EXECUTION_PLANES",
+	}
+
+	for _, b := range catalog.Boundaries {
+		if got, want := b.Zone, wantBoundaryZone[b.ID]; got != want {
+			t.Errorf("Boundary %s Zone = %q, want %q", b.ID, got, want)
+		}
+		if strings.TrimSpace(b.NodeTag) == "" || len(b.NodeTag) > 28 {
+			t.Errorf("Boundary %s NodeTag = %q, want non-empty concise tag (<= 28 chars)", b.ID, b.NodeTag)
+		}
+		if strings.TrimSpace(b.BlueSummary) == "" || strings.TrimSpace(b.RedSummary) == "" {
+			t.Errorf("Boundary %s missing BlueSummary or RedSummary: blue=%q red=%q", b.ID, b.BlueSummary, b.RedSummary)
+		}
+		if strings.TrimSpace(b.ShortLabel) == "" || strings.TrimSpace(b.Subtitle) == "" ||
+			strings.TrimSpace(b.BlueDefenseMechanism) == "" || strings.TrimSpace(b.RedExploitMode) == "" {
+			t.Errorf("Boundary %s lost existing descriptive field: %+v", b.ID, b)
+		}
+		nb := nodeBox{id: string(b.ID), zone: b.Zone, x: b.X, y: b.Y, w: b.Width, h: b.Height}
+		boxes = append(boxes, nb)
+		byID[string(b.ID)] = nb
+	}
+
+	// Verify bounds & zero overlapping node boxes
+	for i, a := range boxes {
+		if a.x < 0 || a.y < 0 || a.x+a.w > catalog.ViewBoxWidth || a.y+a.h > catalog.ViewBoxHeight {
+			t.Errorf("node %s box (%d,%d,%d,%d) exceeds viewBox (%dx%d)", a.id, a.x, a.y, a.w, a.h, catalog.ViewBoxWidth, catalog.ViewBoxHeight)
+		}
+		for j := i + 1; j < len(boxes); j++ {
+			b := boxes[j]
+			overlapX := a.x < b.x+b.w && b.x < a.x+a.w
+			overlapY := a.y < b.y+b.h && b.y < a.y+a.h
+			if overlapX && overlapY {
+				t.Errorf("nodes %s and %s overlap: %+v vs %+v", a.id, b.id, a, b)
+			}
+		}
+	}
+
+	// Verify >= 52px horizontal separation between INGRESS, REASONING_CORE, and EXECUTION_PLANES
+	zoneBounds := func(zone string) (minX, maxX int) {
+		minX = catalog.ViewBoxWidth
+		maxX = 0
+		for _, nb := range boxes {
+			if nb.zone != zone {
+				continue
+			}
+			if nb.x < minX {
+				minX = nb.x
+			}
+			if nb.x+nb.w > maxX {
+				maxX = nb.x + nb.w
+			}
+		}
+		return minX, maxX
+	}
+	_, ingressMaxX := zoneBounds("INGRESS")
+	coreMinX, coreMaxX := zoneBounds("REASONING_CORE")
+	execMinX, _ := zoneBounds("EXECUTION_PLANES")
+
+	if gap1 := coreMinX - ingressMaxX; gap1 < 52 {
+		t.Errorf("INGRESS -> REASONING_CORE horizontal gap = %dpx, want >= 52px", gap1)
+	}
+	if gap2 := execMinX - coreMaxX; gap2 < 52 {
+		t.Errorf("REASONING_CORE -> EXECUTION_PLANES horizontal gap = %dpx, want >= 52px", gap2)
+	}
+
+	// Verify Execution Planes 3-lane vertical layout (B3 upper, B4 middle, B5 -> B6 lower)
+	b3 := byID[string(aegis.BoundaryIdentity3LO)]
+	b4 := byID[string(aegis.BoundaryPlatformGovernance)]
+	b5 := byID[string(aegis.BoundaryCrossAgentA2A)]
+	b6 := byID[string(aegis.BoundarySandboxEgress)]
+	if b3.y+b3.h >= b4.y {
+		t.Errorf("expected B3 upper lane (%d..%d) strictly above B4 middle lane (%d..%d)", b3.y, b3.y+b3.h, b4.y, b4.y+b4.h)
+	}
+	if b4.y+b4.h >= b5.y || b4.y+b4.h >= b6.y {
+		t.Errorf("expected B4 middle lane (%d..%d) strictly above B5/B6 lower lane (%d)", b4.y, b4.y+b4.h, b5.y)
+	}
+	if b5.x+b5.w >= b6.x {
+		t.Errorf("expected B5 (%d..%d) strictly left of B6 (%d..%d) in lower lane", b5.x, b5.x+b5.w, b6.x, b6.x+b6.w)
+	}
+
+	// Verify all 10 canonical edge IDs and non-crossing curves (especially EDGE_B6_B2 clearing B5)
+	wantEdgeIDs := []string{
+		"EDGE_BROWSER_B1",
+		"EDGE_B1_B2",
+		"EDGE_B2_B3",
+		"EDGE_B3_B2",
+		"EDGE_B2_B4",
+		"EDGE_B2_B5",
+		"EDGE_B5_B6",
+		"EDGE_B6_B2",
+		"EDGE_B2_B1",
+		"EDGE_B1_BROWSER",
+	}
+	gotEdgeIDs := make([]string, 0, len(catalog.Edges))
+	for _, e := range catalog.Edges {
+		gotEdgeIDs = append(gotEdgeIDs, e.ID)
+	}
+	if !reflect.DeepEqual(gotEdgeIDs, wantEdgeIDs) {
+		t.Fatalf("catalog.Edges IDs = %v, want %v", gotEdgeIDs, wantEdgeIDs)
+	}
+
+	foundReturnArc := false
+	for _, e := range catalog.Edges {
+		x0, y0 := float64(e.FromX), float64(e.FromY)
+		x3, y3 := float64(e.ToX), float64(e.ToY)
+		dx := math.Max(24, math.Abs(x3-x0)*0.48)
+
+		type ctrlPair struct {
+			name               string
+			cx1, cy1, cx2, cy2 float64
+		}
+		var variants []ctrlPair
+		if e.CurveOffsetY != 0 {
+			railY := math.Max(y0, y3) + float64(e.CurveOffsetY)
+			sign := 1.0
+			if x3 < x0 {
+				sign = -1.0
+			}
+			variants = []ctrlPair{
+				{name: "vertical-drop", cx1: x0, cy1: railY, cx2: x3, cy2: railY},
+				{name: "horizontal-spread", cx1: x0 + sign*dx, cy1: railY, cx2: x3 - sign*dx, cy2: railY},
+			}
+		} else {
+			sign := 1.0
+			if x3 < x0 {
+				sign = -1.0
+			}
+			variants = []ctrlPair{
+				{name: "standard", cx1: x0 + sign*dx, cy1: y0, cx2: x3 - sign*dx, cy2: y3},
+			}
+		}
+
+		if e.ID == "EDGE_B6_B2" {
+			foundReturnArc = true
+			if e.CurveOffsetY <= 0 {
+				t.Errorf("EDGE_B6_B2 CurveOffsetY = %d, want > 0 for bottom-margin return routing", e.CurveOffsetY)
+			}
+		}
+
+		for _, v := range variants {
+			for step := 0; step <= 200; step++ {
+				tVal := float64(step) / 200.0
+				px, py := evalCubicPoint(x0, y0, v.cx1, v.cy1, v.cx2, v.cy2, x3, y3, tVal)
+				if px < 0 || px > float64(catalog.ViewBoxWidth) || py < 0 || py > float64(catalog.ViewBoxHeight) {
+					t.Errorf("edge %s (%s) escapes viewBox at t=%.2f: (%.1f, %.1f)", e.ID, v.name, tVal, px, py)
+					break
+				}
+				if step > 4 && step < 196 {
+					for _, nb := range boxes {
+						if nb.id == e.From || nb.id == e.To {
+							continue
+						}
+						if px >= float64(nb.x) && px <= float64(nb.x+nb.w) && py >= float64(nb.y) && py <= float64(nb.y+nb.h) {
+							t.Errorf("edge %s (%s) intersects intermediate node %s at t=%.2f (%.1f, %.1f)", e.ID, v.name, nb.id, tVal, px, py)
+							break
+						}
+					}
+				}
+				if e.ID == "EDGE_B6_B2" && px >= float64(b5.x) && px <= float64(b5.x+b5.w) {
+					if py <= float64(b5.y+b5.h)+8.0 {
+						t.Errorf("EDGE_B6_B2 (%s) failed to clear bottom of B5 (%d) with >=8px margin at x=%.1f: py=%.1f", v.name, b5.y+b5.h, px, py)
+						break
+					}
+				}
+			}
+		}
+	}
+	if !foundReturnArc {
+		t.Errorf("missing EDGE_B6_B2 in catalog.Edges")
+	}
+}
+
 func TestArchitectureTopologyCatalog_ScenariosADRsAndDriftDetection(t *testing.T) {
 	rt := aegis.NewRuntime(aegis.RuntimeConfig{})
 	srv := newLoopbackServer(t, aegis.NewHTTPHandler(rt))
@@ -490,6 +747,78 @@ func TestArchitectureTopologyCatalog_ScenariosADRsAndDriftDetection(t *testing.T
 			t.Fatalf("expected VerifyArchitectureCatalogDrift to fail when an ADR ## Status on disk changes from Accepted to Superseded")
 		}
 	})
+
+	t.Run("DetectsOverlappingNodesOrInsufficientZoneGap", func(t *testing.T) {
+		overlapCat := catalog
+		overlapCat.Boundaries = append([]aegis.BoundaryCatalogNode(nil), catalog.Boundaries...)
+		overlapCat.Boundaries[1].X = overlapCat.Boundaries[0].X + 10
+		if err := aegis.VerifyArchitectureCatalogDrift(&overlapCat, rt, adrDir); err == nil {
+			t.Fatalf("expected VerifyArchitectureCatalogDrift to fail when boundary boxes overlap or violate 52px zone gap")
+		}
+	})
+}
+
+func TestADR0011_DocumentsPhase5WorkspaceThreeZoneSVGAndStageSafeSources(t *testing.T) {
+	rt := aegis.NewRuntime(aegis.RuntimeConfig{})
+	catalog, err := rt.BuildArchitectureTopologyCatalog(t.Context())
+	if err != nil {
+		t.Fatalf("BuildArchitectureTopologyCatalog: %v", err)
+	}
+
+	adrDir := filepath.Clean("../../docs/adr")
+	adr0011Path := filepath.Join(adrDir, "0011-path-based-routing-and-interactive-about-architecture-catalog.md")
+	rawBytes, err := os.ReadFile(adr0011Path)
+	if err != nil {
+		t.Fatalf("read ADR-0011: %v", err)
+	}
+	md := string(rawBytes)
+
+	if !strings.HasPrefix(md, "# 11. Path-Based Routing (`/` & `/about`) and Interactive Architecture Topology Catalog\n") {
+		t.Errorf("ADR-0011 must preserve exact canonical H1 heading")
+	}
+	if !strings.Contains(md, "## Status\n\nAccepted") {
+		t.Errorf("ADR-0011 must preserve Accepted status section")
+	}
+
+	for _, wantTerm := range []string{
+		"Security Topology",
+		"ADK Plugin Flow",
+		"System Reference",
+		"Ingress",
+		"Reasoning Core",
+		"Execution Planes",
+		"Run in Arena",
+		"GOOGLE_CLOUD_PROJECT",
+		"GKE_CLUSTER_NAME",
+		"/api/sources/status",
+	} {
+		if !strings.Contains(md, wantTerm) {
+			t.Errorf("ADR-0011 missing Phase 5 architectural decision detail %q", wantTerm)
+		}
+	}
+
+	assertNoEmojiRunes(t, "ADR-0011", md)
+	lower := strings.ToLower(md)
+	if strings.Contains(lower, "vertex"+" ai") || strings.Contains(lower, "fluid"+" compute") {
+		t.Errorf("ADR-0011 contains forbidden branding or internal terminology")
+	}
+
+	var found0011 bool
+	for _, entry := range catalog.ADRs {
+		if entry.Number == "0011" {
+			found0011 = true
+			if !strings.Contains(entry.Summary, "3-tab") || !strings.Contains(entry.Summary, "3-zone") {
+				t.Errorf("catalog ADR 0011 summary should reflect 3-tab workspace and 3-zone topology, got %q", entry.Summary)
+			}
+		}
+	}
+	if !found0011 {
+		t.Errorf("ADR 0011 missing from catalog.ADRs")
+	}
+
+	if err := aegis.VerifyArchitectureCatalogDrift(catalog, rt, adrDir); err != nil {
+		t.Fatalf("VerifyArchitectureCatalogDrift failed: %v", err)
+	}
 }
 
 func assertNoEmojiRunes(t *testing.T, label, content string) {
