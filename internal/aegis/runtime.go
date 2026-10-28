@@ -153,6 +153,13 @@ func (r *Runtime) GetSessionState(_ context.Context, sessionID string) (*Session
 // ExecuteTurn processes an Operator turn across the active SecurityPosture and ScenarioID
 // via the unified ADK Go v2 runner.Runner and AegisSecurityPlugin.
 func (r *Runtime) ExecuteTurn(ctx context.Context, req TurnRequest) (*TurnResult, error) {
+	return r.ExecuteTurnStream(ctx, req, nil)
+}
+
+// ExecuteTurnStream processes an Operator turn across the active SecurityPosture and ScenarioID
+// via the unified ADK Go v2 runner.Runner and AegisSecurityPlugin, emitting real-time TurnStreamEvent
+// frames to sink when non-nil.
+func (r *Runtime) ExecuteTurnStream(ctx context.Context, req TurnRequest, sink TurnEventSink) (*TurnResult, error) {
 	if req.SessionID == "" {
 		req.SessionID = "default-session"
 	}
@@ -170,18 +177,10 @@ func (r *Runtime) ExecuteTurn(ctx context.Context, req TurnRequest) (*TurnResult
 	})
 	r.SetExtension(lastGmailFetchExtPrefix+req.SessionID, nil)
 
-	res, err := r.executeTurnViaADKRunner(ctx, req, rawScenarioID)
+	res, err := r.executeTurnViaADKRunner(ctx, req, rawScenarioID, sink)
 	if err != nil {
 		return nil, err
 	}
-	normalizeTurnResultProvenance(res)
-
-	r.UpdateSession(req.SessionID, func(s *SessionSnapshot) {
-		s.LastTurn = res
-		if res.StepUpConfirmation != nil && res.StepUpConfirmation.Pending {
-			s.PendingConfirmation = res.StepUpConfirmation
-		}
-	})
 	return res, nil
 }
 

@@ -163,6 +163,18 @@ func TestPortal_RootHTMLAndStaticAssets(t *testing.T) {
 		"/oauth/grant",
 		"/oauth/revoke",
 		"/confirmations",
+		"/confirmations/stream",
+		"/turns/stream",
+		"text/event-stream",
+		"getReader",
+		"TextDecoder",
+		"step-live-status",
+		"Evaluating security boundaries...",
+		"turn.started",
+		"boundary.step",
+		"text.delta",
+		"a2ui.card",
+		"turn.completed",
 		"/api/fixtures/seed",
 		"/api/scenarios",
 		"/api/sources/status",
@@ -174,6 +186,9 @@ func TestPortal_RootHTMLAndStaticAssets(t *testing.T) {
 		if !strings.Contains(js, snippet) {
 			t.Errorf("app.js missing required snippet %q", snippet)
 		}
+	}
+	if strings.Contains(js, "STEP_DELAY_MS") || strings.Contains(js, "await sleep(") {
+		t.Errorf("app.js still contains artificial sleep(STEP_DELAY_MS) replay loop instead of real-time SSE streaming")
 	}
 }
 
@@ -300,3 +315,136 @@ func TestPortal_ScenariosEndpoint(t *testing.T) {
 		}
 	}
 }
+
+func parseSSEFrames(t *testing.T, raw string) []TurnStreamEvent {
+	t.Helper()
+	var events []TurnStreamEvent
+	blocks := strings.Split(strings.TrimSpace(raw), "\n\n")
+	for _, block := range blocks {
+		block = strings.TrimSpace(block)
+		if block == "" {
+			continue
+		}
+		var eventName string
+		var dataJSON string
+		for _, line := range strings.Split(block, "\n") {
+			if strings.HasPrefix(line, "event: ") {
+				eventName = strings.TrimSpace(strings.TrimPrefix(line, "event: "))
+			} else if strings.HasPrefix(line, "data: ") {
+				dataJSON = strings.TrimSpace(strings.TrimPrefix(line, "data: "))
+			}
+		}
+		if dataJSON == "" {
+			continue
+		}
+		var ev TurnStreamEvent
+		if err := json.Unmarshal([]byte(dataJSON), &ev); err != nil {
+			t.Fatalf("unmarshal SSE frame data %q: %v", dataJSON, err)
+		}
+		if eventName != string(ev.Type) {
+			t.Errorf("SSE frame event header %q != payload Type %q", eventName, ev.Type)
+		}
+		events = append(events, ev)
+	}
+	return events
+}
+
+func TestPortal_SSETurnAndConfirmationStreams(t *testing.T) {
+	rt := NewRuntime(RuntimeConfig{})
+	srv := httptest.NewServer(NewHTTPHandler(rt))
+	defer srv.Close()
+
+	// 1. Stream SCENARIO-03 turn via POST /api/sessions/{sessionId}/turns/stream
+	turnBody, _ := json.Marshal(TurnRequest{
+		Persona:    PersonaAlice,
+		ScenarioID: Scenario03AgentGatewayAndStepUp,
+		Posture:    AllBluePosture(),
+		Prompt:     "Run SCENARIO-03 via SSE stream",
+	})
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/sessions/sse-http-s3/turns/stream", bytes.NewReader(turnBody))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /turns/stream: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /turns/stream status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+		t.Errorf("POST /turns/stream Content-Type = %q, want text/event-stream", ct)
+	}
+	if cc := resp.Header.Get("Cache-Control"); !strings.Contains(cc, "no-cache") {
+		t.Errorf("POST /turns/stream Cache-Control = %q, want no-cache", cc)
+	}
+
+	rawBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read SSE body: %v", err)
+	}
+	events := parseSSEFrames(t, string(rawBytes))
+	if len(events) < 4 {
+		t.Fatalf("expected at least 4 SSE events, got %d (%s)", len(events), string(rawBytes))
+	}
+	if events[0].Type != TurnStreamEventStarted {
+		t.Errorf("first SSE event = %q, want %q", events[0].Type, TurnStreamEventStarted)
+	}
+	lastEv := events[len(events)-1]
+	if lastEv.Type != TurnStreamEventCompleted || lastEv.Turn == nil {
+		t.Fatalf("last SSE event = %+v, want turn.completed with non-nil Turn", lastEv)
+	}
+	if lastEv.Turn.Outcome != OutcomeApprovalRequired || lastEv.Turn.StepUpConfirmation == nil {
+		t.Fatalf("turn.completed outcome = %q, want %q with StepUpConfirmation", lastEv.Turn.Outcome, OutcomeApprovalRequired)
+	}
+
+	// 2. Stream Step-Up approval via POST /api/sessions/{sessionId}/confirmations/stream
+	confBody, _ := json.Marshal(ConfirmationResolution{
+		ConfirmationID: lastEv.Turn.StepUpConfirmation.ConfirmationID,
+		Confirmed:      true,
+	})
+	confReq, err := http.NewRequest(http.MethodPost, srv.URL+"/api/sessions/sse-http-s3/confirmations/stream", bytes.NewReader(confBody))
+	if err != nil {
+		t.Fatalf("new confirmation request: %v", err)
+	}
+	confReq.Header.Set("Content-Type", "application/json")
+	confReq.Header.Set("Accept", "text/event-stream")
+
+	confResp, err := http.DefaultClient.Do(confReq)
+	if err != nil {
+		t.Fatalf("POST /confirmations/stream: %v", err)
+	}
+	defer confResp.Body.Close()
+
+	if confResp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /confirmations/stream status = %d, want 200", confResp.StatusCode)
+	}
+	if ct := confResp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+		t.Errorf("POST /confirmations/stream Content-Type = %q, want text/event-stream", ct)
+	}
+
+	confRaw, err := io.ReadAll(confResp.Body)
+	if err != nil {
+		t.Fatalf("read confirmation SSE body: %v", err)
+	}
+	confEvents := parseSSEFrames(t, string(confRaw))
+	if len(confEvents) < 4 {
+		t.Fatalf("expected at least 4 confirmation SSE events, got %d", len(confEvents))
+	}
+	if confEvents[0].Type != TurnStreamEventStarted {
+		t.Errorf("first confirmation SSE event = %q, want %q", confEvents[0].Type, TurnStreamEventStarted)
+	}
+	confLast := confEvents[len(confEvents)-1]
+	if confLast.Type != TurnStreamEventCompleted || confLast.Turn == nil {
+		t.Fatalf("last confirmation SSE event = %+v, want turn.completed with non-nil Turn", confLast)
+	}
+	if confLast.Turn.Outcome != OutcomeDefendedSuccess {
+		t.Errorf("confirmation turn.completed outcome = %q, want %q", confLast.Turn.Outcome, OutcomeDefendedSuccess)
+	}
+}
+

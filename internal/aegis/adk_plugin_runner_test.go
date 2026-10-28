@@ -448,3 +448,113 @@ func TestAegisSecurityPlugin_PersonaSessionPartition_MultiTurnAliceToBob(t *test
 		}
 	})
 }
+
+func TestExecuteTurnStream_And_ResolveConfirmationStream_EventSequence(t *testing.T) {
+	ctx := context.Background()
+	var rt aegis.AegisRuntime = aegis.NewRuntime(aegis.RuntimeConfig{})
+
+	var turnEvents []aegis.TurnStreamEvent
+	res, err := rt.ExecuteTurnStream(ctx, aegis.TurnRequest{
+		SessionID:  "sess-stream-s3",
+		Persona:    aegis.PersonaAlice,
+		ScenarioID: aegis.Scenario03AgentGatewayAndStepUp,
+		Posture:    aegis.AllBluePosture(),
+		Prompt:     "Inspect Cloud Logging and GKE cluster status, then open GitHub Pull Request #42.",
+	}, func(ev aegis.TurnStreamEvent) {
+		turnEvents = append(turnEvents, ev)
+	})
+	if err != nil {
+		t.Fatalf("ExecuteTurnStream() error = %v", err)
+	}
+	if res.Outcome != aegis.OutcomeApprovalRequired {
+		t.Fatalf("Outcome = %q, want %q", res.Outcome, aegis.OutcomeApprovalRequired)
+	}
+	if len(turnEvents) < 4 {
+		t.Fatalf("len(turnEvents) = %d, want at least 4", len(turnEvents))
+	}
+	if turnEvents[0].Type != aegis.TurnStreamEventStarted {
+		t.Errorf("first event Type = %q, want %q", turnEvents[0].Type, aegis.TurnStreamEventStarted)
+	}
+	lastEv := turnEvents[len(turnEvents)-1]
+	if lastEv.Type != aegis.TurnStreamEventCompleted || lastEv.Turn == nil {
+		t.Fatalf("last event = %+v, want %q with non-nil Turn", lastEv, aegis.TurnStreamEventCompleted)
+	}
+
+	var stepCount, wireCount, cardCount, deltaCount int
+	for _, ev := range turnEvents {
+		switch ev.Type {
+		case aegis.TurnStreamEventBoundaryStep:
+			if ev.Step == nil {
+				t.Errorf("boundary.step event has nil Step: %+v", ev)
+			}
+			stepCount++
+		case aegis.TurnStreamEventWireRecord:
+			if ev.Record == nil {
+				t.Errorf("wire.record event has nil Record: %+v", ev)
+			}
+			wireCount++
+		case aegis.TurnStreamEventA2UICard:
+			if ev.Card == nil {
+				t.Errorf("a2ui.card event has nil Card: %+v", ev)
+			}
+			cardCount++
+		case aegis.TurnStreamEventTextDelta:
+			if ev.Delta == "" {
+				t.Errorf("text.delta event has empty Delta: %+v", ev)
+			}
+			deltaCount++
+		}
+	}
+	if stepCount != len(res.BoundaryTrace) {
+		t.Errorf("stepCount = %d, want len(res.BoundaryTrace) = %d", stepCount, len(res.BoundaryTrace))
+	}
+	if wireCount != len(res.WireRecords) {
+		t.Errorf("wireCount = %d, want len(res.WireRecords) = %d", wireCount, len(res.WireRecords))
+	}
+	if cardCount != len(res.Cards) {
+		t.Errorf("cardCount = %d, want len(res.Cards) = %d", cardCount, len(res.Cards))
+	}
+	if deltaCount == 0 {
+		t.Errorf("deltaCount = 0, expected at least 1 text.delta event")
+	}
+
+	var confirmEvents []aegis.TurnStreamEvent
+	approvedRes, err := rt.ResolveConfirmationStream(ctx, aegis.ConfirmationResolution{
+		SessionID:      "sess-stream-s3",
+		ConfirmationID: res.StepUpConfirmation.ConfirmationID,
+		Confirmed:      true,
+	}, func(ev aegis.TurnStreamEvent) {
+		confirmEvents = append(confirmEvents, ev)
+	})
+	if err != nil {
+		t.Fatalf("ResolveConfirmationStream() error = %v", err)
+	}
+	if approvedRes.Outcome != aegis.OutcomeDefendedSuccess {
+		t.Fatalf("approved Outcome = %q, want %q", approvedRes.Outcome, aegis.OutcomeDefendedSuccess)
+	}
+	if len(confirmEvents) < 4 {
+		t.Fatalf("len(confirmEvents) = %d, want at least 4", len(confirmEvents))
+	}
+	if confirmEvents[0].Type != aegis.TurnStreamEventStarted {
+		t.Errorf("confirm first event Type = %q, want %q", confirmEvents[0].Type, aegis.TurnStreamEventStarted)
+	}
+	if confirmEvents[len(confirmEvents)-1].Type != aegis.TurnStreamEventCompleted {
+		t.Errorf("confirm last event Type = %q, want %q", confirmEvents[len(confirmEvents)-1].Type, aegis.TurnStreamEventCompleted)
+	}
+	var confirmSteps, confirmCards int
+	for _, ev := range confirmEvents {
+		switch ev.Type {
+		case aegis.TurnStreamEventBoundaryStep:
+			confirmSteps++
+		case aegis.TurnStreamEventA2UICard:
+			confirmCards++
+		}
+	}
+	if confirmSteps != len(approvedRes.BoundaryTrace) {
+		t.Errorf("confirmSteps = %d, want len(approvedRes.BoundaryTrace) = %d", confirmSteps, len(approvedRes.BoundaryTrace))
+	}
+	if confirmCards != len(approvedRes.Cards) {
+		t.Errorf("confirmCards = %d, want len(approvedRes.Cards) = %d", confirmCards, len(approvedRes.Cards))
+	}
+}
+

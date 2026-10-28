@@ -275,11 +275,41 @@ type ConsentResult struct {
 	Session   *SessionSnapshot `json:"session,omitempty"`
 }
 
+// TurnStreamEventType identifies one of the 6 real-time SSE frames in ADR-0009.
+type TurnStreamEventType string
+
+const (
+	TurnStreamEventStarted      TurnStreamEventType = "turn.started"
+	TurnStreamEventBoundaryStep TurnStreamEventType = "boundary.step"
+	TurnStreamEventWireRecord   TurnStreamEventType = "wire.record"
+	TurnStreamEventTextDelta    TurnStreamEventType = "text.delta"
+	TurnStreamEventA2UICard     TurnStreamEventType = "a2ui.card"
+	TurnStreamEventCompleted    TurnStreamEventType = "turn.completed"
+)
+
+// TurnStreamEvent is a single frame emitted over the Turn Event Stream (SSE) during a turn.
+type TurnStreamEvent struct {
+	Type       TurnStreamEventType `json:"type"`
+	SessionID  string              `json:"sessionId"`
+	Persona    PersonaID           `json:"persona"`
+	ScenarioID ScenarioID          `json:"scenarioId,omitempty"`
+	Step       *BoundaryTraceEvent `json:"step,omitempty"`
+	Record     *OutboundWireRecord `json:"record,omitempty"`
+	Delta      string              `json:"delta,omitempty"`
+	Card       *A2UICard           `json:"card,omitempty"`
+	Turn       *TurnResult         `json:"turn,omitempty"`
+}
+
+// TurnEventSink receives real-time TurnStreamEvent frames as a turn executes.
+type TurnEventSink func(TurnStreamEvent)
+
 // AegisRuntime defines the primary in-process seam for executing turns, resolving HITL
 // confirmations, completing 3LO OAuth callbacks, and inspecting session state.
 type AegisRuntime interface {
 	ExecuteTurn(ctx context.Context, req TurnRequest) (*TurnResult, error)
+	ExecuteTurnStream(ctx context.Context, req TurnRequest, sink TurnEventSink) (*TurnResult, error)
 	ResolveConfirmation(ctx context.Context, res ConfirmationResolution) (*TurnResult, error)
+	ResolveConfirmationStream(ctx context.Context, res ConfirmationResolution, sink TurnEventSink) (*TurnResult, error)
 	CompleteOAuthConsent(ctx context.Context, cb OAuthCallback) (*ConsentResult, error)
 	GetSessionState(ctx context.Context, sessionID string) (*SessionSnapshot, error)
 	GetSourcesStatus(ctx context.Context) ([]SourceStatus, error)

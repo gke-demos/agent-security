@@ -2,7 +2,6 @@
   "use strict";
 
   const SESSION_ID = "arena-live-session";
-  const STEP_DELAY_MS = 220;
 
   const CARD_CATALOG_ICONS = {
     IncidentSummaryCard:
@@ -59,10 +58,10 @@
     scenarios: {},
   };
 
-  function sleep(ms) {
-    return new Promise(function (resolve) {
-      setTimeout(resolve, ms);
-    });
+  function parseStaticSVG(svgMarkup) {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(svgMarkup, "image/svg+xml");
+    return doc.documentElement ? doc.documentElement.cloneNode(true) : document.createTextNode("");
   }
 
   function initThemeToggle() {
@@ -275,7 +274,10 @@
 
     const typeBadge = document.createElement("span");
     typeBadge.className = "a2ui-card-type";
-    typeBadge.innerHTML = (CARD_CATALOG_ICONS[cardType] || CARD_CATALOG_ICONS.IncidentSummaryCard) + " ";
+    typeBadge.appendChild(
+      parseStaticSVG(CARD_CATALOG_ICONS[cardType] || CARD_CATALOG_ICONS.IncidentSummaryCard)
+    );
+    typeBadge.appendChild(document.createTextNode(" "));
     const typeLabel = document.createElement("span");
     typeLabel.textContent = cardType;
     typeBadge.appendChild(typeLabel);
@@ -385,22 +387,25 @@
       if (btnEl) {
         btnEl.textContent = confirmed ? "Approved" : "Rejected";
       }
-      const resp = await fetch("/api/sessions/" + encodeURIComponent(state.sessionId) + "/confirmations", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          confirmationId: payload.confirmationId || "",
-          confirmed: confirmed,
-        }),
-      });
+      const userLabel = confirmed
+        ? "Approved step-up confirmation: proceed with remediation PR"
+        : "Rejected step-up confirmation: abort state-mutating action";
+      const resp = await fetch(
+        "/api/sessions/" + encodeURIComponent(state.sessionId) + "/confirmations/stream",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "text/event-stream",
+          },
+          body: JSON.stringify({
+            confirmationId: payload.confirmationId || "",
+            confirmed: confirmed,
+          }),
+        }
+      );
       if (resp.ok) {
-        const turnResult = await resp.json();
-        await renderTurnInChat(
-          confirmed
-            ? "Approved step-up confirmation: proceed with remediation PR"
-            : "Rejected step-up confirmation: abort state-mutating action",
-          turnResult
-        );
+        await consumeTurnSSEStream(resp, userLabel, state.persona, state.scenarioId);
       }
     }
   }
@@ -422,7 +427,7 @@
         turn.sanitizedInputPreview || turn.outboundCommentPreview || turn.assistantText || "";
     }
     if (wireList) {
-      wireList.innerHTML = "";
+      wireList.replaceChildren();
       (turn.wireRecords || []).forEach(function (rec) {
         const row = document.createElement("div");
         row.textContent = rec.method + " " + rec.url;
@@ -430,7 +435,7 @@
       });
     }
     if (cardsContainer) {
-      cardsContainer.innerHTML = "";
+      cardsContainer.replaceChildren();
       (turn.cards || []).forEach(function (c) {
         cardsContainer.appendChild(buildA2UICardElement(c));
       });
@@ -440,7 +445,7 @@
       if (badge) badge.textContent = "STANDBY";
     });
     if (traceList) {
-      traceList.innerHTML = "";
+      traceList.replaceChildren();
       (turn.boundaryTrace || []).forEach(function (ev) {
         const badge = document.getElementById("b-status-" + ev.boundary);
         if (badge) badge.textContent = ev.verdict;
@@ -472,16 +477,13 @@
     return badge;
   }
 
-  async function renderTurnInChat(userPromptText, turn) {
-    if (!turn) return;
-    updateReferenceContainers(turn);
-
+  function createStreamingTurnDOM(userPromptText, persona, scenarioId) {
     const welcomeEl = document.getElementById("chat-welcome");
     if (welcomeEl) welcomeEl.hidden = true;
 
     const messagesEl = document.getElementById("chat-messages");
     const streamEl = document.getElementById("chat-stream");
-    if (!messagesEl) return;
+    if (!messagesEl) return null;
 
     const turnWrap = document.createElement("div");
     turnWrap.className = "chat-turn";
@@ -493,9 +495,9 @@
     const userMeta = document.createElement("div");
     userMeta.className = "user-msg-meta";
     userMeta.textContent =
-      (turn.persona === "bob" ? "Bob (External Contractor)" : "Alice (SecOps Lead)") +
+      (persona === "bob" ? "Bob (External Contractor)" : "Alice (SecOps Lead)") +
       " · " +
-      (turn.scenarioId || state.scenarioId);
+      (scenarioId || state.scenarioId);
 
     const userBubble = document.createElement("div");
     userBubble.className = "user-msg-bubble";
@@ -511,8 +513,11 @@
 
     const avatar = document.createElement("div");
     avatar.className = "assistant-avatar";
-    avatar.innerHTML =
-      '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>';
+    avatar.appendChild(
+      parseStaticSVG(
+        '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>'
+      )
+    );
 
     const contentCol = document.createElement("div");
     contentCol.className = "assistant-content";
@@ -525,110 +530,135 @@
     headerRow.appendChild(nameSpan);
     contentCol.appendChild(headerRow);
 
-    // 2a. Progressive Step-by-Step Activity Feed
-    const traceEvents = turn.boundaryTrace || [];
-    if (traceEvents.length > 0) {
-      const stepFeed = document.createElement("div");
-      stepFeed.className = "step-feed";
-      contentCol.appendChild(stepFeed);
+    const stepFeed = document.createElement("div");
+    stepFeed.className = "step-feed";
 
-      asstRow.appendChild(avatar);
-      asstRow.appendChild(contentCol);
-      turnWrap.appendChild(asstRow);
-      messagesEl.appendChild(turnWrap);
+    const liveStatus = document.createElement("div");
+    liveStatus.className = "step-live-status";
+    const pulseDot = document.createElement("span");
+    pulseDot.className = "step-live-pulse";
+    const statusText = document.createElement("span");
+    statusText.textContent = "Evaluating security boundaries...";
+    liveStatus.appendChild(pulseDot);
+    liveStatus.appendChild(statusText);
+    stepFeed.appendChild(liveStatus);
 
-      if (streamEl) streamEl.scrollTop = streamEl.scrollHeight;
+    contentCol.appendChild(stepFeed);
 
-      for (let i = 0; i < traceEvents.length; i++) {
-        await sleep(STEP_DELAY_MS);
-        const ev = traceEvents[i];
-        const stepRow = document.createElement("div");
-        stepRow.className = "step-row";
+    asstRow.appendChild(avatar);
+    asstRow.appendChild(contentCol);
+    turnWrap.appendChild(asstRow);
+    messagesEl.appendChild(turnWrap);
 
-        const left = document.createElement("div");
-        left.className = "step-row-left";
+    if (streamEl) streamEl.scrollTop = streamEl.scrollHeight;
 
-        const iconSpan = document.createElement("span");
-        iconSpan.className = "step-icon verdict-" + ev.verdict;
-        iconSpan.innerHTML = VERDICT_ICONS[ev.verdict] || VERDICT_ICONS.ALLOWED;
+    return {
+      turnWrap: turnWrap,
+      contentCol: contentCol,
+      headerRow: headerRow,
+      stepFeed: stepFeed,
+      liveStatus: liveStatus,
+      proseEl: null,
+      cardsWrap: null,
+      streamEl: streamEl,
+      renderedStepCount: 0,
+      renderedCardCount: 0,
+    };
+  }
 
-        const labelSpan = document.createElement("span");
-        labelSpan.className = "step-label";
-        labelSpan.textContent = ev.shield;
+  function appendStepRowToFeed(dom, ev) {
+    if (!dom || !dom.stepFeed || !ev) return;
+    const stepRow = document.createElement("div");
+    stepRow.className = "step-row";
 
-        const detailSpan = document.createElement("span");
-        detailSpan.className = "step-detail-short";
-        detailSpan.textContent = "— " + ev.detail;
+    const left = document.createElement("div");
+    left.className = "step-row-left";
 
-        left.appendChild(iconSpan);
-        left.appendChild(labelSpan);
-        left.appendChild(detailSpan);
+    const iconSpan = document.createElement("span");
+    iconSpan.className = "step-icon verdict-" + ev.verdict;
+    iconSpan.appendChild(parseStaticSVG(VERDICT_ICONS[ev.verdict] || VERDICT_ICONS.ALLOWED));
 
-        const right = document.createElement("div");
-        right.className = "step-row-right";
+    const labelSpan = document.createElement("span");
+    labelSpan.className = "step-label";
+    labelSpan.textContent = ev.shield;
 
-        const pBadge = buildProvenanceBadge(ev.provenance || "FIXTURE");
+    const detailSpan = document.createElement("span");
+    detailSpan.className = "step-detail-short";
+    detailSpan.textContent = "— " + ev.detail;
 
-        const vBadge = document.createElement("span");
-        vBadge.className = "b-verdict verdict-" + ev.verdict;
-        vBadge.textContent = ev.verdict;
+    left.appendChild(iconSpan);
+    left.appendChild(labelSpan);
+    left.appendChild(detailSpan);
 
-        right.appendChild(pBadge);
-        right.appendChild(vBadge);
+    const right = document.createElement("div");
+    right.className = "step-row-right";
 
-        stepRow.appendChild(left);
-        stepRow.appendChild(right);
-        stepFeed.appendChild(stepRow);
+    const pBadge = buildProvenanceBadge(ev.provenance || "FIXTURE");
 
-        if (streamEl) streamEl.scrollTop = streamEl.scrollHeight;
-      }
+    const vBadge = document.createElement("span");
+    vBadge.className = "b-verdict verdict-" + ev.verdict;
+    vBadge.textContent = ev.verdict;
+
+    right.appendChild(pBadge);
+    right.appendChild(vBadge);
+
+    stepRow.appendChild(left);
+    stepRow.appendChild(right);
+    if (dom.liveStatus && dom.liveStatus.parentNode === dom.stepFeed) {
+      dom.stepFeed.insertBefore(stepRow, dom.liveStatus);
     } else {
-      asstRow.appendChild(avatar);
-      asstRow.appendChild(contentCol);
-      turnWrap.appendChild(asstRow);
-      messagesEl.appendChild(turnWrap);
+      dom.stepFeed.appendChild(stepRow);
     }
+    dom.renderedStepCount += 1;
 
-    await sleep(120);
+    const bBadge = document.getElementById("b-status-" + ev.boundary);
+    if (bBadge) bBadge.textContent = ev.verdict;
 
-    // 2b. Outcome Badge in Assistant Header
-    const outPres = getOutcomePresentation(turn.outcome);
-    const outPill = document.createElement("span");
-    outPill.className = "outcome-pill " + outPres.cls;
-    outPill.textContent = outPres.label;
-    headerRow.appendChild(outPill);
+    if (dom.streamEl) dom.streamEl.scrollTop = dom.streamEl.scrollHeight;
+  }
 
-    // 2c. Assistant Prose Summary
-    if (turn.assistantText) {
-      const prose = document.createElement("p");
-      prose.className = "assistant-prose";
-      prose.textContent = turn.assistantText;
-      contentCol.appendChild(prose);
+  function updateStreamingProse(dom, text) {
+    if (!dom || !text) return;
+    if (!dom.proseEl) {
+      dom.proseEl = document.createElement("p");
+      dom.proseEl.className = "assistant-prose";
+      dom.contentCol.appendChild(dom.proseEl);
     }
+    dom.proseEl.textContent = text;
+    if (dom.streamEl) dom.streamEl.scrollTop = dom.streamEl.scrollHeight;
+  }
 
-    // 2d. Inline A2UI v0.9 Cards
-    if (Array.isArray(turn.cards) && turn.cards.length > 0) {
-      const cardsWrap = document.createElement("div");
-      cardsWrap.className = "a2ui-cards-container";
-      turn.cards.forEach(function (card) {
-        cardsWrap.appendChild(buildA2UICardElement(card));
-      });
-      contentCol.appendChild(cardsWrap);
+  function appendStreamingCard(dom, card) {
+    if (!dom || !card) return;
+    if (!dom.cardsWrap) {
+      dom.cardsWrap = document.createElement("div");
+      dom.cardsWrap.className = "a2ui-cards-container";
+      dom.contentCol.appendChild(dom.cardsWrap);
     }
+    dom.cardsWrap.appendChild(buildA2UICardElement(card));
+    dom.renderedCardCount += 1;
+    if (dom.streamEl) dom.streamEl.scrollTop = dom.streamEl.scrollHeight;
+  }
 
-    // 2e. Collapsible Inline Security Trace & Wire Audit Drawer
+  function buildTraceDrawer(turn) {
+    const traceEvents = turn.boundaryTrace || [];
     const details = document.createElement("details");
     details.className = "turn-trace-drawer";
 
     const summary = document.createElement("summary");
     summary.className = "turn-trace-summary";
     const wireCount = (turn.wireRecords || []).length;
-    summary.innerHTML =
-      "<span>Inspect security trace &amp; HTTP wire audit (" +
+    const summaryLeft = document.createElement("span");
+    summaryLeft.textContent =
+      "Inspect security trace & HTTP wire audit (" +
       traceEvents.length +
       " boundary checks, " +
       wireCount +
-      " outbound calls)</span><span>Expand</span>";
+      " outbound calls)";
+    const summaryRight = document.createElement("span");
+    summaryRight.textContent = "Expand";
+    summary.appendChild(summaryLeft);
+    summary.appendChild(summaryRight);
     details.appendChild(summary);
 
     const drawerBody = document.createElement("div");
@@ -716,9 +746,123 @@
     }
 
     details.appendChild(drawerBody);
-    contentCol.appendChild(details);
+    return details;
+  }
 
-    if (streamEl) streamEl.scrollTop = streamEl.scrollHeight;
+  function finalizeTurnDOM(dom, turn) {
+    if (!dom || !turn) return;
+    if (dom.liveStatus && dom.liveStatus.parentNode) {
+      dom.liveStatus.parentNode.removeChild(dom.liveStatus);
+    }
+
+    const traceEvents = turn.boundaryTrace || [];
+    if (dom.renderedStepCount === 0 && traceEvents.length > 0) {
+      traceEvents.forEach(function (ev) {
+        appendStepRowToFeed(dom, ev);
+      });
+    }
+    if (dom.renderedStepCount === 0 && dom.stepFeed && dom.stepFeed.parentNode) {
+      dom.stepFeed.parentNode.removeChild(dom.stepFeed);
+    }
+
+    const outPres = getOutcomePresentation(turn.outcome);
+    const outPill = document.createElement("span");
+    outPill.className = "outcome-pill " + outPres.cls;
+    outPill.textContent = outPres.label;
+    dom.headerRow.appendChild(outPill);
+
+    if (turn.assistantText) {
+      updateStreamingProse(dom, turn.assistantText);
+    }
+
+    if (dom.renderedCardCount === 0 && Array.isArray(turn.cards) && turn.cards.length > 0) {
+      turn.cards.forEach(function (card) {
+        appendStreamingCard(dom, card);
+      });
+    }
+
+    dom.contentCol.appendChild(buildTraceDrawer(turn));
+    updateReferenceContainers(turn);
+
+    if (dom.streamEl) dom.streamEl.scrollTop = dom.streamEl.scrollHeight;
+  }
+
+  async function renderTurnInChat(userPromptText, turn) {
+    if (!turn) return;
+    const dom = createStreamingTurnDOM(
+      userPromptText,
+      turn.persona || state.persona,
+      turn.scenarioId || state.scenarioId
+    );
+    if (!dom) return;
+    finalizeTurnDOM(dom, turn);
+  }
+
+  async function consumeTurnSSEStream(resp, userPromptText, persona, scenarioId) {
+    const contentType = (resp.headers && resp.headers.get && resp.headers.get("content-type")) || "";
+    if (!resp.body || typeof resp.body.getReader !== "function" || contentType.indexOf("application/json") !== -1) {
+      const turn = await resp.json();
+      await renderTurnInChat(userPromptText, turn);
+      return;
+    }
+
+    let dom = createStreamingTurnDOM(userPromptText, persona, scenarioId);
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+
+    function processSSEBlock(block) {
+      const trimmed = block.trim();
+      if (!trimmed) return;
+      let eventType = "";
+      let dataLine = "";
+      trimmed.split("\n").forEach(function (line) {
+        if (line.indexOf("event:") === 0) {
+          eventType = line.slice(6).trim();
+        } else if (line.indexOf("data:") === 0) {
+          dataLine = line.slice(5).trim();
+        }
+      });
+      if (!dataLine) return;
+      let payload = null;
+      try {
+        payload = JSON.parse(dataLine);
+      } catch (err) {
+        console.error("Failed to parse SSE JSON frame:", err);
+        return;
+      }
+      const type = eventType || payload.type;
+      if (type === "turn.started") {
+        if (!dom) {
+          dom = createStreamingTurnDOM(
+            userPromptText,
+            payload.persona || persona,
+            payload.scenarioId || scenarioId
+          );
+        }
+      } else if (type === "boundary.step" && payload.step) {
+        appendStepRowToFeed(dom, payload.step);
+      } else if (type === "text.delta" && payload.delta) {
+        updateStreamingProse(dom, payload.delta);
+      } else if (type === "a2ui.card" && payload.card) {
+        appendStreamingCard(dom, payload.card);
+      } else if (type === "turn.completed" && payload.turn) {
+        finalizeTurnDOM(dom, payload.turn);
+      }
+    }
+
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      buffer += decoder.decode(chunk.value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop() || "";
+      parts.forEach(processSSEBlock);
+    }
+    buffer += decoder.decode();
+    if (buffer.trim()) {
+      buffer.split("\n\n").forEach(processSSEBlock);
+    }
   }
 
   async function executeTurn(opts) {
@@ -746,14 +890,24 @@
     };
 
     try {
-      const resp = await fetch("/api/sessions/" + encodeURIComponent(state.sessionId) + "/turns", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(reqBody),
-      });
+      const resp = await fetch(
+        "/api/sessions/" + encodeURIComponent(state.sessionId) + "/turns/stream",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "text/event-stream",
+          },
+          body: JSON.stringify(reqBody),
+        }
+      );
       if (!resp.ok) return;
-      const turn = await resp.json();
-      await renderTurnInChat(options.userLabelOverride || promptText, turn);
+      await consumeTurnSSEStream(
+        resp,
+        options.userLabelOverride || promptText,
+        state.persona,
+        state.scenarioId
+      );
     } catch (err) {
       console.error("executeTurn failed:", err);
     }
@@ -762,7 +916,7 @@
   function clearChatToWelcome() {
     const messagesEl = document.getElementById("chat-messages");
     const welcomeEl = document.getElementById("chat-welcome");
-    if (messagesEl) messagesEl.innerHTML = "";
+    if (messagesEl) messagesEl.replaceChildren();
     if (welcomeEl) welcomeEl.hidden = false;
   }
 

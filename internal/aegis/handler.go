@@ -2,8 +2,15 @@ package aegis
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"sync"
 )
+
+// NewHTTPHandler is an alias for NewHandler for callers expecting the standard HTTP mux constructor name.
+func NewHTTPHandler(rt *Runtime) http.Handler {
+	return NewHandler(rt)
+}
 
 // NewHandler creates the HTTP ServeMux for AegisRuntime and applies all registered route extensions.
 func NewHandler(rt *Runtime) http.Handler {
@@ -54,6 +61,20 @@ func NewHandler(rt *Runtime) http.Handler {
 		writeJSON(w, http.StatusOK, res)
 	})
 
+	mux.HandleFunc("POST /api/sessions/{sessionId}/turns/stream", func(w http.ResponseWriter, r *http.Request) {
+		sessionID := r.PathValue("sessionId")
+		var req TurnRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		req.SessionID = sessionID
+		sink := initSSESink(w)
+		if _, err := rt.ExecuteTurnStream(r.Context(), req, sink); err != nil {
+			writeSSEError(w, err)
+		}
+	})
+
 	registeredScenarioHandlersMu.RLock()
 	routes := append([]HTTPRouteRegistrar(nil), registeredHTTPRoutes...)
 	registeredScenarioHandlersMu.RUnlock()
@@ -62,6 +83,39 @@ func NewHandler(rt *Runtime) http.Handler {
 	}
 
 	return mux
+}
+
+func initSSESink(w http.ResponseWriter) TurnEventSink {
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	if flusher != nil {
+		flusher.Flush()
+	}
+	var mu sync.Mutex
+	return func(ev TurnStreamEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		payload, err := json.Marshal(ev)
+		if err != nil {
+			return
+		}
+		_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, payload)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+}
+
+func writeSSEError(w http.ResponseWriter, err error) {
+	payload, _ := json.Marshal(map[string]string{"error": err.Error()})
+	_, _ = fmt.Fprintf(w, "event: turn.error\ndata: %s\n\n", payload)
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {

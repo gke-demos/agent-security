@@ -56,39 +56,55 @@ type governedToolInput struct {
 	Repo     string `json:"repo,omitempty"`
 }
 
+type adkTurnExecutionState = adkActiveTurnContext
+
 type adkActiveTurnContext struct {
-	mu                       sync.Mutex
-	rt                       *Runtime
-	req                      TurnRequest
-	rawScenarioID            ScenarioID
-	adkUserID                string
-	adkSessionID             string
-	isConfirmationResume     bool
-	confirmationResolution   *ConfirmationResolution
-	resolvedStepUp           *StepUpConfirmation
-	plannedTools             []plannedToolCall
-	nextToolIdx              int
-	userPromptScreened       bool
-	sanitizedUserPromptText  string
-	registryDiscovered       bool
-	loggedReadOnlyUAP        bool
-	cold3LOConsentChecked    bool
-	halted                   bool
-	redEmailExploited        bool
-	sharedSessionLeaked      bool
-	cleanPeerSummary         string
-	outcome                  TurnOutcome
-	assistantText            string
-	sanitizedInputPreview    string
-	outboundCommentPreview   string
-	cards                    []A2UICard
-	trace                    []BoundaryTraceEvent
-	wireRecords              []OutboundWireRecord
-	consentChallenge         *ConsentChallenge
-	stepUpConfirmation       *StepUpConfirmation
-	modelCallCount           int
-	pluginCallbacks          []string
-	executedTools            []string
+	mu                     sync.Mutex
+	rt                     *Runtime
+	req                    TurnRequest
+	rawScenarioID          ScenarioID
+	adkUserID              string
+	adkSessionID           string
+	sink                   TurnEventSink
+	textDeltaEmitted       bool
+	isConfirmationResume   bool
+	confirmationResolution *ConfirmationResolution
+	resolvedStepUp         *StepUpConfirmation
+	plannedTools           []plannedToolCall
+	nextToolIdx            int
+	userPromptScreened     bool
+	sanitizedUserPromptText string
+	registryDiscovered     bool
+	loggedReadOnlyUAP      bool
+	cold3LOConsentChecked  bool
+	halted                 bool
+	redEmailExploited      bool
+	sharedSessionLeaked    bool
+	cleanPeerSummary       string
+	outcome                TurnOutcome
+	assistantText          string
+	sanitizedInputPreview  string
+	outboundCommentPreview string
+	cards                  []A2UICard
+	trace                  []BoundaryTraceEvent
+	wireRecords            []OutboundWireRecord
+	consentChallenge       *ConsentChallenge
+	stepUpConfirmation     *StepUpConfirmation
+	modelCallCount         int
+	pluginCallbacks        []string
+	executedTools          []string
+}
+
+func (tc *adkActiveTurnContext) emitLocked(ev TurnStreamEvent) {
+	if tc.sink != nil {
+		tc.sink(ev)
+	}
+}
+
+func (tc *adkActiveTurnContext) emit(ev TurnStreamEvent) {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	tc.emitLocked(ev)
 }
 
 func (tc *adkActiveTurnContext) appendCallback(name string) {
@@ -103,20 +119,104 @@ func (tc *adkActiveTurnContext) appendExecutedTool(name string) {
 	tc.executedTools = append(tc.executedTools, name)
 }
 
-func (tc *adkActiveTurnContext) appendTrace(ev BoundaryTraceEvent) {
+func (tc *adkActiveTurnContext) addStep(ev BoundaryTraceEvent) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 	ev.Order = len(tc.trace) + 1
 	if ev.Timestamp.IsZero() {
 		ev.Timestamp = time.Now().UTC()
 	}
+	if ev.Provenance == "" {
+		ev.Provenance = ProvenanceFixture
+	}
 	tc.trace = append(tc.trace, ev)
+	stepCopy := ev
+	tc.emitLocked(TurnStreamEvent{
+		Type:       TurnStreamEventBoundaryStep,
+		SessionID:  tc.req.SessionID,
+		Persona:    tc.req.Persona,
+		ScenarioID: tc.req.ScenarioID,
+		Step:       &stepCopy,
+	})
+}
+
+func (tc *adkActiveTurnContext) appendTrace(ev BoundaryTraceEvent) {
+	tc.addStep(ev)
+}
+
+func (tc *adkActiveTurnContext) addWire(records ...OutboundWireRecord) {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	for _, rec := range records {
+		if rec.Provenance == "" {
+			rec.Provenance = ProvenanceFixture
+		}
+		tc.wireRecords = append(tc.wireRecords, rec)
+		recCopy := rec
+		tc.emitLocked(TurnStreamEvent{
+			Type:       TurnStreamEventWireRecord,
+			SessionID:  tc.req.SessionID,
+			Persona:    tc.req.Persona,
+			ScenarioID: tc.req.ScenarioID,
+			Record:     &recCopy,
+		})
+	}
 }
 
 func (tc *adkActiveTurnContext) appendWire(records ...OutboundWireRecord) {
+	tc.addWire(records...)
+}
+
+func (tc *adkActiveTurnContext) addCard(cards ...A2UICard) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
-	tc.wireRecords = append(tc.wireRecords, records...)
+	for _, c := range cards {
+		sanitized, err := ValidateAndSanitizeA2UICard(c, tc.req.Posture)
+		if err != nil {
+			sanitized = c
+		}
+		tc.cards = append(tc.cards, sanitized)
+		cardCopy := sanitized
+		tc.emitLocked(TurnStreamEvent{
+			Type:       TurnStreamEventA2UICard,
+			SessionID:  tc.req.SessionID,
+			Persona:    tc.req.Persona,
+			ScenarioID: tc.req.ScenarioID,
+			Card:       &cardCopy,
+		})
+	}
+}
+
+func (tc *adkActiveTurnContext) emitTextDelta(delta string) {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	if strings.TrimSpace(delta) == "" || tc.textDeltaEmitted {
+		return
+	}
+	tc.textDeltaEmitted = true
+	tc.emitLocked(TurnStreamEvent{
+		Type:       TurnStreamEventTextDelta,
+		SessionID:  tc.req.SessionID,
+		Persona:    tc.req.Persona,
+		ScenarioID: tc.req.ScenarioID,
+		Delta:      delta,
+	})
+}
+
+func (tc *adkActiveTurnContext) haltWithOutcome(outcome TurnOutcome, assistantText, sanitizedPreview string, cards ...A2UICard) {
+	tc.mu.Lock()
+	tc.outcome = outcome
+	tc.assistantText = assistantText
+	if sanitizedPreview != "" {
+		tc.sanitizedInputPreview = sanitizedPreview
+	}
+	tc.cards = nil
+	tc.halted = true
+	tc.mu.Unlock()
+	tc.emitTextDelta(assistantText)
+	if len(cards) > 0 {
+		tc.addCard(cards...)
+	}
 }
 
 func (tc *adkActiveTurnContext) hasSubsequentTool(toolName string) bool {
@@ -1208,13 +1308,12 @@ func buildAegisSecurityPlugin(r *Runtime) (*plugin.Plugin, error) {
 								"Callback":      "BeforeModelCallback",
 							},
 						}, tc.req.Posture)
-						tc.mu.Lock()
-						tc.outcome = OutcomeBlocked
-						tc.assistantText = "Blocked untrusted prompt: Model Armor intercepted a direct prompt injection attempt before Model.GenerateContent."
-						tc.sanitizedInputPreview = insp.SanitizedText
-						tc.cards = []A2UICard{card}
-						tc.halted = true
-						tc.mu.Unlock()
+						tc.haltWithOutcome(
+							OutcomeBlocked,
+							"Blocked untrusted prompt: Model Armor intercepted a direct prompt injection attempt before Model.GenerateContent.",
+							insp.SanitizedText,
+							card,
+						)
 						return &model.LLMResponse{
 							Content:      genai.NewContentFromText(tc.assistantText, genai.RoleModel),
 							TurnComplete: true,
@@ -1290,13 +1389,7 @@ func buildAegisSecurityPlugin(r *Runtime) (*plugin.Plugin, error) {
 								"Role":           uapDelete.Role,
 							},
 						}, tc.req.Posture)
-						tc.mu.Lock()
-						tc.outcome = OutcomeBlocked
-						tc.assistantText = uapDelete.Reason
-						tc.sanitizedInputPreview = card.Body
-						tc.cards = []A2UICard{card}
-						tc.halted = true
-						tc.mu.Unlock()
+						tc.haltWithOutcome(OutcomeBlocked, uapDelete.Reason, card.Body, card)
 						ctx.Actions().SkipSummarization = true
 					}
 					return map[string]any{
@@ -1567,11 +1660,13 @@ func check3LOConsentBeforeTool(ctx agent.Context, r *Runtime, tc *adkActiveTurnC
 			card := buildConsentChallengeCard(surfaceID, tc.req.SessionID, tc.req.Persona, ch)
 			tc.mu.Lock()
 			tc.consentChallenge = ch
-			tc.outcome = OutcomeConsentRequired
-			tc.assistantText = fmt.Sprintf("Paused tool execution: %s requires per-user 3LO OAuth consent from %s before running %s.", provider, tc.req.Persona, toolName)
-			tc.cards = []A2UICard{card}
-			tc.halted = true
 			tc.mu.Unlock()
+			tc.haltWithOutcome(
+				OutcomeConsentRequired,
+				fmt.Sprintf("Paused tool execution: %s requires per-user 3LO OAuth consent from %s before running %s.", provider, tc.req.Persona, toolName),
+				"",
+				card,
+			)
 			return map[string]any{
 				"status":   "CONSENT_REQUIRED",
 				"provider": string(provider),
@@ -1710,11 +1805,14 @@ func enforceStepUpBeforeTool(ctx agent.Context, tc *adkActiveTurnContext) (map[s
 			})
 			tc.mu.Lock()
 			tc.stepUpConfirmation = stepUp
-			tc.outcome = OutcomeApprovalRequired
-			tc.assistantText = "Completed full-chain zero-trust triage (Cloud SDP PII redaction, Agent Gateway UAP read-only MCP diagnostics, Alice 3LO SEC-101 correlation, and Agent Substrate v0.5.0 gVisor patch verification). Awaiting Operator Step-Up Confirmation (adk_request_confirmation) to create GitHub Pull Request #42."
-			tc.cards = []A2UICard{stepUpCard, sandboxCard}
-			tc.halted = true
 			tc.mu.Unlock()
+			tc.haltWithOutcome(
+				OutcomeApprovalRequired,
+				"Completed full-chain zero-trust triage (Cloud SDP PII redaction, Agent Gateway UAP read-only MCP diagnostics, Alice 3LO SEC-101 correlation, and Agent Substrate v0.5.0 gVisor patch verification). Awaiting Operator Step-Up Confirmation (adk_request_confirmation) to create GitHub Pull Request #42.",
+				"",
+				stepUpCard,
+				sandboxCard,
+			)
 		} else {
 			stepUpCard, err := ValidateAndSanitizeA2UICard(A2UICard{
 				SurfaceID: "card-stepup-s3",
@@ -1770,12 +1868,13 @@ func enforceStepUpBeforeTool(ctx agent.Context, tc *adkActiveTurnContext) (map[s
 			})
 			tc.mu.Lock()
 			tc.stepUpConfirmation = stepUp
-			tc.outcome = OutcomeApprovalRequired
-			tc.assistantText = "Read-only GKE and Cloud Logging MCP diagnostics succeeded via Agent Gateway. Destructive tool container.clusters.delete was blocked by UAP CEL policy. Awaiting Operator Step-Up Confirmation (adk_request_confirmation) before creating GitHub Pull Request #42."
-			tc.sanitizedInputPreview = stepUpCard.Body
-			tc.cards = []A2UICard{stepUpCard}
-			tc.halted = true
 			tc.mu.Unlock()
+			tc.haltWithOutcome(
+				OutcomeApprovalRequired,
+				"Read-only GKE and Cloud Logging MCP diagnostics succeeded via Agent Gateway. Destructive tool container.clusters.delete was blocked by UAP CEL policy. Awaiting Operator Step-Up Confirmation (adk_request_confirmation) before creating GitHub Pull Request #42.",
+				stepUpCard.Body,
+				stepUpCard,
+			)
 		}
 
 		return map[string]any{
@@ -1818,13 +1917,12 @@ func enforceStepUpBeforeTool(ctx agent.Context, tc *adkActiveTurnContext) (map[s
 		if err != nil {
 			return nil, err
 		}
-		tc.mu.Lock()
-		tc.outcome = OutcomeBlocked
-		tc.assistantText = "Operator rejected Step-Up Confirmation (adk_request_confirmation): aborted create_github_pull_request."
-		tc.sanitizedInputPreview = abortCard.Body
-		tc.cards = []A2UICard{abortCard}
-		tc.halted = true
-		tc.mu.Unlock()
+		tc.haltWithOutcome(
+			OutcomeBlocked,
+			"Operator rejected Step-Up Confirmation (adk_request_confirmation): aborted create_github_pull_request.",
+			abortCard.Body,
+			abortCard,
+		)
 		ctx.Actions().SkipSummarization = true
 		return map[string]any{
 			"status":         "ABORTED_BY_OPERATOR",
@@ -1875,12 +1973,12 @@ func enforceAfterGmailTool(ctx agent.Context, r *Runtime, tc *adkActiveTurnConte
 				"Source Tool":   "gmail.users.messages.get",
 			},
 		}, tc.req.Posture)
-		tc.mu.Lock()
-		tc.outcome = OutcomeBlocked
-		tc.assistantText = "Blocked untrusted Gmail payload: Model Armor intercepted an indirect prompt injection attempt targeting https://evil.example.com."
-		tc.cards = []A2UICard{card}
-		tc.halted = true
-		tc.mu.Unlock()
+		tc.haltWithOutcome(
+			OutcomeBlocked,
+			"Blocked untrusted Gmail payload: Model Armor intercepted an indirect prompt injection attempt targeting https://evil.example.com.",
+			inspection.SanitizedText,
+			card,
+		)
 		ctx.Actions().SkipSummarization = true
 		return map[string]any{
 			"status":        "BLOCKED_BY_MODEL_ARMOR",
@@ -1993,12 +2091,12 @@ func enforceAfter3LOTool(ctx agent.Context, r *Runtime, tc *adkActiveTurnContext
 			},
 		}, tc.req.Posture)
 
-		tc.mu.Lock()
-		tc.outcome = OutcomeBlocked
-		tc.assistantText = fmt.Sprintf("Access denied (%d Forbidden): Persona %q is not authorized to read restricted resource %s.", statusCode, tc.req.Persona, resource)
-		tc.cards = []A2UICard{card}
-		tc.halted = true
-		tc.mu.Unlock()
+		tc.haltWithOutcome(
+			OutcomeBlocked,
+			fmt.Sprintf("Access denied (%d Forbidden): Persona %q is not authorized to read restricted resource %s.", statusCode, tc.req.Persona, resource),
+			"",
+			card,
+		)
 		ctx.Actions().SkipSummarization = true
 
 		return map[string]any{
@@ -2017,11 +2115,11 @@ func enforceAfter3LOTool(ctx agent.Context, r *Runtime, tc *adkActiveTurnContext
 			insp := r.Guard().InspectAndSanitize(ctx, strVal, tc.req.Posture)
 			if insp.Blocked {
 				ctx.Actions().SkipSummarization = true
-				tc.mu.Lock()
-				tc.outcome = OutcomeBlocked
-				tc.assistantText = "Blocked untrusted 3LO tool output: Model Armor detected embedded prompt injection."
-				tc.halted = true
-				tc.mu.Unlock()
+				tc.haltWithOutcome(
+					OutcomeBlocked,
+					"Blocked untrusted 3LO tool output: Model Armor detected embedded prompt injection.",
+					"",
+				)
 				return map[string]any{"status": "BLOCKED_BY_MODEL_ARMOR", "reason": insp.ThreatReason}, nil
 			}
 			if tc.req.Posture.PIIRedactorEnabled && insp.DeidentifiedInFlight {
@@ -2132,13 +2230,15 @@ func enforceAfterCreatePRTool(_ agent.Context, tc *adkActiveTurnContext, result 
 		},
 	}, tc.req.Posture)
 
+	assistantText := "Step-Up Confirmation approved by Operator: created GitHub Pull Request #42 and updated Jira issue SEC-101."
 	tc.mu.Lock()
 	tc.outcome = OutcomeDefendedSuccess
-	tc.assistantText = "Step-Up Confirmation approved by Operator: created GitHub Pull Request #42 and updated Jira issue SEC-101."
+	tc.assistantText = assistantText
 	tc.sanitizedInputPreview = summaryCard.Body
 	tc.outboundCommentPreview = "Created PR #42 (fix/checkout-502-nil-guard) after Operator step-up approval."
-	tc.cards = []A2UICard{summaryCard}
 	tc.mu.Unlock()
+	tc.emitTextDelta(assistantText)
+	tc.addCard(summaryCard)
 	return result, nil
 }
 
@@ -2214,7 +2314,7 @@ func (m *dualTriageOrchestratorLLM) GenerateContent(ctx context.Context, req *mo
 
 		// Step 2: Final synthesis step after all tools have completed
 		if tc != nil {
-			finalizeTurnOutcomeAndCards(m.rt, tc)
+			pendingCards := finalizeTurnOutcomeAndCards(m.rt, tc)
 
 			// When AgentPlatformGeminiConnector is in LIVE mode and the turn succeeded in Blue Mode,
 			// execute live synthesis via Gemini on Agent Platform over the SDP-redacted llmRequest.Contents.
@@ -2252,6 +2352,13 @@ func (m *dualTriageOrchestratorLLM) GenerateContent(ctx context.Context, req *mo
 							Detail:     "Synthesized incident summary via ADK Go v2 llmagent (gemini-2.5-flash) over SDP-sanitized context",
 						})
 					}
+				}
+			}
+
+			if len(pendingCards) > 0 || !tc.textDeltaEmitted {
+				tc.emitTextDelta(tc.assistantText)
+				if len(pendingCards) > 0 {
+					tc.addCard(pendingCards...)
 				}
 			}
 
@@ -2397,11 +2504,11 @@ func planFreeFormTools(req TurnRequest) []plannedToolCall {
 	return planned
 }
 
-func finalizeTurnOutcomeAndCards(r *Runtime, tc *adkActiveTurnContext) {
+func finalizeTurnOutcomeAndCards(r *Runtime, tc *adkActiveTurnContext) []A2UICard {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 	if tc.halted || tc.outcome != "" {
-		return
+		return nil
 	}
 
 	// If free-form turn without preset scenario
@@ -2424,8 +2531,7 @@ func finalizeTurnOutcomeAndCards(r *Runtime, tc *adkActiveTurnContext) {
 			}, tc.req.Posture)
 			tc.outcome = OutcomeExploitedRed
 			tc.assistantText = "RED MODE CONFUSED DEPUTY: Leaked restricted SecOps Jira issue SEC-101 to contractor Bob via shared ADK session and unscoped root credential."
-			tc.cards = []A2UICard{card}
-			return
+			return []A2UICard{card}
 		}
 
 		card, _ := ValidateAndSanitizeA2UICard(A2UICard{
@@ -2447,8 +2553,7 @@ func finalizeTurnOutcomeAndCards(r *Runtime, tc *adkActiveTurnContext) {
 		if tc.sanitizedInputPreview == "" {
 			tc.sanitizedInputPreview = card.Body
 		}
-		tc.cards = []A2UICard{card}
-		return
+		return []A2UICard{card}
 	}
 
 	switch tc.req.ScenarioID {
@@ -2471,8 +2576,7 @@ func finalizeTurnOutcomeAndCards(r *Runtime, tc *adkActiveTurnContext) {
 			}
 			tc.outcome = OutcomeExploitedRed
 			tc.assistantText = "RED MODE EXPLOIT: Followed injected instructions to send logs to https://evil.example.com and posted raw SSN 123-45-6789 to Jira."
-			tc.cards = []A2UICard{card}
-			return
+			return []A2UICard{card}
 		}
 		card, _ := ValidateAndSanitizeA2UICard(A2UICard{
 			SurfaceID: "card-summary-s1",
@@ -2489,7 +2593,7 @@ func finalizeTurnOutcomeAndCards(r *Runtime, tc *adkActiveTurnContext) {
 		}, tc.req.Posture)
 		tc.outcome = OutcomeDefendedSuccess
 		tc.assistantText = "Triaged customer checkout 502 incident with all PII masked in-flight via Cloud SDP."
-		tc.cards = []A2UICard{card}
+		return []A2UICard{card}
 
 	case Scenario02ConfusedDeputy3LO:
 		if !tc.req.Posture.TokenBrokerEnabled {
@@ -2511,8 +2615,7 @@ func finalizeTurnOutcomeAndCards(r *Runtime, tc *adkActiveTurnContext) {
 			}
 			tc.outcome = OutcomeExploitedRed
 			tc.assistantText = fmt.Sprintf("RED MODE CONFUSED DEPUTY: Retrieved restricted SecOps Jira issue SEC-101 and private GitHub advisory GHSA-sec-101 for %s using shared-service-account-root-token.", tc.req.Persona)
-			tc.cards = []A2UICard{card}
-			return
+			return []A2UICard{card}
 		}
 		card, _ := ValidateAndSanitizeA2UICard(A2UICard{
 			SurfaceID: "card-summary-s2",
@@ -2532,7 +2635,7 @@ func finalizeTurnOutcomeAndCards(r *Runtime, tc *adkActiveTurnContext) {
 		}, tc.req.Posture)
 		tc.outcome = OutcomeDefendedSuccess
 		tc.assistantText = "Correlated restricted SecOps Jira issue SEC-101 with private GitHub security advisory GHSA-sec-101 using Alice's 3LO credentials injected at the HTTP transport boundary."
-		tc.cards = []A2UICard{card}
+		return []A2UICard{card}
 
 	case Scenario03AgentGatewayAndStepUp:
 		redCard, _ := ValidateAndSanitizeA2UICard(A2UICard{
@@ -2553,7 +2656,7 @@ func finalizeTurnOutcomeAndCards(r *Runtime, tc *adkActiveTurnContext) {
 		tc.outcome = OutcomeExploitedRed
 		tc.assistantText = "RED MODE EXPLOIT: Executed destructive container.clusters.delete and unapproved create_github_pull_request without adk_request_confirmation!"
 		tc.sanitizedInputPreview = redCard.Body
-		tc.cards = []A2UICard{redCard}
+		return []A2UICard{redCard}
 
 	case Scenario04AttenuatedA2ASandbox:
 		upstreamToken := tc.req.ForwardedBearerToken
@@ -2592,8 +2695,7 @@ func finalizeTurnOutcomeAndCards(r *Runtime, tc *adkActiveTurnContext) {
 			tc.assistantText = "Verified checkout v2.4 hotfix in Agent Substrate v0.5.0 gVisor sandbox. Upstream 3LO credentials were stripped on A2A handoff, evil.example.com exfiltration was blocked by EgressPolicy, and the peer A2A response was screened via Model Armor."
 			tc.sanitizedInputPreview = tc.cleanPeerSummary
 			tc.outboundCommentPreview = tc.cleanPeerSummary
-			tc.cards = []A2UICard{card}
-			return
+			return []A2UICard{card}
 		}
 		card := A2UICard{
 			SurfaceID: "card-sandbox-s4-red",
@@ -2615,7 +2717,7 @@ func finalizeTurnOutcomeAndCards(r *Runtime, tc *adkActiveTurnContext) {
 		tc.assistantText = "RED MODE EXPLOIT: Untrusted go test init() exfiltrated os.Environ() and upstream 3LO credentials to https://evil.example.com/exfil."
 		tc.sanitizedInputPreview = poisonedPeerTestOutput
 		tc.outboundCommentPreview = poisonedPeerTestOutput
-		tc.cards = []A2UICard{card}
+		return []A2UICard{card}
 
 	case Scenario05FullChainZeroTrust:
 		redCard := A2UICard{
@@ -2637,12 +2739,13 @@ func finalizeTurnOutcomeAndCards(r *Runtime, tc *adkActiveTurnContext) {
 		}
 		tc.outcome = OutcomeExploitedRed
 		tc.assistantText = "RED MODE FULL-CHAIN EXPLOIT: Leaked raw PII (123-45-6789), bypassed UAP for container.clusters.delete, leaked SEC-101 via Confused Deputy, exfiltrated env secrets to https://evil.example.com/exfil, and executed unapproved GitHub PR!"
-		tc.cards = []A2UICard{redCard}
+		return []A2UICard{redCard}
 	}
 	_ = r
+	return nil
 }
 
-func (r *Runtime) executeTurnViaADKRunner(ctx context.Context, req TurnRequest, rawScenarioID ScenarioID) (*TurnResult, error) {
+func (r *Runtime) executeTurnViaADKRunner(ctx context.Context, req TurnRequest, rawScenarioID ScenarioID, sink TurnEventSink) (*TurnResult, error) {
 	adkUserID, adkSessionID := r.ResolveADKSessionID(req.SessionID, req.Persona, req.Posture)
 	planned := planToolsForTurn(req, rawScenarioID)
 
@@ -2652,6 +2755,7 @@ func (r *Runtime) executeTurnViaADKRunner(ctx context.Context, req TurnRequest, 
 		rawScenarioID: rawScenarioID,
 		adkUserID:     adkUserID,
 		adkSessionID:  adkSessionID,
+		sink:          sink,
 		plannedTools:  planned,
 	}
 	r.registerActiveTurn(adkSessionID, tc)
@@ -2661,6 +2765,13 @@ func (r *Runtime) executeTurnViaADKRunner(ctx context.Context, req TurnRequest, 
 		delete(reg.byADKSession, adkSessionID)
 		reg.mu.Unlock()
 	}()
+
+	tc.emit(TurnStreamEvent{
+		Type:       TurnStreamEventStarted,
+		SessionID:  req.SessionID,
+		Persona:    req.Persona,
+		ScenarioID: req.ScenarioID,
+	})
 
 	promptText := strings.TrimSpace(req.Prompt)
 	if promptText == "" {
@@ -2674,10 +2785,25 @@ func (r *Runtime) executeTurnViaADKRunner(ctx context.Context, req TurnRequest, 
 		}
 	}
 
-	return tc.buildTurnResult(), nil
+	res := tc.buildTurnResult()
+	normalizeTurnResultProvenance(res)
+	r.UpdateSession(req.SessionID, func(s *SessionSnapshot) {
+		s.LastTurn = res
+		if res.StepUpConfirmation != nil && res.StepUpConfirmation.Pending {
+			s.PendingConfirmation = res.StepUpConfirmation
+		}
+	})
+	tc.emit(TurnStreamEvent{
+		Type:       TurnStreamEventCompleted,
+		SessionID:  req.SessionID,
+		Persona:    req.Persona,
+		ScenarioID: req.ScenarioID,
+		Turn:       res,
+	})
+	return res, nil
 }
 
-func (r *Runtime) resolveConfirmationViaADKRunner(ctx context.Context, req ConfirmationResolution, snap *SessionSnapshot, pending *StepUpConfirmation) (*TurnResult, error) {
+func (r *Runtime) resolveConfirmationViaADKRunner(ctx context.Context, req ConfirmationResolution, snap *SessionSnapshot, pending *StepUpConfirmation, sink TurnEventSink) (*TurnResult, error) {
 	resolvedConfirmation := *pending
 	resolvedConfirmation.Pending = false
 
@@ -2711,10 +2837,10 @@ func (r *Runtime) resolveConfirmationViaADKRunner(ctx context.Context, req Confi
 		rawScenarioID:          scenarioID,
 		adkUserID:              adkUserID,
 		adkSessionID:           adkSessionID,
+		sink:                   sink,
 		isConfirmationResume:   true,
 		confirmationResolution: &req,
 		resolvedStepUp:         &resolvedConfirmation,
-		trace:                  baseTrace,
 		stepUpConfirmation:     &resolvedConfirmation,
 	}
 	r.registerActiveTurn(adkSessionID, tc)
@@ -2724,6 +2850,16 @@ func (r *Runtime) resolveConfirmationViaADKRunner(ctx context.Context, req Confi
 		delete(reg.byADKSession, adkSessionID)
 		reg.mu.Unlock()
 	}()
+
+	tc.emit(TurnStreamEvent{
+		Type:       TurnStreamEventStarted,
+		SessionID:  req.SessionID,
+		Persona:    snap.ActivePersona,
+		ScenarioID: scenarioID,
+	})
+	for _, ev := range baseTrace {
+		tc.addStep(ev)
+	}
 
 	resumeContent := &genai.Content{
 		Role: string(genai.RoleUser),
@@ -2748,6 +2884,18 @@ func (r *Runtime) resolveConfirmationViaADKRunner(ctx context.Context, req Confi
 
 	res := tc.buildTurnResult()
 	res.StepUpConfirmation = &resolvedConfirmation
+	normalizeTurnResultProvenance(res)
+	r.UpdateSession(req.SessionID, func(s *SessionSnapshot) {
+		s.PendingConfirmation = nil
+		s.LastTurn = res
+	})
+	tc.emit(TurnStreamEvent{
+		Type:       TurnStreamEventCompleted,
+		SessionID:  req.SessionID,
+		Persona:    snap.ActivePersona,
+		ScenarioID: scenarioID,
+		Turn:       res,
+	})
 	return res, nil
 }
 

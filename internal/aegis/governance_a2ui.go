@@ -44,6 +44,29 @@ func registerGovernanceHTTPRoutes(mux *http.ServeMux, rt *Runtime) {
 		}
 		writeJSON(w, http.StatusOK, res)
 	})
+
+	mux.HandleFunc("POST /api/sessions/{sessionId}/confirmations/stream", func(w http.ResponseWriter, r *http.Request) {
+		sessionID := r.PathValue("sessionId")
+		var req ConfirmationResolution
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		req.SessionID = sessionID
+		snap := rt.GetOrCreateSession(sessionID)
+		if snap.PendingConfirmation == nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("session %q has no pending StepUpConfirmation", sessionID)})
+			return
+		}
+		if req.ConfirmationID != "" && snap.PendingConfirmation.ConfirmationID != req.ConfirmationID {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("confirmation ID mismatch: got %q, want %q", req.ConfirmationID, snap.PendingConfirmation.ConfirmationID)})
+			return
+		}
+		sink := initSSESink(w)
+		if _, err := rt.ResolveConfirmationStream(r.Context(), req, sink); err != nil {
+			writeSSEError(w, err)
+		}
+	})
 }
 
 // RegistryCatalog holds the governed MCP servers and A2A agents discovered via
@@ -603,6 +626,13 @@ func executeScenario03(ctx context.Context, rt *Runtime, req TurnRequest) (*Turn
 // for the given session via the unified ADK runner.Runner, either executing the approved mutation
 // (Confirmed: true) or aborting it (Confirmed: false).
 func (r *Runtime) ResolveConfirmation(ctx context.Context, req ConfirmationResolution) (*TurnResult, error) {
+	return r.ResolveConfirmationStream(ctx, req, nil)
+}
+
+// ResolveConfirmationStream completes a pending ADK Go v2 adk_request_confirmation Step-Up interrupt
+// for the given session via the unified ADK runner.Runner, emitting real-time TurnStreamEvent frames
+// to sink when non-nil.
+func (r *Runtime) ResolveConfirmationStream(ctx context.Context, req ConfirmationResolution, sink TurnEventSink) (*TurnResult, error) {
 	if req.SessionID == "" {
 		req.SessionID = "default-session"
 	}
@@ -615,15 +645,9 @@ func (r *Runtime) ResolveConfirmation(ctx context.Context, req ConfirmationResol
 		return nil, fmt.Errorf("confirmation ID mismatch: got %q, want %q", req.ConfirmationID, pending.ConfirmationID)
 	}
 
-	res, err := r.resolveConfirmationViaADKRunner(ctx, req, snap, pending)
+	res, err := r.resolveConfirmationViaADKRunner(ctx, req, snap, pending, sink)
 	if err != nil {
 		return nil, err
 	}
-	normalizeTurnResultProvenance(res)
-
-	r.UpdateSession(req.SessionID, func(s *SessionSnapshot) {
-		s.PendingConfirmation = nil
-		s.LastTurn = res
-	})
 	return res, nil
 }
