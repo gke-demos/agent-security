@@ -1,0 +1,55 @@
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: sandbox-remediator-template
+  namespace: aegis-system
+  labels:
+    app.kubernetes.io/name: sandbox-remediator
+spec:
+  sandboxConfig:
+    sandboxClass: gvisor
+  snapshotConfig:
+    preferredFidelity: SNAPSHOT_FIDELITY_MEMORY
+  workerSelector:
+    ate.dev/worker-pool: aegis-remediator-pool
+  trustBundleDataSource:
+    names:
+      - egress-mitm.ate.dev
+      - system-roots.ate.dev
+  container:
+    image: ghcr.io/gke-demos/agent-security/sandbox-remediator:v0.5.0
+    command: ["/aegis-server", "--mode=remediator-actor"]
+    env: []
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "256Mi"
+      limits:
+        cpu: "1"
+        memory: "512Mi"
+    wakeupProbe:
+      httpGet:
+        path: /healthz
+        port: 8080
+---
+apiVersion: ate.dev/v1alpha1
+kind: EgressPolicy
+metadata:
+  name: default
+  namespace: aegis-system
+spec:
+  defaultAction: DENY
+  rules:
+    - name: allow-github-archive-via-atenet-mitm
+      action: ALLOW
+      destinations:
+        - host: api.github.com
+          ports:
+            - port: 443
+              protocol: TCP
+      credentialInjection:
+        provider: k8s.io
+        headerName: Authorization
+        secretRef:
+          name: github-remediator-archive-token
+          key: token
