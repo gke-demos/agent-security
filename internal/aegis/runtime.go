@@ -6,6 +6,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/plugin"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/session"
 )
 
 var (
@@ -30,23 +35,30 @@ func RegisterHTTPRoutes(fn HTTPRouteRegistrar) {
 
 // Runtime implements the primary AegisRuntime seam.
 type Runtime struct {
-	cfg      RuntimeConfig
-	guard    *ContentGuard
-	mu       sync.RWMutex
-	sessions map[string]*SessionSnapshot
-	extState map[string]any
+	cfg               RuntimeConfig
+	guard             *ContentGuard
+	mu                sync.RWMutex
+	sessions          map[string]*SessionSnapshot
+	extState          map[string]any
+	adkRunner         *runner.Runner
+	adkSessionService session.Service
+	triageAgent       agent.Agent
+	securityPlugin    *plugin.Plugin
+	governedToolNames []string
 }
 
 var _ AegisRuntime = (*Runtime)(nil)
 
 // NewRuntime creates a new AegisRuntime instance.
 func NewRuntime(cfg RuntimeConfig) *Runtime {
-	return &Runtime{
+	r := &Runtime{
 		cfg:      cfg,
 		guard:    NewContentGuard(cfg),
 		sessions: make(map[string]*SessionSnapshot),
 		extState: make(map[string]any),
 	}
+	r.initADKRunner()
+	return r
 }
 
 // Guard returns the runtime's ContentGuard.
@@ -138,7 +150,8 @@ func (r *Runtime) GetSessionState(_ context.Context, sessionID string) (*Session
 	return r.GetOrCreateSession(sessionID), nil
 }
 
-// ExecuteTurn processes an Operator turn across the active SecurityPosture and ScenarioID.
+// ExecuteTurn processes an Operator turn across the active SecurityPosture and ScenarioID
+// via the unified ADK Go v2 runner.Runner and AegisSecurityPlugin.
 func (r *Runtime) ExecuteTurn(ctx context.Context, req TurnRequest) (*TurnResult, error) {
 	if req.SessionID == "" {
 		req.SessionID = "default-session"
@@ -146,6 +159,7 @@ func (r *Runtime) ExecuteTurn(ctx context.Context, req TurnRequest) (*TurnResult
 	if req.Persona == "" {
 		req.Persona = PersonaAlice
 	}
+	rawScenarioID := req.ScenarioID
 	if req.ScenarioID == "" {
 		req.ScenarioID = Scenario01PromptInjectionAndPII
 	}
@@ -156,48 +170,10 @@ func (r *Runtime) ExecuteTurn(ctx context.Context, req TurnRequest) (*TurnResult
 	})
 	r.SetExtension(lastGmailFetchExtPrefix+req.SessionID, nil)
 
-	registeredScenarioHandlersMu.RLock()
-	customHandler, hasCustom := registeredScenarioHandlers[req.ScenarioID]
-	registeredScenarioHandlersMu.RUnlock()
-
-	var (
-		res *TurnResult
-		err error
-	)
-	if hasCustom {
-		res, err = customHandler(ctx, r, req)
-	} else {
-		res, err = r.executeScenario01(ctx, req)
-	}
+	res, err := r.executeTurnViaADKRunner(ctx, req, rawScenarioID)
 	if err != nil {
 		return nil, err
 	}
-	if req.ScenarioID == Scenario05FullChainZeroTrust && res != nil {
-		if ext, ok := r.GetExtension(lastGmailFetchExtPrefix + req.SessionID); ok {
-			if liveGmail, ok := ext.(*liveGmailFetchResult); ok && liveGmail != nil && liveGmail.Live {
-				res.WireRecords = append(append([]OutboundWireRecord(nil), liveGmail.WireRecords...), res.WireRecords...)
-				markedB3 := false
-				for i := range res.BoundaryTrace {
-					if res.BoundaryTrace[i].Boundary == BoundaryIdentity3LO {
-						res.BoundaryTrace[i].Provenance = ProvenanceLive
-						markedB3 = true
-					}
-				}
-				if !markedB3 {
-					res.BoundaryTrace = append([]BoundaryTraceEvent{liveGmail.TraceEvent}, res.BoundaryTrace...)
-					for i := range res.BoundaryTrace {
-						res.BoundaryTrace[i].Order = i + 1
-					}
-				}
-				if strings.TrimSpace(liveGmail.RawEmail) != "" && res.SanitizedInputPreview != "" {
-					insp := r.guard.InspectAndSanitize(ctx, liveGmail.RawEmail, req.Posture)
-					res.SanitizedInputPreview = insp.SanitizedText
-					res.OutboundCommentPreview = insp.SanitizedText
-				}
-			}
-		}
-	}
-	enrichTurnWithLiveGCP(ctx, r, req, res)
 	normalizeTurnResultProvenance(res)
 
 	r.UpdateSession(req.SessionID, func(s *SessionSnapshot) {
