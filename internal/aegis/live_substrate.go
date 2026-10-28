@@ -675,26 +675,20 @@ func hasMeaningfulEgressPolicyJSON(raw []byte) bool {
 }
 
 func parseEgressPolicySummary(payload []byte) (defaultAction string, allowedHosts []string) {
+	type egressPolicyRule struct {
+		HTTPS struct {
+			Hostnames []string `json:"hostnames"`
+		} `json:"https"`
+		Destinations []struct {
+			Host string `json:"host"`
+		} `json:"destinations"`
+	}
 	var epObj struct {
-		DefaultAction string `json:"defaultAction"`
-		Rules         []struct {
-			HTTPS struct {
-				Hostnames []string `json:"hostnames"`
-			} `json:"https"`
-			Destinations []struct {
-				Host string `json:"host"`
-			} `json:"destinations"`
-		} `json:"rules"`
-		Spec struct {
-			DefaultAction string `json:"defaultAction"`
-			Rules         []struct {
-				HTTPS struct {
-					Hostnames []string `json:"hostnames"`
-				} `json:"https"`
-				Destinations []struct {
-					Host string `json:"host"`
-				} `json:"destinations"`
-			} `json:"rules"`
+		DefaultAction string             `json:"defaultAction"`
+		Rules         []egressPolicyRule `json:"rules"`
+		Spec          struct {
+			DefaultAction string             `json:"defaultAction"`
+			Rules         []egressPolicyRule `json:"rules"`
 		} `json:"spec"`
 	}
 	if err := json.Unmarshal(payload, &epObj); err != nil {
@@ -709,15 +703,7 @@ func parseEgressPolicySummary(payload []byte) (defaultAction string, allowedHost
 			allowedHosts = append(allowedHosts, h)
 		}
 	}
-	for _, r := range epObj.Rules {
-		for _, h := range r.HTTPS.Hostnames {
-			addHost(h)
-		}
-		for _, d := range r.Destinations {
-			addHost(d.Host)
-		}
-	}
-	for _, r := range epObj.Spec.Rules {
+	for _, r := range append(epObj.Rules, epObj.Spec.Rules...) {
 		for _, h := range r.HTTPS.Hostnames {
 			addHost(h)
 		}

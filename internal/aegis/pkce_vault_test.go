@@ -614,13 +614,16 @@ func TestPKCEVault_Slice4_StaticAssetsWebCryptoPKCEAndZeroPATGuardrails(t *testi
 	jsResp.Body.Close()
 	js := string(jsBytes)
 
-	// Verify Web Crypto S256 PKCE handshake + ephemeralGrants TTL badge rendering in app.js
+	// Verify Web Crypto S256 PKCE handshake (/oauth/{provider}/authorize -> /oauth/{provider}/callback) + ephemeralGrants TTL badge + Connect (PKCE) button label in app.js
 	for _, wantJS := range []string{
 		"crypto.subtle.digest",
 		"SHA-256",
 		"getRandomValues",
 		"code_challenge_method=S256",
+		"/callback?session_id=",
+		"&code_verifier=",
 		"codeVerifier",
+		"Connect (PKCE)",
 		"ephemeralGrants",
 		"ttlRemainingSeconds",
 		"PKCE · S256 ·",
@@ -628,6 +631,12 @@ func TestPKCEVault_Slice4_StaticAssetsWebCryptoPKCEAndZeroPATGuardrails(t *testi
 		if !strings.Contains(js, wantJS) {
 			t.Errorf("app.js missing required Web Crypto S256 PKCE / TTL snippet %q", wantJS)
 		}
+	}
+	if strings.Contains(js, "Connect (OAuth + PKCE)") {
+		t.Errorf("app.js vault connect button must be labeled 'Connect (PKCE)' per ADR-0012 Decision 4, found 'Connect (OAuth + PKCE)'")
+	}
+	if strings.Contains(js, "/oauth/grant") {
+		t.Errorf("app.js authorizeProviderWithPKCE must complete handshake via GET /oauth/{provider}/callback rather than POST /oauth/grant")
 	}
 
 	// Guardrail: Zero sessionStorage, zero non-theme localStorage writes, zero unsafe DOM sinks
@@ -651,5 +660,192 @@ func TestPKCEVault_Slice4_StaticAssetsWebCryptoPKCEAndZeroPATGuardrails(t *testi
 		if strings.Contains(js, forbiddenSink) {
 			t.Errorf("SECURITY VIOLATION: forbidden sink/dialog %q found in app.js", forbiddenSink)
 		}
+	}
+}
+
+func TestPKCEVault_Slice5_CallbackStateRequiredAuthMethodsAndChallengeSuperseding(t *testing.T) {
+	ctx := context.Background()
+	rt := aegis.NewRuntime(aegis.RuntimeConfig{})
+	var iface aegis.AegisRuntime = rt
+
+	srv := httptest.NewServer(aegis.NewHTTPHandler(rt))
+	defer srv.Close()
+
+	// 1. Warm session seed stamps AuthMethod="warm_session_seed", PKCEVerified=false, CodeChallengeMethod=""
+	warmSnap, err := iface.GetSessionState(ctx, "pkce-s5-warm")
+	if err != nil {
+		t.Fatalf("GetSessionState(pkce-s5-warm): %v", err)
+	}
+	if len(warmSnap.EphemeralGrants[aegis.PersonaAlice]) == 0 {
+		t.Fatalf("expected warm session grants for alice")
+	}
+	for _, g := range warmSnap.EphemeralGrants[aegis.PersonaAlice] {
+		if g.AuthMethod != "warm_session_seed" || g.PKCEVerified || g.CodeChallengeMethod != "" {
+			t.Fatalf("warm session grant %s = (%q, pkceVerified=%v, method=%q), want (warm_session_seed, false, \"\")",
+				g.Provider, g.AuthMethod, g.PKCEVerified, g.CodeChallengeMethod)
+		}
+	}
+
+	// 2. GET /oauth/{provider}/callback without state/nonce or with unknown state MUST return 400 Bad Request
+	revokeBody, _ := json.Marshal(aegis.OAuthGrantRequest{
+		Persona:  aegis.PersonaAlice,
+		Provider: aegis.ProviderGitHub,
+	})
+	revResp, err := http.Post(srv.URL+"/api/sessions/pkce-s5-cb/oauth/revoke", "application/json", bytes.NewReader(revokeBody))
+	if err != nil {
+		t.Fatalf("POST revoke: %v", err)
+	}
+	revResp.Body.Close()
+
+	noStateResp, err := http.Get(srv.URL + "/oauth/github/callback?session_id=pkce-s5-cb&persona=alice&code=unverified_code")
+	if err != nil {
+		t.Fatalf("GET callback without state: %v", err)
+	}
+	noStateResp.Body.Close()
+	if noStateResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("GET /oauth/github/callback without state status = %d, want 400 Bad Request", noStateResp.StatusCode)
+	}
+
+	forgedStateResp, err := http.Get(srv.URL + "/oauth/github/callback?session_id=pkce-s5-cb&persona=alice&code=unverified_code&state=forged_unissued_nonce")
+	if err != nil {
+		t.Fatalf("GET callback with forged state: %v", err)
+	}
+	forgedStateResp.Body.Close()
+	if forgedStateResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("GET /oauth/github/callback with forged state status = %d, want 400 Bad Request", forgedStateResp.StatusCode)
+	}
+
+	snapAfterBadCB, err := iface.GetSessionState(ctx, "pkce-s5-cb")
+	if err != nil {
+		t.Fatalf("GetSessionState(pkce-s5-cb): %v", err)
+	}
+	for _, p := range snapAfterBadCB.GrantedProviders[aegis.PersonaAlice] {
+		if p == aegis.ProviderGitHub {
+			t.Fatalf("github must remain ungranted after unverified /callback requests")
+		}
+	}
+
+	// 3. Initiating a second PKCE challenge for the same (sessionID, persona, provider) supersedes the older pending challenge
+	v1, c1 := makeClientPKCEPair(t)
+	auth1Resp, err := http.Get(srv.URL + "/oauth/github/authorize?session_id=pkce-s5-cb&persona=alice&code_challenge=" + url.QueryEscape(c1) + "&code_challenge_method=S256")
+	if err != nil {
+		t.Fatalf("GET authorize #1: %v", err)
+	}
+	var ch1 aegis.ConsentChallenge
+	_ = json.NewDecoder(auth1Resp.Body).Decode(&ch1)
+	auth1Resp.Body.Close()
+
+	v2, c2 := makeClientPKCEPair(t)
+	auth2Resp, err := http.Get(srv.URL + "/oauth/github/authorize?session_id=pkce-s5-cb&persona=alice&code_challenge=" + url.QueryEscape(c2) + "&code_challenge_method=S256")
+	if err != nil {
+		t.Fatalf("GET authorize #2: %v", err)
+	}
+	var ch2 aegis.ConsentChallenge
+	_ = json.NewDecoder(auth2Resp.Body).Decode(&ch2)
+	auth2Resp.Body.Close()
+
+	supersededResp, err := http.Get(srv.URL + "/oauth/github/callback?session_id=pkce-s5-cb&persona=alice&code=code1&state=" + url.QueryEscape(ch1.Nonce) + "&code_verifier=" + url.QueryEscape(v1))
+	if err != nil {
+		t.Fatalf("GET callback superseded ch1: %v", err)
+	}
+	supersededResp.Body.Close()
+	if supersededResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected superseded PKCE challenge #1 to fail with 400 Bad Request, got %d", supersededResp.StatusCode)
+	}
+
+	validCBResp, err := http.Get(srv.URL + "/oauth/github/callback?session_id=pkce-s5-cb&persona=alice&code=code2&state=" + url.QueryEscape(ch2.Nonce) + "&code_verifier=" + url.QueryEscape(v2))
+	if err != nil {
+		t.Fatalf("GET callback active ch2: %v", err)
+	}
+	var cbSnap aegis.SessionSnapshot
+	_ = json.NewDecoder(validCBResp.Body).Decode(&cbSnap)
+	validCBResp.Body.Close()
+	if validCBResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected active PKCE challenge #2 callback to succeed with 200 OK, got %d", validCBResp.StatusCode)
+	}
+	var ghGrant *aegis.EphemeralPKCEGrant
+	for i := range cbSnap.EphemeralGrants[aegis.PersonaAlice] {
+		if cbSnap.EphemeralGrants[aegis.PersonaAlice][i].Provider == aegis.ProviderGitHub {
+			ghGrant = &cbSnap.EphemeralGrants[aegis.PersonaAlice][i]
+			break
+		}
+	}
+	if ghGrant == nil || !ghGrant.PKCEVerified || ghGrant.AuthMethod != "oauth2_pkce_s256" || ghGrant.CodeChallengeMethod != "S256" {
+		t.Fatalf("expected S256 PKCE verified github grant after /callback, got %+v", ghGrant)
+	}
+
+	// 4. Non-PKCE grants accurately stamp PKCEVerified=false and distinct AuthMethod values:
+	// 4a. POST /api/fixtures/seed -> "fixture_seed"
+	seedResp, err := http.Post(srv.URL+"/api/fixtures/seed", "application/json", bytes.NewReader([]byte(`{"sessionId":"pkce-s5-seed"}`)))
+	if err != nil {
+		t.Fatalf("POST /api/fixtures/seed: %v", err)
+	}
+	seedResp.Body.Close()
+	seedSnap, err := iface.GetSessionState(ctx, "pkce-s5-seed")
+	if err != nil {
+		t.Fatalf("GetSessionState(pkce-s5-seed): %v", err)
+	}
+	for _, g := range seedSnap.EphemeralGrants[aegis.PersonaAlice] {
+		if g.AuthMethod != "fixture_seed" || g.PKCEVerified || g.CodeChallengeMethod != "" {
+			t.Fatalf("fixture_seed grant %s = (%q, pkceVerified=%v, method=%q), want (fixture_seed, false, \"\")",
+				g.Provider, g.AuthMethod, g.PKCEVerified, g.CodeChallengeMethod)
+		}
+	}
+
+	// 4b. Direct runtime grant via POST /api/sessions/{id}/oauth/grant without PKCE -> "direct_grant" (and cannot spoof oauth2_pkce_s256)
+	directResp, err := http.Post(srv.URL+"/api/sessions/pkce-s5-direct/oauth/grant", "application/json",
+		strings.NewReader(`{"persona":"alice","provider":"atlassian_jira","accessToken":"direct-jira-tok","authMethod":"oauth2_pkce_s256"}`))
+	if err != nil {
+		t.Fatalf("POST direct /oauth/grant: %v", err)
+	}
+	var directSnap aegis.SessionSnapshot
+	_ = json.NewDecoder(directResp.Body).Decode(&directSnap)
+	directResp.Body.Close()
+	if directResp.StatusCode != http.StatusOK {
+		t.Fatalf("POST direct /oauth/grant status = %d, want 200", directResp.StatusCode)
+	}
+	var jiraDirect *aegis.EphemeralPKCEGrant
+	for i := range directSnap.EphemeralGrants[aegis.PersonaAlice] {
+		if directSnap.EphemeralGrants[aegis.PersonaAlice][i].Provider == aegis.ProviderAtlassianJira {
+			jiraDirect = &directSnap.EphemeralGrants[aegis.PersonaAlice][i]
+			break
+		}
+	}
+	if jiraDirect == nil || jiraDirect.AuthMethod != "direct_grant" || jiraDirect.PKCEVerified || jiraDirect.CodeChallengeMethod != "" {
+		t.Fatalf("direct_grant = %+v, want AuthMethod=direct_grant, PKCEVerified=false, CodeChallengeMethod=\"\"", jiraDirect)
+	}
+
+	// 4c. POST /a2a serverSideOauth2 Bearer passthrough -> "a2a_server_side_oauth2", PKCEVerified=false
+	a2aBody := `{"jsonrpc":"2.0","id":"a2a-auth-meta-1","method":"message/send","params":{"contextId":"pkce-s5-a2a","metadata":{"persona":"alice","scenarioId":"SCENARIO-01"},"message":{"role":"user","parts":[{"kind":"text","text":"Triage clean escalation."}]}}}`
+	a2aReq, err := http.NewRequest(http.MethodPost, srv.URL+"/a2a", strings.NewReader(a2aBody))
+	if err != nil {
+		t.Fatalf("NewRequest(/a2a): %v", err)
+	}
+	a2aReq.Header.Set("Content-Type", "application/json")
+	a2aReq.Header.Set("Authorization", "Bearer 3lo-alice-google_gmail-a2a-forwarded")
+	a2aResp, err := http.DefaultClient.Do(a2aReq)
+	if err != nil {
+		t.Fatalf("POST /a2a: %v", err)
+	}
+	_, _ = io.ReadAll(a2aResp.Body)
+	a2aResp.Body.Close()
+
+	a2aSnap, err := iface.GetSessionState(ctx, "pkce-s5-a2a")
+	if err != nil {
+		t.Fatalf("GetSessionState(pkce-s5-a2a): %v", err)
+	}
+	var sawA2AGrant bool
+	for _, g := range a2aSnap.EphemeralGrants[aegis.PersonaAlice] {
+		if g.Provider == aegis.ProviderGoogleGmail || g.Provider == aegis.ProviderGCPIAM {
+			sawA2AGrant = true
+			if g.AuthMethod != "a2a_server_side_oauth2" || g.PKCEVerified || g.CodeChallengeMethod != "" {
+				t.Fatalf("a2a_server_side_oauth2 grant %s = %+v, want AuthMethod=a2a_server_side_oauth2, PKCEVerified=false", g.Provider, g)
+			}
+		} else if g.AuthMethod != "warm_session_seed" || g.PKCEVerified {
+			t.Fatalf("untouched warm grant %s = %+v, want warm_session_seed", g.Provider, g)
+		}
+	}
+	if !sawA2AGrant {
+		t.Fatalf("expected a2a_server_side_oauth2 grant in pkce-s5-a2a, got %+v", a2aSnap.EphemeralGrants)
 	}
 }

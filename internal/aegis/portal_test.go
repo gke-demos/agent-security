@@ -160,7 +160,7 @@ func TestPortal_RootHTMLAndStaticAssets(t *testing.T) {
 		"ThreatInterceptCard",
 		"AclDenialCard",
 		"SandboxExecutionCard",
-		"/oauth/grant",
+		"/callback?session_id=",
 		"/oauth/revoke",
 		"/confirmations",
 		"/confirmations/stream",

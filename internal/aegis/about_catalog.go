@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -127,6 +130,7 @@ type ADRCatalogEntry struct {
 	Number            string       `json:"number"`
 	Slug              string       `json:"slug"`
 	FileName          string       `json:"fileName"`
+	Status            string       `json:"status"`
 	Title             string       `json:"title"`
 	Summary           string       `json:"summary"`
 	PrimaryBoundaries []BoundaryID `json:"primaryBoundaries"`
@@ -204,13 +208,17 @@ func VerifyArchitectureCatalogDrift(catalog *ArchitectureTopologyCatalog, rt *Ru
 		return fmt.Errorf("boundary drift: catalog has %v, want %v", gotBoundaries, wantBoundaries)
 	}
 
-	wantCallbacks := CanonicalSecurityPluginCallbacks()
+	pluginRT := rt
+	if pluginRT == nil {
+		pluginRT = &Runtime{}
+	}
+	wantCallbacks := activePluginCallbacksFromConfig(pluginRT.securityPluginConfig())
 	gotCallbacks := make([]string, 0, len(catalog.PluginCallbacks))
 	for _, cb := range catalog.PluginCallbacks {
 		gotCallbacks = append(gotCallbacks, cb.Name)
 	}
 	if !reflect.DeepEqual(gotCallbacks, wantCallbacks) {
-		return fmt.Errorf("plugin callback drift: catalog has %v, want %v", gotCallbacks, wantCallbacks)
+		return fmt.Errorf("plugin callback drift: catalog has %v, securityPluginConfig() has %v", gotCallbacks, wantCallbacks)
 	}
 
 	wantTools := CanonicalGovernedToolNames()
@@ -276,10 +284,16 @@ func VerifyArchitectureCatalogDrift(catalog *ArchitectureTopologyCatalog, rt *Ru
 		if len(matches) == 0 {
 			return fmt.Errorf("zero ADR files matched in %s", adrDir)
 		}
-		if len(catalog.ADRs) != len(matches) {
-			return fmt.Errorf("ADR count drift: catalog has %d ADRs, disk has %d in %s", len(catalog.ADRs), len(matches), adrDir)
+
+		type parsedDiskADR struct {
+			number   string
+			slug     string
+			fileName string
+			title    string
+			status   string
 		}
-		for i, fullPath := range matches {
+		var acceptedDiskADRs []parsedDiskADR
+		for _, fullPath := range matches {
 			fileName := filepath.Base(fullPath)
 			trimmed := strings.TrimSuffix(fileName, ".md")
 			parts := strings.SplitN(trimmed, "-", 2)
@@ -287,9 +301,46 @@ func VerifyArchitectureCatalogDrift(catalog *ArchitectureTopologyCatalog, rt *Ru
 				return fmt.Errorf("malformed ADR filename %q", fileName)
 			}
 			wantNum, wantSlug := parts[0], parts[1]
+
+			rawBytes, readErr := os.ReadFile(fullPath)
+			if readErr != nil {
+				return fmt.Errorf("read ADR %s: %w", fileName, readErr)
+			}
+			diskTitle, diskStatus, parseErr := parseADRMarkdownMetadata(string(rawBytes), wantNum)
+			if parseErr != nil {
+				return fmt.Errorf("parse ADR %s: %w", fileName, parseErr)
+			}
+			if strings.EqualFold(diskStatus, "Accepted") {
+				acceptedDiskADRs = append(acceptedDiskADRs, parsedDiskADR{
+					number:   wantNum,
+					slug:     wantSlug,
+					fileName: fileName,
+					title:    diskTitle,
+					status:   "Accepted",
+				})
+			}
+		}
+
+		if len(catalog.ADRs) != len(acceptedDiskADRs) {
+			return fmt.Errorf("ADR count/status drift: catalog has %d Accepted ADRs, disk has %d Accepted ADRs in %s", len(catalog.ADRs), len(acceptedDiskADRs), adrDir)
+		}
+		for i, diskADR := range acceptedDiskADRs {
 			got := catalog.ADRs[i]
-			if got.Number != wantNum || got.Slug != wantSlug {
-				return fmt.Errorf("ADR[%d] drift: catalog has (%s, %s), disk has (%s, %s)", i, got.Number, got.Slug, wantNum, wantSlug)
+			if got.Number != diskADR.number || got.Slug != diskADR.slug {
+				return fmt.Errorf("ADR[%d] drift: catalog has (%s, %s), disk has (%s, %s)", i, got.Number, got.Slug, diskADR.number, diskADR.slug)
+			}
+			if got.FileName != "" && got.FileName != diskADR.fileName {
+				return fmt.Errorf("ADR[%d] fileName drift: catalog has %q, disk has %q", i, got.FileName, diskADR.fileName)
+			}
+			gotStatus := strings.TrimSpace(got.Status)
+			if gotStatus == "" {
+				gotStatus = "Accepted"
+			}
+			if !strings.EqualFold(gotStatus, diskADR.status) {
+				return fmt.Errorf("ADR %s-%s status drift: catalog has %q, disk has %q", got.Number, got.Slug, gotStatus, diskADR.status)
+			}
+			if normalizeADRTitle(got.Title) != diskADR.title {
+				return fmt.Errorf("ADR %s-%s H1 title drift: catalog has %q, disk has %q", got.Number, got.Slug, normalizeADRTitle(got.Title), diskADR.title)
 			}
 			if strings.TrimSpace(got.Title) == "" || strings.TrimSpace(got.Summary) == "" || len(got.PrimaryBoundaries) == 0 {
 				return fmt.Errorf("ADR %s-%s has empty title, summary, or primaryBoundaries", got.Number, got.Slug)
@@ -298,6 +349,62 @@ func VerifyArchitectureCatalogDrift(catalog *ArchitectureTopologyCatalog, rt *Ru
 	}
 
 	return nil
+}
+
+var adrHeadingNumberPrefixRe = regexp.MustCompile(`^([0-9]+)\.\s*`)
+
+func normalizeADRTitle(raw string) string {
+	cleaned := strings.ReplaceAll(strings.TrimSpace(raw), "`", "")
+	return strings.Join(strings.Fields(cleaned), " ")
+}
+
+func parseADRMarkdownMetadata(markdown string, expectedNum string) (title string, status string, err error) {
+	lines := strings.Split(strings.ReplaceAll(markdown, "\r\n", "\n"), "\n")
+	var foundH1 bool
+	var inStatusSection bool
+	var explicitStatusSection bool
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !foundH1 && strings.HasPrefix(trimmed, "# ") {
+			foundH1 = true
+			heading := strings.TrimSpace(strings.TrimPrefix(trimmed, "# "))
+			if m := adrHeadingNumberPrefixRe.FindStringSubmatch(heading); len(m) == 2 {
+				hNum, err1 := strconv.Atoi(m[1])
+				fNum, err2 := strconv.Atoi(expectedNum)
+				if err1 == nil && err2 == nil && hNum != fNum {
+					return "", "", fmt.Errorf("H1 number %d does not match filename number %s", hNum, expectedNum)
+				}
+				heading = adrHeadingNumberPrefixRe.ReplaceAllString(heading, "")
+			}
+			title = normalizeADRTitle(heading)
+			continue
+		}
+		if strings.HasPrefix(trimmed, "## ") {
+			if strings.EqualFold(trimmed, "## Status") {
+				inStatusSection = true
+				explicitStatusSection = true
+			} else {
+				inStatusSection = false
+			}
+			continue
+		}
+		if inStatusSection && trimmed != "" {
+			status = strings.Trim(trimmed, "`* ")
+			inStatusSection = false
+		}
+	}
+
+	if !foundH1 || title == "" {
+		return "", "", fmt.Errorf("missing H1 heading")
+	}
+	if explicitStatusSection {
+		if status == "" {
+			return "", "", fmt.Errorf("empty ## Status section")
+		}
+		return title, status, nil
+	}
+	return title, "Accepted", nil
 }
 
 func canonicalBoundaryCatalogNodes() []BoundaryCatalogNode {
@@ -1020,7 +1127,7 @@ func canonicalScenarioSimulationSpecs() []ScenarioSimulationSpec {
 				},
 				Pulses: []ScenarioPulseHop{
 					{Step: 1, EdgeID: "EDGE_BROWSER_B1", From: "OPERATOR_BROWSER", To: string(BoundaryGenerativeUI), Verdict: PulseVerdictPass, Label: "Verify Repo Tests", Detail: "Sandbox Egress MITM shield disabled"},
-					{Step: 2, EdgeID: "EDGE_B2_B5", From: string(BoundaryReasoningGuard), To: string(BoundaryCrossAgentA2A), Verdict: PulseVerdictExfiltrated, Label: "3LO Token Passthrough", Detail: "Raw upstream 3LO bearer token forwarded over A2A"},
+					{Step: 2, EdgeID: "EDGE_B2_B5", From: string(BoundaryReasoningGuard), To: string(BoundaryCrossAgentA2A), Verdict: PulseVerdictExfiltrated, Label: "Unattenuated 3LO Credential Forwarding", Detail: "Raw upstream 3LO bearer token forwarded over A2A"},
 					{Step: 3, EdgeID: "EDGE_B5_B6", From: string(BoundaryCrossAgentA2A), To: string(BoundarySandboxEgress), Verdict: PulseVerdictExfiltrated, Label: "init() Env Exfil", Detail: "os.Environ() + 3LO tokens POSTed to evil.example.com/exfil"},
 					{Step: 4, EdgeID: "EDGE_B6_B2", From: string(BoundarySandboxEgress), To: string(BoundaryReasoningGuard), Verdict: PulseVerdictExfiltrated, Label: "Poisoned Peer Return", Detail: "Unscreened peer injection re-enters parent orchestrator"},
 				},
@@ -1091,7 +1198,7 @@ func canonicalScenarioSimulationSpecs() []ScenarioSimulationSpec {
 }
 
 func canonicalADRCatalogEntries() []ADRCatalogEntry {
-	return []ADRCatalogEntry{
+	entries := []ADRCatalogEntry{
 		{
 			Number:   "0001",
 			Slug:     "dual-entry-standalone-and-gemini-enterprise-a2a",
@@ -1242,4 +1349,10 @@ func canonicalADRCatalogEntries() []ADRCatalogEntry {
 			},
 		},
 	}
+	for i := range entries {
+		if entries[i].Status == "" {
+			entries[i].Status = "Accepted"
+		}
+	}
+	return entries
 }

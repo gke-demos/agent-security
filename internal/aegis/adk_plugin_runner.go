@@ -1275,7 +1275,52 @@ func executeGovernedCreatePRTool(ctx context.Context, r *Runtime, tc *adkActiveT
 }
 
 func buildAegisSecurityPlugin(r *Runtime) (*plugin.Plugin, error) {
-	return plugin.New(plugin.Config{
+	return plugin.New(r.securityPluginConfig())
+}
+
+func activePluginCallbacksFromConfig(cfg plugin.Config) []string {
+	var out []string
+	if cfg.OnUserMessageCallback != nil {
+		out = append(out, "OnUserMessage")
+	}
+	if cfg.BeforeRunCallback != nil {
+		out = append(out, "BeforeRun")
+	}
+	if cfg.BeforeAgentCallback != nil {
+		out = append(out, "BeforeAgent")
+	}
+	if cfg.BeforeModelCallback != nil {
+		out = append(out, "BeforeModel")
+	}
+	if cfg.OnModelErrorCallback != nil {
+		out = append(out, "OnModelError")
+	}
+	if cfg.BeforeToolCallback != nil {
+		out = append(out, "BeforeTool")
+	}
+	if cfg.AfterToolCallback != nil {
+		out = append(out, "AfterTool")
+	}
+	if cfg.OnToolErrorCallback != nil {
+		out = append(out, "OnToolError")
+	}
+	if cfg.AfterModelCallback != nil {
+		out = append(out, "AfterModel")
+	}
+	if cfg.AfterAgentCallback != nil {
+		out = append(out, "AfterAgent")
+	}
+	if cfg.AfterRunCallback != nil {
+		out = append(out, "AfterRun")
+	}
+	if cfg.OnEventCallback != nil {
+		out = append(out, "OnEvent")
+	}
+	return out
+}
+
+func (r *Runtime) securityPluginConfig() plugin.Config {
+	return plugin.Config{
 		Name: adkSecurityPluginName,
 		BeforeRunCallback: func(ctx agent.InvocationContext) (*genai.Content, error) {
 			tc := r.lookupActiveTurnFromContext(ctx, ctx.Session().ID())
@@ -1514,7 +1559,7 @@ func buildAegisSecurityPlugin(r *Runtime) (*plugin.Plugin, error) {
 			tc.sanitizeCardsInPlace()
 			return nil, nil
 		},
-	})
+	}
 }
 
 func (tc *adkActiveTurnContext) sanitizeCardsInPlace() {
@@ -1771,15 +1816,15 @@ func enforceStepUpBeforeTool(ctx agent.Context, tc *adkActiveTurnContext) (map[s
 		stepUp.ADKSessionID = tc.adkSessionID
 
 		if tc.req.ScenarioID == Scenario05FullChainZeroTrust {
-			s5SandboxFields := map[string]string{
-				"sandboxClass":          "gvisor",
-				"preferredFidelity":     "SNAPSHOT_FIDELITY_MEMORY",
-				"containerEnvSecrets":   "0",
-				"egressMitmAllowed":     "https://api.github.com (atenet header injection)",
-				"egressPolicyBlocked":   "https://evil.example.com/exfil (403 Forbidden)",
-				"peerResponseScreening": tc.cleanPeerSummary,
+			s5TargetActor := ""
+			if tc.rt != nil {
+				s5TargetActor = substrateTargetActor(tc.rt.Config())
 			}
-			populateLiveSandboxCardFields(s5SandboxFields, tc.rt, tc.liveSandboxResp)
+			s5SandboxFields := map[string]string{}
+			populateSandboxMetadata(s5SandboxFields, map[string]string{
+				"peerResponseScreening": tc.cleanPeerSummary,
+				"targetActor":           s5TargetActor,
+			}, tc.liveSandboxResp)
 			sandboxCard, err := ValidateAndSanitizeA2UICard(A2UICard{
 				SurfaceID: "card-sandbox-s5",
 				MimeType:  "application/json+a2ui",
@@ -2839,17 +2884,17 @@ func finalizeTurnOutcomeAndCards(r *Runtime, tc *adkActiveTurnContext) []A2UICar
 					break
 				}
 			}
-			s4SandboxFields := map[string]string{
+			s4TargetActor := ""
+			if r != nil {
+				s4TargetActor = substrateTargetActor(r.Config())
+			}
+			s4SandboxFields := map[string]string{}
+			populateSandboxMetadata(s4SandboxFields, map[string]string{
 				"Provenance":            sandboxProvenance,
-				"sandboxClass":          "gvisor",
-				"preferredFidelity":     "SNAPSHOT_FIDELITY_MEMORY",
-				"containerEnvSecrets":   "0",
-				"egressMitmAllowed":     "https://api.github.com (atenet header injection)",
-				"egressPolicyBlocked":   "https://evil.example.com/exfil (403 Forbidden)",
 				"a2aCredentialScrub":    "withoutCredentialParts (upstream 3LO stripped)",
 				"peerResponseScreening": tc.cleanPeerSummary,
-			}
-			populateLiveSandboxCardFields(s4SandboxFields, r, tc.liveSandboxResp)
+				"targetActor":           s4TargetActor,
+			}, tc.liveSandboxResp)
 			card, _ := ValidateAndSanitizeA2UICard(A2UICard{
 				SurfaceID: "card-sandbox-s4-blue",
 				MimeType:  "application/json+a2ui",
@@ -3147,20 +3192,36 @@ func hasCachedRestrictedToolOutputInHistory(contents []*genai.Content) bool {
 	return false
 }
 
-func populateLiveSandboxCardFields(fields map[string]string, r *Runtime, liveResp *SandboxExecutionResponse) {
-	if fields == nil || liveResp == nil {
+func populateSandboxMetadata(fields map[string]string, meta map[string]string, resp *SandboxExecutionResponse) {
+	if fields == nil {
+		return
+	}
+	fields["sandboxClass"] = "gvisor"
+	fields["preferredFidelity"] = "SNAPSHOT_FIDELITY_MEMORY"
+	fields["containerEnvSecrets"] = "0"
+	fields["egressMitmAllowed"] = "https://api.github.com (atenet header injection)"
+	fields["egressPolicyBlocked"] = "https://evil.example.com/exfil (403 Forbidden)"
+	for k, v := range meta {
+		if k == "targetActor" {
+			continue
+		}
+		fields[k] = v
+	}
+	if resp == nil {
 		return
 	}
 	fields["Provenance"] = string(ProvenanceLive)
-	if r != nil {
-		fields["targetActor"] = substrateTargetActor(r.Config())
+	if ta := strings.TrimSpace(meta["targetActor"]); ta != "" {
+		fields["targetActor"] = ta
+	} else if ta := strings.TrimSpace(resp.Metadata["targetActor"]); ta != "" {
+		fields["targetActor"] = ta
 	}
 	for _, key := range []string{"kernelSignature", "zeroEnvSecretsVerified", "githubAllowedProbe", "evilExfilProbe", "actorName", "sandboxPod"} {
-		if val := strings.TrimSpace(liveResp.Metadata[key]); val != "" {
+		if val := strings.TrimSpace(resp.Metadata[key]); val != "" {
 			fields[key] = val
 		}
 	}
-	if out := strings.TrimSpace(liveResp.TestOutput); out != "" {
+	if out := strings.TrimSpace(resp.TestOutput); out != "" {
 		fields["testOutput"] = out
 	}
 }

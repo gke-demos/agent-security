@@ -114,6 +114,12 @@ func TestPortal_PathBasedRouting_RootAndAbout(t *testing.T) {
 			t.Errorf("forbidden query-parameter routing snippet %q detected", forbiddenQuery)
 		}
 	}
+	if strings.Contains(js, `indexOf("/about/") === 0`) || strings.Contains(js, `startsWith("/about/")`) {
+		t.Errorf("resolveRouteFromPathname in app.js must only resolve exact '/about' or '/about/', never wildcard '/about/*'")
+	}
+	if !strings.Contains(js, `pathname === "/about" || pathname === "/about/"`) {
+		t.Errorf("app.js missing exact '/about' / '/about/' route match in resolveRouteFromPathname")
+	}
 }
 
 func TestArchitectureTopologyCatalog_BoundariesCallbacksToolsAndLiveSources(t *testing.T) {
@@ -151,11 +157,20 @@ func TestArchitectureTopologyCatalog_BoundariesCallbacksToolsAndLiveSources(t *t
 	}
 
 	rawStr := string(rawBytes)
-	if strings.Contains(strings.ToLower(rawStr), "vertex ai") {
-		t.Errorf("catalog JSON must use Gemini Enterprise Agent Platform branding, never retired 'Vertex AI'")
+	retiredBrand := "vertex" + " ai"
+	internalTerm := "fluid" + " compute"
+	if strings.Contains(strings.ToLower(rawStr), retiredBrand) {
+		t.Errorf("catalog JSON must use Gemini Enterprise Agent Platform branding, never %q", retiredBrand)
 	}
-	if strings.Contains(strings.ToLower(rawStr), "fluid compute") {
-		t.Errorf("catalog JSON must never contain internal term 'fluid compute'")
+	if strings.Contains(strings.ToLower(rawStr), internalTerm) {
+		t.Errorf("catalog JSON must never contain internal term %q", internalTerm)
+	}
+	avoidedTerm := "token" + " passthrough"
+	if strings.Contains(strings.ToLower(rawStr), avoidedTerm) {
+		t.Errorf("catalog JSON must honor GLOSSARY.md and avoid %q; use 'Unattenuated 3LO Credential Forwarding'", avoidedTerm)
+	}
+	if !strings.Contains(rawStr, "Unattenuated 3LO Credential Forwarding") {
+		t.Errorf("catalog JSON missing 'Unattenuated 3LO Credential Forwarding' pulse label")
 	}
 
 	var catalog aegis.ArchitectureTopologyCatalog
@@ -435,6 +450,46 @@ func TestArchitectureTopologyCatalog_ScenariosADRsAndDriftDetection(t *testing.T
 			t.Fatalf("expected VerifyArchitectureCatalogDrift to fail when a canonical BoundaryID is missing")
 		}
 	})
+
+	t.Run("DetectsADRTitleAndStatusDriftOnDisk", func(t *testing.T) {
+		// 1. Mutating an ADR's H1 title on disk must trigger drift error
+		titleDriftDir := t.TempDir()
+		for _, f := range adrFiles {
+			data, readErr := os.ReadFile(f)
+			if readErr != nil {
+				t.Fatalf("read %s: %v", f, readErr)
+			}
+			content := string(data)
+			if strings.HasPrefix(filepath.Base(f), "0012-") {
+				content = strings.Replace(content, "# 12. OAuth 2.0 + S256 PKCE Login Flows and Ephemeral In-Memory TokenBroker Vault", "# 12. Mutated Out-of-Sync ADR Heading", 1)
+			}
+			if writeErr := os.WriteFile(filepath.Join(titleDriftDir, filepath.Base(f)), []byte(content), 0o600); writeErr != nil {
+				t.Fatalf("write temp ADR: %v", writeErr)
+			}
+		}
+		if err := aegis.VerifyArchitectureCatalogDrift(&catalog, rt, titleDriftDir); err == nil {
+			t.Fatalf("expected VerifyArchitectureCatalogDrift to fail when an ADR H1 title on disk drifts from catalog.ADRs")
+		}
+
+		// 2. Changing an Accepted ADR's ## Status to Superseded on disk must trigger drift error
+		statusDriftDir := t.TempDir()
+		for _, f := range adrFiles {
+			data, readErr := os.ReadFile(f)
+			if readErr != nil {
+				t.Fatalf("read %s: %v", f, readErr)
+			}
+			content := string(data)
+			if strings.HasPrefix(filepath.Base(f), "0012-") {
+				content = strings.Replace(content, "## Status\n\nAccepted", "## Status\n\nSuperseded", 1)
+			}
+			if writeErr := os.WriteFile(filepath.Join(statusDriftDir, filepath.Base(f)), []byte(content), 0o600); writeErr != nil {
+				t.Fatalf("write temp ADR: %v", writeErr)
+			}
+		}
+		if err := aegis.VerifyArchitectureCatalogDrift(&catalog, rt, statusDriftDir); err == nil {
+			t.Fatalf("expected VerifyArchitectureCatalogDrift to fail when an ADR ## Status on disk changes from Accepted to Superseded")
+		}
+	})
 }
 
 func assertNoEmojiRunes(t *testing.T, label, content string) {
@@ -522,6 +577,8 @@ func TestPortal_AboutInteractiveVisualizerModulesAndSecurityHygiene(t *testing.T
 		"about-topology-svg-stage",
 		"boundary-inspector-card",
 		"lifecycle-stage-track",
+		"adk_request_confirmation / tool.Run",
+		"OnEvent -> SSE",
 		"lifecycle-sse-preview",
 		"about-sources-grid",
 		"about-tools-grid",
@@ -540,6 +597,7 @@ func TestPortal_AboutInteractiveVisualizerModulesAndSecurityHygiene(t *testing.T
 		".about-container",
 		".topo-boundary-node",
 		".lifecycle-stage-track",
+		".lifecycle-stage-pill",
 		".about-sources-grid",
 		".about-tools-grid",
 		".about-adr-grid",
@@ -555,17 +613,19 @@ func TestPortal_AboutInteractiveVisualizerModulesAndSecurityHygiene(t *testing.T
 	assertNoEmojiRunes(t, "styles.css", css)
 	assertNoEmojiRunes(t, "app.js", js)
 
+	retiredBrand := "vertex" + " ai"
+	internalTerm := "fluid" + " compute"
 	for name, content := range map[string]string{
 		"index.html": html,
 		"styles.css": css,
 		"app.js":     js,
 	} {
 		lower := strings.ToLower(content)
-		if strings.Contains(lower, "vertex ai") {
-			t.Errorf("%s contains retired branding 'Vertex AI'; use Gemini Enterprise Agent Platform", name)
+		if strings.Contains(lower, retiredBrand) {
+			t.Errorf("%s contains retired branding %q; use Gemini Enterprise Agent Platform", name, retiredBrand)
 		}
-		if strings.Contains(lower, "fluid compute") {
-			t.Errorf("%s contains forbidden internal term 'fluid compute'", name)
+		if strings.Contains(lower, internalTerm) {
+			t.Errorf("%s contains forbidden internal term %q", name, internalTerm)
 		}
 	}
 }

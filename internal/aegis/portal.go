@@ -113,9 +113,10 @@ func registerPortalRoutes(mux *http.ServeMux, rt *Runtime) {
 		for _, persona := range []PersonaID{PersonaAlice, PersonaBob} {
 			for _, provider := range allProviders {
 				broker.Grant(r.Context(), OAuthGrantRequest{
-					SessionID: sessionID,
-					Persona:   persona,
-					Provider:  provider,
+					SessionID:  sessionID,
+					Persona:    persona,
+					Provider:   provider,
+					AuthMethod: "fixture_seed",
 				})
 			}
 		}

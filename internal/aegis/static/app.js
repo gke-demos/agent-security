@@ -79,7 +79,7 @@
   const SVG_NS = "http://www.w3.org/2000/svg";
 
   function resolveRouteFromPathname(pathname) {
-    if (pathname === "/about" || (pathname && pathname.indexOf("/about/") === 0)) {
+    if (pathname === "/about" || pathname === "/about/") {
       return "/about";
     }
     return "/";
@@ -183,21 +183,23 @@
     if (!authResp.ok) return false;
     const challenge = await authResp.json();
 
-    const grantResp = await fetch(
-      "/api/sessions/" + encodeURIComponent(state.sessionId) + "/oauth/grant",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          persona: targetPersona,
-          provider: targetProvider,
-          nonce: challenge.nonce || "",
-          codeVerifier: pkce.codeVerifier,
-        }),
-      }
-    );
-    if (!grantResp.ok) return false;
-    const snap = await grantResp.json();
+    const callbackURL =
+      "/oauth/" +
+      encodeURIComponent(targetProvider) +
+      "/callback?session_id=" +
+      encodeURIComponent(state.sessionId) +
+      "&persona=" +
+      encodeURIComponent(targetPersona) +
+      "&code=" +
+      encodeURIComponent("pkce_code_" + (challenge.nonce || "s256")) +
+      "&state=" +
+      encodeURIComponent(challenge.nonce || "") +
+      "&code_verifier=" +
+      encodeURIComponent(pkce.codeVerifier);
+
+    const callbackResp = await fetch(callbackURL);
+    if (!callbackResp.ok) return false;
+    const snap = await callbackResp.json();
     applySessionSnapshot(snap);
     syncPersonaAndVaultUI();
     return true;
@@ -356,7 +358,7 @@
         }
       }
       if (btn) {
-        btn.textContent = isGranted ? "Test Revoke 3LO" : "Connect (OAuth + PKCE)";
+        btn.textContent = isGranted ? "Test Revoke 3LO" : "Connect (PKCE)";
         btn.setAttribute("data-mode", isGranted ? "revoke" : "grant");
       }
     });
@@ -2061,7 +2063,7 @@
 
       const nameSpan = document.createElement("span");
       nameSpan.className = "lifecycle-stage-name";
-      nameSpan.textContent = cb.name;
+      nameSpan.textContent = cb.name === "OnEvent" ? "OnEvent -> SSE" : cb.name;
 
       const subSpan = document.createElement("span");
       subSpan.className = "lifecycle-stage-sub";
@@ -2077,6 +2079,39 @@
       });
 
       trackEl.appendChild(btn);
+
+      if (cb.name === "BeforeTool") {
+        const execPill = document.createElement("div");
+        execPill.className = "lifecycle-stage-pill";
+        execPill.setAttribute("role", "presentation");
+
+        const pillTop = document.createElement("div");
+        pillTop.className = "lifecycle-stage-top";
+
+        const pillBadge = document.createElement("span");
+        pillBadge.className = "lifecycle-stage-num";
+        pillBadge.textContent = "EXEC";
+
+        const pillMeta = document.createElement("span");
+        pillMeta.className = "subpanel-meta";
+        pillMeta.textContent = "PAUSE / RUN";
+
+        pillTop.appendChild(pillBadge);
+        pillTop.appendChild(pillMeta);
+
+        const pillName = document.createElement("span");
+        pillName.className = "lifecycle-stage-name";
+        pillName.textContent = "adk_request_confirmation / tool.Run";
+
+        const pillSub = document.createElement("span");
+        pillSub.className = "lifecycle-stage-sub";
+        pillSub.textContent = "Step-Up Pause or Governed Tool Invoke";
+
+        execPill.appendChild(pillTop);
+        execPill.appendChild(pillName);
+        execPill.appendChild(pillSub);
+        trackEl.appendChild(execPill);
+      }
     });
 
     detailEl.replaceChildren();

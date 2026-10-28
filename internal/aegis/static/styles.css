@@ -2375,15 +2375,16 @@ body {
   color: var(--bg-surface);
 }
 
-/* Module 2: Horizontal 6-Stage Plugin Callback State Machine */
+/* Module 2: Horizontal Plugin Callback State Machine */
 .lifecycle-stage-track {
   display: grid;
-  grid-template-columns: repeat(6, minmax(145px, 1fr));
+  grid-template-columns: repeat(7, minmax(135px, 1fr));
   gap: 8px;
   overflow-x: auto;
 }
 
-.lifecycle-stage-btn {
+.lifecycle-stage-btn,
+.lifecycle-stage-pill {
   position: relative;
   display: flex;
   flex-direction: column;
@@ -2395,7 +2396,16 @@ body {
   border: 1px solid var(--border-subtle);
   color: var(--text-secondary);
   text-align: left;
+}
+
+.lifecycle-stage-btn {
   cursor: pointer;
+}
+
+.lifecycle-stage-pill {
+  background: var(--bg-elevated);
+  border-style: dashed;
+  border-color: var(--accent-amber-border);
 }
 
 .lifecycle-stage-btn:hover {

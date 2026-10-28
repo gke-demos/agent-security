@@ -289,9 +289,37 @@ func TestConfigFromEnv_AutoDefaultsAndGitHubTokenResolution(t *testing.T) {
 		t.Errorf("expected auto-defaulted endpoints in cfg3: %+v", cfg3)
 	}
 
-	// 4. resolveGitHubCLIToken skips CLI execution when running under go test (flag.Lookup("test.v") != nil)
+	// 4. Explicit ALICE_GITHUB_TOKEN prevents ghTokenFn from ever executing
+	ghCalled := false
+	cfgExplicit := ConfigFromEnvWithLookup(func(k string) string {
+		switch k {
+		case "LIVE_GITHUB":
+			return "true"
+		case "ALICE_GITHUB_TOKEN":
+			return "gho_explicit_token_from_env"
+		default:
+			return ""
+		}
+	}, func() string {
+		ghCalled = true
+		return "gho_should_not_be_used"
+	})
+	if ghCalled {
+		t.Errorf("expected ghTokenFn not to be called when ALICE_GITHUB_TOKEN is explicitly provided")
+	}
+	if cfgExplicit.AliceGitHubToken != "gho_explicit_token_from_env" {
+		t.Errorf("cfgExplicit.AliceGitHubToken = %q, want gho_explicit_token_from_env", cfgExplicit.AliceGitHubToken)
+	}
+
+	// 5. resolveGitHubCLIToken skips CLI execution when running under go test unless AEGIS_LIVE_EVALS=true AND ALICE_GITHUB_TOKEN is unset
+	t.Setenv("AEGIS_LIVE_EVALS", "")
 	if got := resolveGitHubCLIToken(); got != "" {
 		t.Errorf("resolveGitHubCLIToken() under go test = %q, want empty string", got)
+	}
+	t.Setenv("AEGIS_LIVE_EVALS", "true")
+	t.Setenv("ALICE_GITHUB_TOKEN", "gho_already_configured")
+	if got := resolveGitHubCLIToken(); got != "" {
+		t.Errorf("resolveGitHubCLIToken() with AEGIS_LIVE_EVALS=true and explicit ALICE_GITHUB_TOKEN = %q, want empty string (hermetic)", got)
 	}
 }
 
@@ -360,11 +388,22 @@ func TestTokenBroker_EnvPersonaSeedingAndLiveOAuthCallbackExchange(t *testing.T)
 		}
 	}
 
-	// 2. Verify GET /oauth/github/callback exchanges code via HTTP POST and stores real access_token
+	// 2. Verify GET /oauth/github/callback exchanges code + code_verifier via HTTP POST and stores real access_token
 	appSrv := httptest.NewServer(NewHandler(rt))
 	defer appSrv.Close()
 
-	cbResp, err := http.Get(appSrv.URL + "/oauth/github/callback?session_id=oauth-exchange-sess&persona=alice&code=auth_code_xyz&state=nonce_99")
+	authInitResp, err := http.Get(appSrv.URL + "/oauth/github/authorize?session_id=oauth-exchange-sess&persona=alice")
+	if err != nil {
+		t.Fatalf("GET /oauth/github/authorize: %v", err)
+	}
+	var authInitCh ConsentChallenge
+	if err := json.NewDecoder(authInitResp.Body).Decode(&authInitCh); err != nil {
+		authInitResp.Body.Close()
+		t.Fatalf("decode /oauth/github/authorize: %v", err)
+	}
+	authInitResp.Body.Close()
+
+	cbResp, err := http.Get(appSrv.URL + "/oauth/github/callback?session_id=oauth-exchange-sess&persona=alice&code=auth_code_xyz&state=" + authInitCh.Nonce)
 	if err != nil {
 		t.Fatalf("GET /oauth/github/callback: %v", err)
 	}
@@ -373,8 +412,8 @@ func TestTokenBroker_EnvPersonaSeedingAndLiveOAuthCallbackExchange(t *testing.T)
 	if cbResp.StatusCode != http.StatusOK {
 		t.Fatalf("GET /oauth/github/callback status = %d, want 200", cbResp.StatusCode)
 	}
-	if !strings.Contains(receivedForm, "code=auth_code_xyz") || !strings.Contains(receivedForm, "client_id=gh-client-id-live") || !strings.Contains(receivedForm, "client_secret=gh-client-secret-live") {
-		t.Errorf("OAuth token exchange POST body = %q, want code, client_id, and client_secret", receivedForm)
+	if !strings.Contains(receivedForm, "code=auth_code_xyz") || !strings.Contains(receivedForm, "client_id=gh-client-id-live") || !strings.Contains(receivedForm, "client_secret=gh-client-secret-live") || !strings.Contains(receivedForm, "code_verifier=") {
+		t.Errorf("OAuth token exchange POST body = %q, want code, client_id, client_secret, and code_verifier", receivedForm)
 	}
 
 	exchangedCtx := WithAuthInvocation(ctx, AuthInvocation{

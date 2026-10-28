@@ -947,9 +947,43 @@ func TestSubstrateManifests_ValidatedWorkerPoolAndActorTemplateSchema(t *testing
 	}
 }
 
+func TestLiveSubstrateE2EGate_HonorsLiveEvalsAndLegacyEnv(t *testing.T) {
+	if isLiveSubstrateE2EEnabled(func(string) string { return "" }) {
+		t.Errorf("expected false when neither AEGIS_LIVE_EVALS nor AEGIS_LIVE_SUBSTRATE_E2E is set")
+	}
+	if !isLiveSubstrateE2EEnabled(func(k string) string {
+		if k == "AEGIS_LIVE_EVALS" {
+			return "true"
+		}
+		return ""
+	}) {
+		t.Errorf("expected true when AEGIS_LIVE_EVALS=true")
+	}
+	if !isLiveSubstrateE2EEnabled(func(k string) string {
+		if k == "AEGIS_LIVE_SUBSTRATE_E2E" {
+			return "true"
+		}
+		return ""
+	}) {
+		t.Errorf("expected true when AEGIS_LIVE_SUBSTRATE_E2E=true")
+	}
+}
+
+func isLiveSubstrateE2EEnabled(getenv func(string) string) bool {
+	isTrue := func(v string) bool {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "on":
+			return true
+		default:
+			return false
+		}
+	}
+	return isTrue(getenv("AEGIS_LIVE_EVALS")) || isTrue(getenv("AEGIS_LIVE_SUBSTRATE_E2E"))
+}
+
 func TestLiveSubstrateRealCluster_AutoBridgedAtenetRouter(t *testing.T) {
-	if os.Getenv("AEGIS_LIVE_SUBSTRATE_E2E") != "true" {
-		t.Skip("Skipping live GKE Substrate E2E test: set AEGIS_LIVE_SUBSTRATE_E2E=true to verify against active cluster")
+	if !isLiveSubstrateE2EEnabled(os.Getenv) {
+		t.Skip("Skipping live GKE Substrate E2E test: set AEGIS_LIVE_EVALS=true (or AEGIS_LIVE_SUBSTRATE_E2E=true) to verify against active cluster")
 	}
 
 	t.Setenv("KUBERNETES_SERVICE_HOST", "")

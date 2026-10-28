@@ -34,10 +34,17 @@ const (
 	sharedRootServiceToken  = "shared-service-account-root-token"
 	defaultCredentialTTL    = 15 * time.Minute
 	pkceChallengeTTL        = 5 * time.Minute
+	consumedNonceTTL        = 15 * time.Minute
 	pkceCodeChallengeMethod = "S256"
 	jiraIssueSEC101URL      = "https://api.atlassian.com/ex/jira/acme/rest/api/3/issue/SEC-101"
 	githubAdvisorySEC101URL = "https://api.github.com/repos/acme-secops/checkout-service/security-advisories/GHSA-sec-101"
 )
+
+type grantSlotKey struct {
+	sessionID string
+	persona   PersonaID
+	provider  ProviderID
+}
 
 // PKCEChallengeState stores a one-time RFC 7636 S256 PKCE authorization challenge in memory.
 type PKCEChallengeState struct {
@@ -98,12 +105,11 @@ type TokenBroker struct {
 	store            auth.CredentialStore
 	mu               sync.RWMutex
 	gcpClient        *gcp.Client
-	revoked          map[string]bool
-	nonFixtureGrants map[string]string
-	grantMeta        map[string]ephemeralGrantMeta
-	nonces           map[string]ConsentChallenge
+	revoked          map[grantSlotKey]bool
+	nonFixtureGrants map[grantSlotKey]string
+	grantMeta        map[grantSlotKey]ephemeralGrantMeta
 	pkceChallenges   map[string]PKCEChallengeState
-	consumedNonces   map[string]bool
+	consumedNonces   map[string]time.Time
 }
 
 // NewTokenBroker constructs a TokenBroker bound to rt.
@@ -111,49 +117,87 @@ func NewTokenBroker(rt *Runtime) *TokenBroker {
 	b := &TokenBroker{
 		rt:               rt,
 		store:            auth.NewInMemoryCredentialStore(),
-		revoked:          make(map[string]bool),
-		nonFixtureGrants: make(map[string]string),
-		grantMeta:        make(map[string]ephemeralGrantMeta),
-		nonces:           make(map[string]ConsentChallenge),
+		revoked:          make(map[grantSlotKey]bool),
+		nonFixtureGrants: make(map[grantSlotKey]string),
+		grantMeta:        make(map[grantSlotKey]ephemeralGrantMeta),
 		pkceChallenges:   make(map[string]PKCEChallengeState),
-		consumedNonces:   make(map[string]bool),
+		consumedNonces:   make(map[string]time.Time),
 	}
 	b.seedConfiguredTokens(context.Background(), "default-session")
 	return b
 }
 
 func (b *TokenBroker) seedWarmSessionGrants(sessionID string) {
+	if sessionID == "" {
+		sessionID = "default-session"
+	}
 	now := time.Now().UTC()
 	expiresAt := now.Add(defaultCredentialTTL)
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	storeExpiry := expiresAt.Add(auth.ExpirySkew)
+
+	type pendingStoreItem struct {
+		key   auth.CredentialKey
+		token string
+	}
+	var toStore []pendingStoreItem
+
+	type candidateGrant struct {
+		persona  PersonaID
+		provider ProviderID
+		scopes   []string
+		token    string
+	}
+	var candidates []candidateGrant
 	for _, persona := range []PersonaID{PersonaAlice, PersonaBob} {
 		for _, provider := range []ProviderID{ProviderGoogleGmail, ProviderAtlassianJira, ProviderGitHub, ProviderGCPIAM} {
-			slot := revocationSlot(sessionID, persona, provider)
-			if b.revoked[slot] {
-				continue
-			}
-			if _, exists := b.grantMeta[slot]; exists {
-				continue
-			}
-			b.grantMeta[slot] = ephemeralGrantMeta{
-				SessionID:           sessionID,
-				Persona:             persona,
-				Provider:            provider,
-				Scopes:              defaultScopesForProvider(provider),
-				AuthMethod:          "oauth2_pkce_s256",
-				PKCEVerified:        true,
-				CodeChallengeMethod: pkceCodeChallengeMethod,
-				IssuedAt:            now,
-				ExpiresAt:           expiresAt,
-			}
+			candidates = append(candidates, candidateGrant{
+				persona:  persona,
+				provider: provider,
+				scopes:   defaultScopesForProvider(provider),
+				token:    b.configuredOrDefaultPersonaToken(persona, provider),
+			})
 		}
+	}
+
+	b.mu.Lock()
+	for _, c := range candidates {
+		slot := grantSlotKey{sessionID: sessionID, persona: c.persona, provider: c.provider}
+		if b.revoked[slot] {
+			continue
+		}
+		if _, exists := b.grantMeta[slot]; exists {
+			continue
+		}
+		b.grantMeta[slot] = ephemeralGrantMeta{
+			SessionID:           sessionID,
+			Persona:             c.persona,
+			Provider:            c.provider,
+			Scopes:              c.scopes,
+			AuthMethod:          "warm_session_seed",
+			PKCEVerified:        false,
+			CodeChallengeMethod: "",
+			IssuedAt:            now,
+			ExpiresAt:           expiresAt,
+		}
+		toStore = append(toStore, pendingStoreItem{
+			key:   b.credentialKey(sessionID, c.persona, c.provider, c.scopes),
+			token: c.token,
+		})
+	}
+	b.mu.Unlock()
+
+	ctx := context.Background()
+	for _, item := range toStore {
+		_ = b.store.Set(ctx, item.key, auth.BearerCredential{Token: item.token}, storeExpiry)
 	}
 }
 
-func (b *TokenBroker) syncAndPruneSession(ctx context.Context, sessionID string) *SessionSnapshot {
+func (b *TokenBroker) pruneExpiredGrants(ctx context.Context, sessionID string) *SessionSnapshot {
 	if sessionID == "" {
 		sessionID = "default-session"
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	now := time.Now().UTC()
 
@@ -174,14 +218,22 @@ func (b *TokenBroker) syncAndPruneSession(ctx context.Context, sessionID string)
 
 	b.mu.Lock()
 	for slot, meta := range b.grantMeta {
-		if meta.SessionID != sessionID {
+		if slot.sessionID != sessionID {
 			continue
 		}
 		if b.revoked[slot] {
 			delete(b.grantMeta, slot)
+			delete(b.nonFixtureGrants, slot)
+			expired = append(expired, expiredItem{
+				persona:  meta.Persona,
+				provider: meta.Provider,
+				scopes:   meta.Scopes,
+			})
 			continue
 		}
-		if !meta.ExpiresAt.After(now) {
+		defKey := b.credentialKey(sessionID, meta.Persona, meta.Provider, defaultScopesForProvider(meta.Provider))
+		_, hit, err := b.store.Get(ctx, defKey)
+		if !meta.ExpiresAt.After(now) || err != nil || !hit {
 			delete(b.grantMeta, slot)
 			delete(b.nonFixtureGrants, slot)
 			expired = append(expired, expiredItem{
@@ -245,12 +297,13 @@ func (b *TokenBroker) seedConfiguredTokens(ctx context.Context, sessionID string
 	if b.rt == nil {
 		return
 	}
+	storeExpiry := time.Now().UTC().Add(defaultCredentialTTL).Add(auth.ExpirySkew)
 	for _, persona := range []PersonaID{PersonaAlice, PersonaBob} {
 		for _, provider := range []ProviderID{ProviderGitHub, ProviderGoogleGmail, ProviderAtlassianJira, ProviderGCPIAM} {
 			if tok := b.configuredPersonaToken(persona, provider); tok != "" {
 				scopes := defaultScopesForProvider(provider)
 				key := b.credentialKey(sessionID, persona, provider, scopes)
-				_ = b.store.Set(ctx, key, auth.BearerCredential{Token: tok}, time.Now().Add(defaultCredentialTTL))
+				_ = b.store.Set(ctx, key, auth.BearerCredential{Token: tok}, storeExpiry)
 			}
 		}
 	}
@@ -383,7 +436,7 @@ func (b *TokenBroker) Credential(ctx context.Context) (auth.Credential, error) {
 		}
 	}
 
-	if inv.RequireCold3LOConsent || !b.hasActiveGrant(inv.SessionID, inv.Persona, inv.Provider) {
+	if inv.RequireCold3LOConsent || !b.hasActiveGrant(ctx, inv.SessionID, inv.Persona, inv.Provider) {
 		challenge := b.issueConsentChallenge(inv.SessionID, inv.Persona, inv.Provider, inv.Scopes)
 		key := b.credentialKey(inv.SessionID, inv.Persona, inv.Provider, inv.Scopes)
 		return nil, fmt.Errorf("tokenbroker: 3LO consent required for %s/%s: %w", inv.Persona, inv.Provider, &auth.ConsentRequiredError{
@@ -398,10 +451,29 @@ func (b *TokenBroker) Credential(ctx context.Context) (auth.Credential, error) {
 		return cached, nil
 	}
 
-	// Seed configured or deterministic per-persona 3LO token for warm session
+	slot := grantSlotKey{sessionID: inv.SessionID, persona: inv.Persona, provider: inv.Provider}
+	b.mu.RLock()
+	meta, hasMeta := b.grantMeta[slot]
+	b.mu.RUnlock()
+	if !hasMeta || !meta.ExpiresAt.After(time.Now().UTC()) {
+		challenge := b.issueConsentChallenge(inv.SessionID, inv.Persona, inv.Provider, inv.Scopes)
+		return nil, fmt.Errorf("tokenbroker: 3LO consent required for %s/%s: %w", inv.Persona, inv.Provider, &auth.ConsentRequiredError{
+			AuthURI: challenge.AuthURI,
+			Nonce:   challenge.Nonce,
+			Key:     key.Key,
+		})
+	}
+
+	storeExpiry := meta.ExpiresAt.Add(auth.ExpirySkew)
+	defKey := b.credentialKey(inv.SessionID, inv.Persona, inv.Provider, defaultScopesForProvider(inv.Provider))
+	if defCred, hit, err := b.store.Get(ctx, defKey); err == nil && hit {
+		_ = b.store.Set(ctx, key, defCred, storeExpiry)
+		return defCred, nil
+	}
+
 	token := b.configuredOrDefaultPersonaToken(inv.Persona, inv.Provider)
 	cred := auth.BearerCredential{Token: token}
-	_ = b.store.Set(ctx, key, cred, time.Now().Add(defaultCredentialTTL))
+	_ = b.store.Set(ctx, key, cred, storeExpiry)
 	return cred, nil
 }
 
@@ -424,40 +496,55 @@ func (b *TokenBroker) Refresh(ctx context.Context, rejected auth.Credential) (au
 // ErrPKCEVerificationFailed indicates an invalid, missing, expired, or replayed RFC 7636 S256 PKCE verifier.
 var ErrPKCEVerificationFailed = errors.New("tokenbroker: OAuth 2.0 S256 PKCE verification failed")
 
+func (b *TokenBroker) pruneExpiredPKCEChallengesLocked(now time.Time) {
+	for k, st := range b.pkceChallenges {
+		if !st.ExpiresAt.After(now) {
+			delete(b.pkceChallenges, k)
+		}
+	}
+	for k, exp := range b.consumedNonces {
+		if !exp.After(now) {
+			delete(b.consumedNonces, k)
+		}
+	}
+}
+
 func (b *TokenBroker) verifyAndConsumePKCE(nonce, codeVerifier string) (string, bool, error) {
 	nonce = strings.TrimSpace(nonce)
 	codeVerifier = strings.TrimSpace(codeVerifier)
+	now := time.Now().UTC()
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if nonce != "" && b.consumedNonces[nonce] {
-		return "", false, fmt.Errorf("%w: challenge nonce already consumed", ErrPKCEVerificationFailed)
+	if nonce != "" {
+		if exp, consumed := b.consumedNonces[nonce]; consumed && exp.After(now) {
+			b.pruneExpiredPKCEChallengesLocked(now)
+			return "", false, fmt.Errorf("%w: challenge nonce already consumed", ErrPKCEVerificationFailed)
+		}
 	}
 
+	b.pruneExpiredPKCEChallengesLocked(now)
+
 	if nonce != "" {
-		if st, ok := b.pkceChallenges[nonce]; ok {
-			if time.Now().UTC().After(st.ExpiresAt) {
-				delete(b.pkceChallenges, nonce)
-				delete(b.nonces, nonce)
-				return "", false, fmt.Errorf("%w: challenge nonce expired", ErrPKCEVerificationFailed)
-			}
-			candidate := codeVerifier
-			if candidate == "" {
-				if st.ClientBoundPKCE {
-					return "", false, fmt.Errorf("%w: missing code_verifier for client-bound S256 PKCE challenge", ErrPKCEVerificationFailed)
-				}
-				candidate = st.CodeVerifier
-			}
-			computed := computeS256CodeChallenge(candidate)
-			if subtle.ConstantTimeCompare([]byte(computed), []byte(st.CodeChallenge)) != 1 {
-				return "", false, fmt.Errorf("%w: S256 code_verifier mismatch", ErrPKCEVerificationFailed)
-			}
-			delete(b.pkceChallenges, nonce)
-			delete(b.nonces, nonce)
-			b.consumedNonces[nonce] = true
-			return candidate, true, nil
+		st, ok := b.pkceChallenges[nonce]
+		if !ok {
+			return "", false, fmt.Errorf("%w: unknown or expired PKCE challenge state", ErrPKCEVerificationFailed)
 		}
+		candidate := codeVerifier
+		if candidate == "" {
+			if st.ClientBoundPKCE {
+				return "", false, fmt.Errorf("%w: missing code_verifier for client-bound S256 PKCE challenge", ErrPKCEVerificationFailed)
+			}
+			candidate = st.CodeVerifier
+		}
+		computed := computeS256CodeChallenge(candidate)
+		if subtle.ConstantTimeCompare([]byte(computed), []byte(st.CodeChallenge)) != 1 {
+			return "", false, fmt.Errorf("%w: S256 code_verifier mismatch", ErrPKCEVerificationFailed)
+		}
+		delete(b.pkceChallenges, nonce)
+		b.consumedNonces[nonce] = now.Add(consumedNonceTTL)
+		return candidate, true, nil
 	}
 
 	if codeVerifier != "" {
@@ -468,14 +555,28 @@ func (b *TokenBroker) verifyAndConsumePKCE(nonce, codeVerifier string) (string, 
 
 // VerifyAndGrant validates any RFC 7636 S256 PKCE challenge/verifier pair on req before granting the token.
 func (b *TokenBroker) VerifyAndGrant(ctx context.Context, req OAuthGrantRequest) (*SessionSnapshot, error) {
-	if _, _, err := b.verifyAndConsumePKCE(req.Nonce, req.CodeVerifier); err != nil {
+	_, verified, err := b.verifyAndConsumePKCE(req.Nonce, req.CodeVerifier)
+	if err != nil {
 		return nil, err
 	}
-	return b.Grant(ctx, req), nil
+	return b.grantInternal(ctx, req, verified), nil
+}
+
+func normalizeNonPKCEAuthMethod(raw string) string {
+	switch strings.TrimSpace(raw) {
+	case "fixture_seed", "warm_session_seed", "a2a_server_side_oauth2", "direct_grant":
+		return strings.TrimSpace(raw)
+	default:
+		return "direct_grant"
+	}
 }
 
 // Grant stores a 3LO token for (SessionID, Persona, Provider, Scopes) and marks the provider granted.
 func (b *TokenBroker) Grant(ctx context.Context, req OAuthGrantRequest) *SessionSnapshot {
+	return b.grantInternal(ctx, req, false)
+}
+
+func (b *TokenBroker) grantInternal(ctx context.Context, req OAuthGrantRequest, pkceVerified bool) *SessionSnapshot {
 	sessionID := req.SessionID
 	if sessionID == "" {
 		sessionID = "default-session"
@@ -504,10 +605,17 @@ func (b *TokenBroker) Grant(ctx context.Context, req OAuthGrantRequest) *Session
 	now := time.Now().UTC()
 	expiresAt := now.Add(ttl)
 
+	authMethod := normalizeNonPKCEAuthMethod(req.AuthMethod)
+	codeChallengeMethod := ""
+	if pkceVerified {
+		authMethod = "oauth2_pkce_s256"
+		codeChallengeMethod = pkceCodeChallengeMethod
+	}
+
 	b.rt.ensureSessionInitialized(sessionID)
 
 	b.mu.Lock()
-	slot := revocationSlot(sessionID, persona, provider)
+	slot := grantSlotKey{sessionID: sessionID, persona: persona, provider: provider}
 	delete(b.revoked, slot)
 	if !isFixture3LOToken(token) {
 		b.nonFixtureGrants[slot] = token
@@ -519,16 +627,16 @@ func (b *TokenBroker) Grant(ctx context.Context, req OAuthGrantRequest) *Session
 		Persona:             persona,
 		Provider:            provider,
 		Scopes:              append([]string(nil), scopes...),
-		AuthMethod:          "oauth2_pkce_s256",
-		PKCEVerified:        true,
-		CodeChallengeMethod: pkceCodeChallengeMethod,
+		AuthMethod:          authMethod,
+		PKCEVerified:        pkceVerified,
+		CodeChallengeMethod: codeChallengeMethod,
 		IssuedAt:            now,
 		ExpiresAt:           expiresAt,
 	}
 	b.mu.Unlock()
 
 	// Offset ADK InMemoryCredentialStore's internal 10s ExpirySkew so sub-10s TTL overrides
-	// remain readable until exact wall-clock expiresAt, when syncAndPruneSession deletes them.
+	// remain readable until exact wall-clock expiresAt, when pruneExpiredGrants deletes them.
 	storeExpiry := expiresAt.Add(auth.ExpirySkew)
 	key := b.credentialKey(sessionID, persona, provider, scopes)
 	_ = b.store.Set(ctx, key, auth.BearerCredential{Token: token}, storeExpiry)
@@ -560,7 +668,7 @@ func (b *TokenBroker) Revoke(ctx context.Context, sessionID string, persona Pers
 	}
 
 	b.mu.Lock()
-	slot := revocationSlot(sessionID, persona, provider)
+	slot := grantSlotKey{sessionID: sessionID, persona: persona, provider: provider}
 	b.revoked[slot] = true
 	delete(b.nonFixtureGrants, slot)
 	delete(b.grantMeta, slot)
@@ -591,14 +699,18 @@ func (b *TokenBroker) HasNonFixtureGrant(provider ProviderID) bool {
 		return false
 	}
 	now := time.Now().UTC()
+	ctx := context.Background()
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	suffix := fmt.Sprintf("|%d:%s", len(provider), provider)
 	for slot, tok := range b.nonFixtureGrants {
-		if !strings.HasSuffix(slot, suffix) || b.revoked[slot] || isFixture3LOToken(tok) {
+		if slot.provider != provider || b.revoked[slot] || isFixture3LOToken(tok) {
 			continue
 		}
 		if meta, hasMeta := b.grantMeta[slot]; hasMeta && !meta.ExpiresAt.After(now) {
+			continue
+		}
+		defKey := b.credentialKey(slot.sessionID, slot.persona, slot.provider, defaultScopesForProvider(slot.provider))
+		if _, hit, err := b.store.Get(ctx, defKey); err != nil || !hit {
 			continue
 		}
 		return true
@@ -615,14 +727,38 @@ func isFixture3LOToken(token string) bool {
 		tok == sharedRootServiceToken
 }
 
-func (b *TokenBroker) hasActiveGrant(sessionID string, persona PersonaID, provider ProviderID) bool {
+func (b *TokenBroker) hasActiveGrant(ctx context.Context, sessionID string, persona PersonaID, provider ProviderID) bool {
+	if sessionID == "" {
+		sessionID = "default-session"
+	}
+	if persona == "" {
+		persona = PersonaAlice
+	}
+	if provider == "" {
+		provider = ProviderAtlassianJira
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	b.rt.ensureSessionInitialized(sessionID)
+
+	slot := grantSlotKey{sessionID: sessionID, persona: persona, provider: provider}
 	b.mu.RLock()
-	isRevoked := b.revoked[revocationSlot(sessionID, persona, provider)]
+	isRevoked := b.revoked[slot]
+	meta, hasMeta := b.grantMeta[slot]
 	b.mu.RUnlock()
 	if isRevoked {
 		return false
 	}
-	snap := b.rt.GetOrCreateSession(sessionID)
+
+	defKey := b.credentialKey(sessionID, persona, provider, defaultScopesForProvider(provider))
+	_, hit, err := b.store.Get(ctx, defKey)
+	if !hasMeta || !meta.ExpiresAt.After(time.Now().UTC()) || err != nil || !hit {
+		b.pruneExpiredGrants(ctx, sessionID)
+		return false
+	}
+
+	snap := b.pruneExpiredGrants(ctx, sessionID)
 	for _, p := range snap.GrantedProviders[persona] {
 		if p == provider {
 			return true
@@ -636,6 +772,15 @@ func (b *TokenBroker) issueConsentChallenge(sessionID string, persona PersonaID,
 }
 
 func (b *TokenBroker) issueConsentChallengeWithPKCE(sessionID string, persona PersonaID, provider ProviderID, scopes []string, clientCodeChallenge string) ConsentChallenge {
+	if sessionID == "" {
+		sessionID = "default-session"
+	}
+	if persona == "" {
+		persona = PersonaAlice
+	}
+	if provider == "" {
+		provider = ProviderAtlassianJira
+	}
 	nonce := randomHex(12)
 	var (
 		codeVerifier  string
@@ -687,13 +832,15 @@ func (b *TokenBroker) issueConsentChallengeWithPKCE(sessionID string, persona Pe
 		ExpiresInSeconds:    int(defaultCredentialTTL.Seconds()),
 	}
 	now := time.Now().UTC()
+	targetSlot := grantSlotKey{sessionID: sessionID, persona: persona, provider: provider}
+
 	b.mu.Lock()
+	b.pruneExpiredPKCEChallengesLocked(now)
 	for k, st := range b.pkceChallenges {
-		if now.After(st.ExpiresAt) {
+		if (grantSlotKey{sessionID: st.SessionID, persona: st.Persona, provider: st.Provider}) == targetSlot {
 			delete(b.pkceChallenges, k)
 		}
 	}
-	b.nonces[nonce] = ch
 	b.pkceChallenges[nonce] = PKCEChallengeState{
 		SessionID:           sessionID,
 		Persona:             persona,
@@ -828,15 +975,31 @@ func registerTokenBrokerRoutes(mux *http.ServeMux, rt *Runtime) {
 		nonce := firstNonEmpty(r.URL.Query().Get("nonce"), r.URL.Query().Get("state"))
 		codeVerifier := firstNonEmpty(r.URL.Query().Get("code_verifier"), r.URL.Query().Get("codeVerifier"))
 
-		resolvedVerifier, _, err := rt.TokenBroker().verifyAndConsumePKCE(nonce, codeVerifier)
+		if strings.TrimSpace(nonce) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": fmt.Sprintf("%s: missing OAuth state/nonce parameter", ErrPKCEVerificationFailed),
+			})
+			return
+		}
+
+		resolvedVerifier, verified, err := rt.TokenBroker().verifyAndConsumePKCE(nonce, codeVerifier)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
+		if !verified {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": fmt.Sprintf("%s: unverified OAuth callback state", ErrPKCEVerificationFailed),
+			})
+			return
+		}
 
-		token := fmt.Sprintf("3lo-%s-%s-%s", persona, provider, code)
+		token := rt.TokenBroker().configuredPersonaToken(persona, provider)
 		if exchanged, err := rt.TokenBroker().exchangeOAuthCode(r.Context(), provider, code, resolvedVerifier); err == nil && exchanged != "" {
 			token = exchanged
+		}
+		if token == "" {
+			token = fmt.Sprintf("3lo-%s-%s-%s", persona, provider, code)
 		}
 
 		var ttlSeconds int
@@ -846,13 +1009,13 @@ func registerTokenBrokerRoutes(mux *http.ServeMux, rt *Runtime) {
 			}
 		}
 
-		snap := rt.TokenBroker().Grant(r.Context(), OAuthGrantRequest{
+		snap := rt.TokenBroker().grantInternal(r.Context(), OAuthGrantRequest{
 			SessionID:  sessionID,
 			Persona:    persona,
 			Provider:   provider,
 			Token:      token,
 			TTLSeconds: ttlSeconds,
-		})
+		}, true)
 		writeJSON(w, http.StatusOK, snap)
 	})
 
@@ -864,6 +1027,7 @@ func registerTokenBrokerRoutes(mux *http.ServeMux, rt *Runtime) {
 			return
 		}
 		req.SessionID = sessionID
+		req.AuthMethod = ""
 		snap, err := rt.TokenBroker().VerifyAndGrant(r.Context(), req)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -1012,10 +1176,6 @@ func sameBearerToken(a, b auth.Credential) bool {
 	_ = a.Apply(ha)
 	_ = b.Apply(hb)
 	return ha.Get("Authorization") == hb.Get("Authorization")
-}
-
-func revocationSlot(sessionID string, persona PersonaID, provider ProviderID) string {
-	return fmt.Sprintf("%d:%s|%d:%s|%d:%s", len(sessionID), sessionID, len(persona), persona, len(provider), provider)
 }
 
 func appendProviderUnique(list []ProviderID, item ProviderID) []ProviderID {

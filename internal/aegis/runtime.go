@@ -143,7 +143,7 @@ func (r *Runtime) GetOrCreateSession(sessionID string) *SessionSnapshot {
 		sessionID = "default-session"
 	}
 	r.ensureSessionInitialized(sessionID)
-	return r.TokenBroker().syncAndPruneSession(context.Background(), sessionID)
+	return r.TokenBroker().pruneExpiredGrants(context.Background(), sessionID)
 }
 
 // UpdateSession mutates a session under lock and synchronizes ephemeral grant metadata.
@@ -153,7 +153,7 @@ func (r *Runtime) UpdateSession(sessionID string, fn func(s *SessionSnapshot)) *
 	}
 	r.ensureSessionInitialized(sessionID)
 	r.mutateSessionRaw(sessionID, fn)
-	return r.TokenBroker().syncAndPruneSession(context.Background(), sessionID)
+	return r.TokenBroker().pruneExpiredGrants(context.Background(), sessionID)
 }
 
 // CompleteOAuthConsent completes a 3LO OAuth grant for a Persona and Provider via the Runtime's TokenBroker.

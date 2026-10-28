@@ -265,6 +265,7 @@ type OAuthGrantRequest struct {
 	AccessToken  string     `json:"accessToken,omitempty"`
 	Nonce        string     `json:"nonce,omitempty"`
 	CodeVerifier string     `json:"codeVerifier,omitempty"`
+	AuthMethod   string     `json:"authMethod,omitempty"`
 	TTLSeconds   int        `json:"ttlSeconds,omitempty"`
 }
 

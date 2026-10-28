@@ -1402,6 +1402,15 @@ func TestPhase4_OAuth2S256PKCEAndSubSecondTTLPruningEval(t *testing.T) {
 		t.Fatalf("tampered /oauth/atlassian_jira/callback status = %d, want 400 Bad Request", badCBResp.StatusCode)
 	}
 
+	missingStateCBResp, err := srv.Client().Get(srv.URL + "/oauth/atlassian_jira/callback?session_id=" + sessionID + "&persona=alice&code=demo_code")
+	if err != nil {
+		t.Fatalf("GET state-less /oauth/atlassian_jira/callback: %v", err)
+	}
+	missingStateCBResp.Body.Close()
+	if missingStateCBResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("state-less /oauth/atlassian_jira/callback status = %d, want 400 Bad Request", missingStateCBResp.StatusCode)
+	}
+
 	// 4. Valid codeVerifier with 1s TTL succeeds and stores token strictly in ephemeral in-memory vault (zero raw token leakage)
 	const sentinelBearer = "3lo-alice-google_gmail-eval-vault-secret-987654321"
 	validRaw, _ := json.Marshal(aegis.OAuthGrantRequest{
@@ -1435,7 +1444,7 @@ func TestPhase4_OAuth2S256PKCEAndSubSecondTTLPruningEval(t *testing.T) {
 		t.Fatalf("replay /oauth/grant status = %d, want 400 Bad Request", replayResp.StatusCode)
 	}
 
-	// Inspect GET /api/sessions/{id} non-secret EphemeralGrantInfo metadata & zero raw token leakage
+	// Inspect GET /api/sessions/{id} non-secret EphemeralPKCEGrant metadata & zero raw token leakage
 	sessResp, err := srv.Client().Get(srv.URL + "/api/sessions/" + sessionID)
 	if err != nil {
 		t.Fatalf("GET /api/sessions/%s: %v", sessionID, err)
@@ -1454,11 +1463,13 @@ func TestPhase4_OAuth2S256PKCEAndSubSecondTTLPruningEval(t *testing.T) {
 		if eg.Provider == aegis.ProviderGoogleGmail {
 			sawActiveGmailMeta = true
 			if eg.AuthMethod != "oauth2_pkce_s256" || !eg.PKCEVerified || eg.CodeChallengeMethod != "S256" {
-				t.Errorf("unexpected EphemeralGrantInfo metadata: %+v", eg)
+				t.Errorf("unexpected EphemeralPKCEGrant metadata: %+v", eg)
 			}
 			if d := eg.ExpiresAt.Sub(eg.IssuedAt); d != time.Second {
 				t.Errorf("grant TTL window = %v, want 1s", d)
 			}
+		} else if eg.AuthMethod != "warm_session_seed" || eg.PKCEVerified {
+			t.Errorf("expected non-PKCE warm seed grant %s to have AuthMethod=warm_session_seed and PKCEVerified=false, got %+v", eg.Provider, eg)
 		}
 	}
 	if !sawActiveGmailMeta {
