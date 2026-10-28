@@ -43,6 +43,26 @@ var canonicalGovernedToolNames = []string{
 	"create_github_pull_request",
 }
 
+// Canonical lifecycle callback names registered on AegisSecurityPlugin (plugin.Config).
+var canonicalSecurityPluginCallbacks = []string{
+	"BeforeRun",
+	"BeforeModel",
+	"BeforeTool",
+	"AfterTool",
+	"AfterModel",
+	"OnEvent",
+}
+
+// CanonicalGovernedToolNames returns a copy of the canonical ADK Go v2 functiontool names.
+func CanonicalGovernedToolNames() []string {
+	return append([]string(nil), canonicalGovernedToolNames...)
+}
+
+// CanonicalSecurityPluginCallbacks returns a copy of the 6 AegisSecurityPlugin lifecycle hook names in execution order.
+func CanonicalSecurityPluginCallbacks() []string {
+	return append([]string(nil), canonicalSecurityPluginCallbacks...)
+}
+
 type plannedToolCall struct {
 	Name string
 	Args governedToolInput

@@ -18,6 +18,24 @@
           </svg>
         </div>
         <span class="brand-name">AegisSRE</span>
+        <nav class="route-switcher" aria-label="Primary View Navigation">
+          <button type="button" id="nav-route-arena" class="route-seg-btn active" data-route="/" aria-current="page">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+            </svg>
+            <span>Arena</span>
+          </button>
+          <button type="button" id="nav-route-about" class="route-seg-btn" data-route="/about">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="18" cy="5" r="3"/>
+              <circle cx="6" cy="12" r="3"/>
+              <circle cx="18" cy="19" r="3"/>
+              <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/>
+              <line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
+            </svg>
+            <span>Architecture</span>
+          </button>
+        </nav>
         <button type="button" id="btn-new-chat" class="ghost-pill-btn" title="Clear conversation and return to welcome screen">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M12 5v14M5 12h14"/>
@@ -173,6 +191,171 @@
 
         <!-- Dynamic Conversation Messages Append Here -->
         <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
+      </div>
+    </main>
+
+    <!-- Interactive Architecture Topology Visualizer (/about) -->
+    <main id="about-view" class="about-view" aria-label="Architecture Topology Catalog" hidden>
+      <div class="about-container">
+        <!-- Compact Architecture Hero Header -->
+        <header id="about-hero" class="about-hero">
+          <div class="about-hero-copy">
+            <div class="about-eyebrow">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                <path d="m9 12 2 2 4-4"/>
+              </svg>
+              <span>Zero-Trust Reference Architecture · Gemini Enterprise Agent Platform &amp; GKE</span>
+            </div>
+            <h1 class="about-title">How AegisSRE Works</h1>
+            <p class="about-subtitle">
+              Interactive 6-boundary defense-in-depth topology, ADK Go v2 security plugin state machine, and live external provenance.
+            </p>
+          </div>
+          <div class="about-hero-stats" id="about-summary-pills">
+            <span class="about-stat-pill"><strong>6</strong> Security Boundaries</span>
+            <span class="about-stat-pill"><strong>6</strong> Plugin Hooks</span>
+            <span class="about-stat-pill"><strong>8</strong> Governed Tools</span>
+            <span class="about-stat-pill" id="about-live-sources-pill"><strong>8</strong> External Sources</span>
+            <span class="about-stat-pill" id="about-adr-count-pill"><strong>13</strong> Accepted ADRs</span>
+          </div>
+        </header>
+
+        <!-- Module 1: Interactive 6-Boundary SVG Topology & Red-vs-Blue Packet-Pulse Simulator -->
+        <section id="about-topology-module" class="about-module-card" aria-labelledby="about-topology-heading">
+          <div class="about-module-header">
+            <div class="about-module-title-wrap">
+              <span class="about-module-index">01</span>
+              <div>
+                <h2 id="about-topology-heading" class="about-module-title">Interactive 6-Boundary SVG Topology &amp; Packet-Pulse Simulator</h2>
+                <p class="about-module-desc">Select a scenario, switch Blue (Defended) vs. Red (Vulnerable) posture, or click any boundary node (B1–B6) to inspect its runtime controls.</p>
+              </div>
+            </div>
+            <div class="topology-posture-controls" role="group" aria-label="Simulation Security Posture">
+              <div class="sim-posture-switch">
+                <button type="button" id="btn-sim-posture-blue" class="sim-posture-btn sim-blue active">
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                  </svg>
+                  <span>Blue · Defended</span>
+                </button>
+                <button type="button" id="btn-sim-posture-red" class="sim-posture-btn sim-red">
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                    <line x1="12" y1="9" x2="12" y2="13"/>
+                    <line x1="12" y1="17" x2="12.01" y2="17"/>
+                  </svg>
+                  <span>Red · Vulnerable</span>
+                </button>
+              </div>
+              <button type="button" id="btn-sim-replay" class="sim-replay-btn" title="Replay animated packet-pulse trajectory">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <polygon points="5 3 19 12 5 21 5 3"/>
+                </svg>
+                <span>Replay Pulse</span>
+              </button>
+            </div>
+          </div>
+
+          <div id="topology-scenario-pills" class="topology-scenario-pills" role="tablist" aria-label="Simulation Scenarios"></div>
+
+          <div id="topology-trajectory-banner" class="topology-trajectory-banner" aria-live="polite"></div>
+
+          <div id="about-topology-svg-stage" class="about-svg-stage" aria-label="Interactive 6-Boundary SVG Diagram"></div>
+
+          <div class="topology-legend-bar" aria-label="Packet-Pulse Verdict Legend">
+            <span class="legend-item"><span class="legend-dot verdict-PASS"></span>PASS</span>
+            <span class="legend-item"><span class="legend-dot verdict-REDACTED"></span>REDACTED (Cloud SDP)</span>
+            <span class="legend-item"><span class="legend-dot verdict-BLOCKED"></span>BLOCKED (Policy / MITM)</span>
+            <span class="legend-item"><span class="legend-dot verdict-STEP-UP"></span>STEP-UP (Human Approval)</span>
+            <span class="legend-item"><span class="legend-dot verdict-EXFILTRATED"></span>EXFILTRATED (Red Posture)</span>
+          </div>
+
+          <div class="topology-bottom-grid">
+            <div class="pulse-log-panel">
+              <div class="subpanel-header">
+                <span class="subpanel-title">Animated Signal Trajectory Hops</span>
+                <span id="pulse-step-counter" class="subpanel-meta">Click a hop to inspect</span>
+              </div>
+              <div id="topology-pulse-log" class="topology-pulse-log"></div>
+            </div>
+
+            <div id="boundary-inspector-card" class="boundary-inspector-card" aria-live="polite"></div>
+          </div>
+        </section>
+
+        <!-- Module 2: AegisSecurityPlugin Callback State Machine & SSE Wire Preview -->
+        <section id="about-lifecycle-module" class="about-module-card" aria-labelledby="about-lifecycle-heading">
+          <div class="about-module-header">
+            <div class="about-module-title-wrap">
+              <span class="about-module-index">02</span>
+              <div>
+                <h2 id="about-lifecycle-heading" class="about-module-title">AegisSecurityPlugin Callback State Machine &amp; SSE Wire Preview</h2>
+                <p class="about-module-desc">Click any of the 6 ADK Go v2 lifecycle hooks to inspect its short-circuit semantics, active boundaries, governed tools, and real-time SSE wire frame.</p>
+              </div>
+            </div>
+          </div>
+
+          <div id="lifecycle-stage-track" class="lifecycle-stage-track" role="tablist" aria-label="ADK Security Plugin Callback Stages"></div>
+
+          <div class="lifecycle-bottom-grid">
+            <div id="lifecycle-detail-panel" class="lifecycle-detail-panel" aria-live="polite"></div>
+
+            <div class="lifecycle-sse-box">
+              <div class="subpanel-header">
+                <span class="subpanel-title">Progressive SSE TurnStreamEvent Frame</span>
+                <span id="lifecycle-sse-event-badge" class="mime-tag">text/event-stream</span>
+              </div>
+              <pre id="lifecycle-sse-preview" class="lifecycle-sse-preview"></pre>
+            </div>
+          </div>
+        </section>
+
+        <!-- Module 3: Live 8-Source Provenance, Tool Governance & ADR Matrix -->
+        <section id="about-governance-module" class="about-module-card" aria-labelledby="about-governance-heading">
+          <div class="about-module-header">
+            <div class="about-module-title-wrap">
+              <span class="about-module-index">03</span>
+              <div>
+                <h2 id="about-governance-heading" class="about-module-title">Live 8-Source Provenance, Tool Governance &amp; Architecture Decision Records</h2>
+                <p class="about-module-desc">Live connection status across all 8 External Sources, 8 governed ADK functiontool policies, and all accepted ADRs synchronized with docs/adr/.</p>
+              </div>
+            </div>
+            <button type="button" id="btn-refresh-about-catalog" class="ghost-pill-btn" title="Refresh live external source provenance">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                <path d="M3 3v5h5"/>
+                <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/>
+                <path d="M16 16h5v5"/>
+              </svg>
+              <span>Refresh Provenance</span>
+            </button>
+          </div>
+
+          <div class="governance-subsection">
+            <div class="subpanel-header">
+              <span class="subpanel-title">8 External Sources — Live vs. Fixture Provenance</span>
+              <span id="about-sources-summary" class="subpanel-meta">Probing runtime connectors...</span>
+            </div>
+            <div id="about-sources-grid" class="about-sources-grid"></div>
+          </div>
+
+          <div class="governance-subsection">
+            <div class="subpanel-header">
+              <span class="subpanel-title">8 Governed ADK Go v2 Function Tools</span>
+              <span class="subpanel-meta">1:1 Parity with Registered Runner Tools</span>
+            </div>
+            <div id="about-tools-grid" class="about-tools-grid"></div>
+          </div>
+
+          <div class="governance-subsection">
+            <div class="subpanel-header">
+              <span class="subpanel-title">Accepted Architecture Decision Records (docs/adr/)</span>
+              <div id="adr-filter-pills" class="adr-filter-pills" role="group" aria-label="Filter ADRs by Security Boundary"></div>
+            </div>
+            <div id="about-adr-grid" class="about-adr-grid"></div>
+          </div>
+        </section>
       </div>
     </main>
 
