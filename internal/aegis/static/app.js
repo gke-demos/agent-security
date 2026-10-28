@@ -65,6 +65,7 @@
       catalog: null,
       loading: false,
       activeTab: "topology",
+      activeRefSubtab: "tools",
       simScenarioId: "SCENARIO-05",
       simPosture: "BLUE",
       selectedBoundaryId: "B3_TOKEN_BROKER_3LO",
@@ -74,6 +75,9 @@
       adrBoundaryFilter: "ALL",
       highlightedAdrNum: "",
       highlightedToolName: "",
+      expandedTools: {},
+      expandedSources: {},
+      expandedAdrs: {},
       rafId: 0,
       pulseRunToken: 0,
     },
@@ -1358,6 +1362,29 @@
     }
   }
 
+  function switchAboutReferenceSubtab(subtabId) {
+    const normalized =
+      subtabId === "sources"
+        ? "sources"
+        : subtabId === "adrs"
+          ? "adrs"
+          : "tools";
+    state.about.activeRefSubtab = normalized;
+
+    document.querySelectorAll("[data-ref-subtab]").forEach(function (btn) {
+      const isMatch = btn.getAttribute("data-ref-subtab") === normalized;
+      btn.classList.toggle("active", isMatch);
+      btn.setAttribute("aria-selected", isMatch ? "true" : "false");
+    });
+
+    const toolsPanel = document.getElementById("ref-panel-tools");
+    const sourcesPanel = document.getElementById("ref-panel-sources");
+    const adrsPanel = document.getElementById("ref-panel-adrs");
+    if (toolsPanel) toolsPanel.hidden = normalized !== "tools";
+    if (sourcesPanel) sourcesPanel.hidden = normalized !== "sources";
+    if (adrsPanel) adrsPanel.hidden = normalized !== "adrs";
+  }
+
   function selectAboutBoundary(boundaryId) {
     if (!boundaryId) return;
     if (state.about.activeTab !== "topology") {
@@ -1376,12 +1403,10 @@
   function jumpToAboutADR(adrNumber) {
     if (!adrNumber) return;
     switchAboutWorkspace("reference");
-    const adrSubTab = document.querySelector('[data-ref-subtab="adrs"]');
-    if (adrSubTab && typeof adrSubTab.click === "function") {
-      adrSubTab.click();
-    }
+    switchAboutReferenceSubtab("adrs");
     state.about.adrBoundaryFilter = "ALL";
     state.about.highlightedAdrNum = adrNumber;
+    state.about.expandedAdrs[adrNumber] = true;
     renderAboutADRs();
     const targetCard = document.querySelector('[data-adr-number="' + adrNumber + '"]');
     if (targetCard && typeof targetCard.scrollIntoView === "function") {
@@ -1392,14 +1417,10 @@
   function jumpToAboutTool(toolName) {
     if (!toolName) return;
     switchAboutWorkspace("reference");
-    const toolsSubTab = document.querySelector('[data-ref-subtab="tools"]');
-    if (toolsSubTab && typeof toolsSubTab.click === "function") {
-      toolsSubTab.click();
-    }
+    switchAboutReferenceSubtab("tools");
     state.about.highlightedToolName = toolName;
-    document.querySelectorAll("[data-about-tool-name]").forEach(function (el) {
-      el.classList.toggle("highlighted-tool", el.getAttribute("data-about-tool-name") === toolName);
-    });
+    state.about.expandedTools[toolName] = true;
+    renderAboutGovernanceModule();
     const targetTool = document.querySelector('[data-about-tool-name="' + toolName + '"]');
     if (targetTool && typeof targetTool.scrollIntoView === "function") {
       targetTool.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -1536,7 +1557,37 @@
     };
   }
 
-  function positionHopCallout(calloutRefs, px, py, badgeLabel, verdict, vbWidth, vbHeight) {
+  function resolveHopCalloutBox(edgeId, px, py, pillW, pillH, vbWidth, vbHeight) {
+    if (edgeId === "EDGE_B2_B3" || edgeId === "EDGE_B3_B2") {
+      const anchorX = 704;
+      const maxRight = 736;
+      const boxX = Math.max(474, Math.min(anchorX - pillW / 2, maxRight - pillW));
+      const boxY = Math.max(34, Math.min(116, py - 15 - pillH));
+      return { x: boxX, y: boxY };
+    }
+    if (edgeId === "EDGE_B2_B4") {
+      const anchorX = 706;
+      const boxX = Math.max(8, Math.min(vbWidth - pillW - 8, anchorX - pillW / 2));
+      return { x: boxX, y: 117 };
+    }
+    if (edgeId === "EDGE_B2_B5") {
+      const anchorX = 704;
+      const maxRight = 736;
+      const boxX = Math.max(474, Math.min(anchorX - pillW / 2, maxRight - pillW));
+      const boxY = Math.max(222, Math.min(324 - pillH, py - pillH / 2));
+      return { x: boxX, y: boxY };
+    }
+
+    let boxY = py - 15 - pillH;
+    if (boxY < 8) {
+      boxY = py + 15;
+    }
+    boxY = Math.max(8, Math.min(vbHeight - pillH - 8, boxY));
+    const boxX = Math.max(8, Math.min(vbWidth - pillW - 8, px - pillW / 2));
+    return { x: boxX, y: boxY };
+  }
+
+  function positionHopCallout(calloutRefs, px, py, badgeLabel, verdict, vbWidth, vbHeight, edgeId) {
     if (!calloutRefs) return;
     const v = String(verdict || "PASS");
     calloutRefs.halo.setAttribute("cx", px.toFixed(1));
@@ -1549,19 +1600,14 @@
 
     const pillW = Math.max(96, badgeLabel.length * 6.0 + 18);
     const pillH = 22;
-    let boxY = py - 15 - pillH;
-    if (boxY < 8) {
-      boxY = py + 15;
-    }
-    boxY = Math.max(8, Math.min(vbHeight - pillH - 8, boxY));
-    const boxX = Math.max(8, Math.min(vbWidth - pillW - 8, px - pillW / 2));
+    const box = resolveHopCalloutBox(edgeId || "", px, py, pillW, pillH, vbWidth, vbHeight);
 
-    calloutRefs.bg.setAttribute("x", boxX.toFixed(1));
-    calloutRefs.bg.setAttribute("y", boxY.toFixed(1));
+    calloutRefs.bg.setAttribute("x", box.x.toFixed(1));
+    calloutRefs.bg.setAttribute("y", box.y.toFixed(1));
     calloutRefs.bg.setAttribute("width", pillW.toFixed(1));
     calloutRefs.bg.setAttribute("height", String(pillH));
-    calloutRefs.txt.setAttribute("x", (boxX + pillW / 2).toFixed(1));
-    calloutRefs.txt.setAttribute("y", (boxY + 14.5).toFixed(1));
+    calloutRefs.txt.setAttribute("x", (box.x + pillW / 2).toFixed(1));
+    calloutRefs.txt.setAttribute("y", (box.y + 14.5).toFixed(1));
     calloutRefs.txt.textContent = badgeLabel;
   }
 
@@ -1871,7 +1917,8 @@
           formatHopCalloutLabel(hop),
           hop.verdict,
           svgRefs.vbWidth,
-          svgRefs.vbHeight
+          svgRefs.vbHeight,
+          hop.edgeId
         );
       }
     }
@@ -2071,7 +2118,8 @@
             formatHopCalloutLabel(finalHop),
             finalHop.verdict,
             svgRefs.vbWidth,
-            svgRefs.vbHeight
+            svgRefs.vbHeight,
+            finalHop.edgeId
           );
         }
         if (counterEl) {
@@ -2106,7 +2154,8 @@
           formatHopCalloutLabel(hop),
           hop.verdict,
           svgRefs.vbWidth,
-          svgRefs.vbHeight
+          svgRefs.vbHeight,
+          hop.edgeId
         );
       }
 
@@ -2221,6 +2270,14 @@
     const sseBadgeEl = document.getElementById("lifecycle-sse-event-badge");
     if (!cat || !trackEl || !detailEl || !ssePreEl) return;
 
+    function createLifecycleConnector() {
+      const conn = document.createElement("span");
+      conn.className = "lifecycle-stage-connector";
+      conn.setAttribute("aria-hidden", "true");
+      conn.textContent = "->";
+      return conn;
+    }
+
     const callbacks = cat.pluginCallbacks || [];
     if (callbacks.length === 0) return;
 
@@ -2232,7 +2289,11 @@
     });
 
     trackEl.replaceChildren();
-    callbacks.forEach(function (cb) {
+    callbacks.forEach(function (cb, idx) {
+      if (idx > 0) {
+        trackEl.appendChild(createLifecycleConnector());
+      }
+
       const btn = document.createElement("button");
       btn.type = "button";
       const isActive = cb.stageIndex === selectedCB.stageIndex;
@@ -2275,6 +2336,8 @@
       trackEl.appendChild(btn);
 
       if (cb.name === "BeforeTool") {
+        trackEl.appendChild(createLifecycleConnector());
+
         const execPill = document.createElement("div");
         execPill.className = "lifecycle-stage-pill";
         execPill.setAttribute("role", "presentation");
@@ -2312,62 +2375,87 @@
 
     const headerRow = document.createElement("div");
     headerRow.className = "inspector-top-row";
+
+    const titleGroup = document.createElement("div");
+    titleGroup.className = "inspector-code-group";
+
     const stageBadge = document.createElement("span");
     stageBadge.className = "inspector-code-badge";
     stageBadge.textContent = "STAGE 0" + selectedCB.stageIndex + " · " + selectedCB.name;
-    headerRow.appendChild(stageBadge);
-    detailEl.appendChild(headerRow);
 
     const execTitle = document.createElement("h3");
     execTitle.className = "inspector-title";
     execTitle.textContent = selectedCB.executionLabel;
-    detailEl.appendChild(execTitle);
+
+    titleGroup.appendChild(stageBadge);
+    titleGroup.appendChild(execTitle);
+    headerRow.appendChild(titleGroup);
+
+    const evRow = document.createElement("div");
+    evRow.className = "inspector-tags-row";
+    const evLbl = document.createElement("span");
+    evLbl.className = "meta-tag-label";
+    evLbl.textContent = "Emitted SSE:";
+    evRow.appendChild(evLbl);
+    (selectedCB.emittedStreamEventTypes || []).forEach(function (evType) {
+      const chip = document.createElement("span");
+      chip.className = "mime-tag";
+      chip.textContent = evType;
+      evRow.appendChild(chip);
+    });
+    headerRow.appendChild(evRow);
+    detailEl.appendChild(headerRow);
+
+    const compareGrid = document.createElement("div");
+    compareGrid.className = "inspector-compare-grid";
 
     const roleBox = document.createElement("div");
     roleBox.className = "inspector-posture-box box-blue";
     const roleLbl = document.createElement("span");
     roleLbl.className = "inspector-box-label";
-    roleLbl.textContent = "Plugin Lifecycle Responsibility";
+    roleLbl.textContent = "What This Hook Enforces";
     const roleBody = document.createElement("p");
     roleBody.className = "inspector-box-body";
     roleBody.textContent = selectedCB.roleSummary;
     roleBox.appendChild(roleLbl);
     roleBox.appendChild(roleBody);
-    detailEl.appendChild(roleBox);
 
     const scBox = document.createElement("div");
-    scBox.className = "inspector-posture-box";
+    scBox.className = "inspector-posture-box box-amber";
     const scLbl = document.createElement("span");
-    scLbl.className = "subpanel-title";
-    scLbl.textContent = "Short-Circuit & Mutation Semantics";
+    scLbl.className = "inspector-box-label";
+    scLbl.textContent = "Short-Circuit / Mutation Rule";
     const scBody = document.createElement("p");
     scBody.className = "inspector-box-body";
     scBody.textContent = selectedCB.shortCircuitBehavior;
     scBox.appendChild(scLbl);
     scBox.appendChild(scBody);
-    detailEl.appendChild(scBox);
+
+    compareGrid.appendChild(roleBox);
+    compareGrid.appendChild(scBox);
+    detailEl.appendChild(compareGrid);
+
+    const linksWrap = document.createElement("div");
+    linksWrap.className = "lifecycle-links-bar";
 
     const bRow = document.createElement("div");
     bRow.className = "inspector-tags-row";
     const bLbl = document.createElement("span");
     bLbl.className = "meta-tag-label";
-    bLbl.textContent = "Active Boundaries:";
+    bLbl.textContent = "Boundaries:";
     bRow.appendChild(bLbl);
     (selectedCB.governedBoundaries || []).forEach(function (bId) {
       const pill = document.createElement("button");
       pill.type = "button";
       pill.className = "boundary-jump-pill";
-      pill.textContent = bId;
+      pill.textContent = boundaryShortCode(bId);
+      pill.title = bId;
       pill.addEventListener("click", function () {
         selectAboutBoundary(bId);
-        const topoMod = document.getElementById("about-topology-module");
-        if (topoMod && typeof topoMod.scrollIntoView === "function") {
-          topoMod.scrollIntoView({ behavior: "smooth", block: "start" });
-        }
       });
       bRow.appendChild(pill);
     });
-    detailEl.appendChild(bRow);
+    linksWrap.appendChild(bRow);
 
     const tRow = document.createElement("div");
     tRow.className = "inspector-tags-row";
@@ -2376,26 +2464,18 @@
     tLbl.textContent = "Governed Tools:";
     tRow.appendChild(tLbl);
     (selectedCB.governedTools || []).forEach(function (tName) {
-      const chip = document.createElement("span");
-      chip.className = "about-tag-chip";
-      chip.textContent = tName;
-      tRow.appendChild(chip);
+      const btnTool = document.createElement("button");
+      btnTool.type = "button";
+      btnTool.className = "about-tool-jump-btn";
+      btnTool.textContent = tName;
+      btnTool.title = "Inspect governed tool " + tName + " in System Reference";
+      btnTool.addEventListener("click", function () {
+        jumpToAboutTool(tName);
+      });
+      tRow.appendChild(btnTool);
     });
-    detailEl.appendChild(tRow);
-
-    const evRow = document.createElement("div");
-    evRow.className = "inspector-tags-row";
-    const evLbl = document.createElement("span");
-    evLbl.className = "meta-tag-label";
-    evLbl.textContent = "Emitted SSE Events:";
-    evRow.appendChild(evLbl);
-    (selectedCB.emittedStreamEventTypes || []).forEach(function (evType) {
-      const chip = document.createElement("span");
-      chip.className = "mime-tag";
-      chip.textContent = evType;
-      evRow.appendChild(chip);
-    });
-    detailEl.appendChild(evRow);
+    linksWrap.appendChild(tRow);
+    detailEl.appendChild(linksWrap);
 
     let eventTypeHeader =
       (selectedCB.emittedStreamEventTypes && selectedCB.emittedStreamEventTypes[0]) || "boundary.step";
@@ -2423,16 +2503,69 @@
     return "policy-readonly";
   }
 
+  function createRefRowChevron() {
+    return parseStaticSVG(
+      '<svg class="about-ref-chevron" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>'
+    );
+  }
+
+  function createRowBoundaryPill(boundaryId) {
+    const bPill = document.createElement("button");
+    bPill.type = "button";
+    bPill.className = "boundary-jump-pill";
+    bPill.textContent = boundaryShortCode(boundaryId);
+    bPill.title = boundaryId || "";
+    bPill.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      selectAboutBoundary(boundaryId);
+    });
+    bPill.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.stopPropagation();
+      }
+    });
+    return bPill;
+  }
+
+  function wireRefRowSummaryToggle(rowEl, summaryEl, detailEl, onToggle) {
+    function toggle() {
+      const nextExpanded = Boolean(detailEl.hidden);
+      detailEl.hidden = !nextExpanded;
+      rowEl.classList.toggle("expanded", nextExpanded);
+      summaryEl.setAttribute("aria-expanded", nextExpanded ? "true" : "false");
+      if (typeof onToggle === "function") {
+        onToggle(nextExpanded);
+      }
+    }
+    summaryEl.addEventListener("click", function () {
+      toggle();
+    });
+    summaryEl.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        toggle();
+      }
+    });
+  }
+
   function renderAboutGovernanceModule() {
     const cat = state.about.catalog;
     if (!cat) return;
 
     const sourcesGrid = document.getElementById("about-sources-grid");
     const sourcesSummary = document.getElementById("about-sources-summary");
-    const heroSourcesPill = document.getElementById("about-live-sources-pill");
-    const heroAdrPill = document.getElementById("about-adr-count-pill");
+    const subtabTools = document.getElementById("ref-subtab-tools");
+    const subtabSources = document.getElementById("ref-subtab-sources");
+    const subtabAdrs = document.getElementById("ref-subtab-adrs");
 
     const sources = cat.sources || [];
+    const tools = cat.tools || [];
+    const adrs = cat.adrs || [];
+
+    if (subtabTools) subtabTools.textContent = "Governed Tools (" + tools.length + ")";
+    if (subtabSources) subtabSources.textContent = "External Sources (" + sources.length + ")";
+    if (subtabAdrs) subtabAdrs.textContent = "ADR Index (" + adrs.length + ")";
+
     let liveCount = 0;
     sources.forEach(function (s) {
       if (s.provenance === "LIVE") liveCount += 1;
@@ -2442,114 +2575,149 @@
       sourcesSummary.textContent =
         liveCount + " LIVE · " + fixtureCount + " FIXTURE (" + sources.length + " total)";
     }
-    if (heroSourcesPill) {
-      heroSourcesPill.replaceChildren();
-      const strong = document.createElement("strong");
-      strong.textContent = liveCount + "/" + sources.length;
-      heroSourcesPill.appendChild(strong);
-      heroSourcesPill.appendChild(document.createTextNode(" Live Sources"));
-    }
-    if (heroAdrPill && Array.isArray(cat.adrs)) {
-      heroAdrPill.replaceChildren();
-      const strongAdr = document.createElement("strong");
-      strongAdr.textContent = String(cat.adrs.length);
-      heroAdrPill.appendChild(strongAdr);
-      heroAdrPill.appendChild(document.createTextNode(" Accepted ADRs"));
-    }
 
     if (sourcesGrid) {
       sourcesGrid.replaceChildren();
       sources.forEach(function (src) {
+        const srcKey = src.id || src.name || "";
         const prov = src.provenance === "LIVE" ? "LIVE" : "FIXTURE";
-        const card = document.createElement("article");
-        card.className = "about-source-card source-" + prov;
-        card.setAttribute("data-about-source-id", src.id || "");
+        const isExpanded = Boolean(state.about.expandedSources[srcKey]);
 
-        const top = document.createElement("div");
-        top.className = "card-row-between";
+        const row = document.createElement("article");
+        row.className =
+          "about-ref-row about-source-row source-" + prov + (isExpanded ? " expanded" : "");
+        row.setAttribute("data-about-source-id", src.id || "");
+
+        const summary = document.createElement("div");
+        summary.className = "about-ref-summary";
+        summary.setAttribute("role", "button");
+        summary.setAttribute("tabindex", "0");
+        summary.setAttribute("aria-expanded", isExpanded ? "true" : "false");
+
+        const left = document.createElement("div");
+        left.className = "about-ref-left";
 
         const nameSpan = document.createElement("span");
-        nameSpan.className = "about-card-title";
+        nameSpan.className = "about-ref-title";
         nameSpan.textContent = src.name || src.id || "";
-
-        top.appendChild(nameSpan);
-        top.appendChild(buildProvenanceBadge(prov));
-        card.appendChild(top);
-
-        const metaRow = document.createElement("div");
-        metaRow.className = "inspector-tags-row";
-        const bChip = document.createElement("span");
-        bChip.className = "about-tag-chip";
-        bChip.textContent = src.boundary || "";
-        metaRow.appendChild(bChip);
-        card.appendChild(metaRow);
+        left.appendChild(nameSpan);
+        left.appendChild(buildProvenanceBadge(prov));
 
         if (src.endpoint) {
-          const ep = document.createElement("div");
-          ep.className = "about-card-mono";
+          const ep = document.createElement("span");
+          ep.className = "about-ref-mono";
           ep.textContent = src.endpoint;
-          card.appendChild(ep);
+          left.appendChild(ep);
         }
+
+        const right = document.createElement("div");
+        right.className = "about-ref-right";
+        if (src.boundary) {
+          right.appendChild(createRowBoundaryPill(src.boundary));
+        }
+        right.appendChild(createRefRowChevron());
+
+        summary.appendChild(left);
+        summary.appendChild(right);
+
+        const detail = document.createElement("div");
+        detail.className = "about-ref-detail";
+        detail.hidden = !isExpanded;
 
         const desc = document.createElement("p");
         desc.className = "about-card-desc";
         desc.textContent = src.detail || "";
-        card.appendChild(desc);
+        detail.appendChild(desc);
 
-        sourcesGrid.appendChild(card);
+        const meta = document.createElement("div");
+        meta.className = "about-ref-detail-meta";
+        meta.textContent = "Source ID: " + (src.id || "") + " · Boundary: " + (src.boundary || "");
+        detail.appendChild(meta);
+
+        wireRefRowSummaryToggle(row, summary, detail, function (expanded) {
+          state.about.expandedSources[srcKey] = expanded;
+        });
+
+        row.appendChild(summary);
+        row.appendChild(detail);
+        sourcesGrid.appendChild(row);
       });
     }
 
     const toolsGrid = document.getElementById("about-tools-grid");
     if (toolsGrid) {
       toolsGrid.replaceChildren();
-      (cat.tools || []).forEach(function (tool) {
-        const card = document.createElement("article");
-        card.className =
-          "about-tool-card" +
-          (state.about.highlightedToolName === tool.name ? " highlighted-tool" : "");
-        card.setAttribute("data-about-tool-name", tool.name);
+      tools.forEach(function (tool) {
+        const isHighlighted = state.about.highlightedToolName === tool.name;
+        const isExpanded = Boolean(state.about.expandedTools[tool.name]) || isHighlighted;
 
-        const top = document.createElement("div");
-        top.className = "card-row-between";
+        const row = document.createElement("article");
+        row.className =
+          "about-ref-row about-tool-row" +
+          (isHighlighted ? " highlighted-tool" : "") +
+          (isExpanded ? " expanded" : "");
+        row.setAttribute("data-about-tool-name", tool.name);
+
+        const summary = document.createElement("div");
+        summary.className = "about-ref-summary";
+        summary.setAttribute("role", "button");
+        summary.setAttribute("tabindex", "0");
+        summary.setAttribute("aria-expanded", isExpanded ? "true" : "false");
+
+        const left = document.createElement("div");
+        left.className = "about-ref-left";
 
         const tName = document.createElement("span");
-        tName.className = "about-card-title";
+        tName.className = "about-ref-title about-ref-code-title";
         tName.textContent = tool.name;
 
-        const bPill = document.createElement("button");
-        bPill.type = "button";
-        bPill.className = "boundary-jump-pill";
-        bPill.textContent = boundaryShortCode(tool.primaryBoundary);
-        bPill.title = tool.primaryBoundary;
-        bPill.addEventListener("click", function () {
-          selectAboutBoundary(tool.primaryBoundary);
-          const topoMod = document.getElementById("about-topology-module");
-          if (topoMod && typeof topoMod.scrollIntoView === "function") {
-            topoMod.scrollIntoView({ behavior: "smooth", block: "start" });
-          }
-        });
+        const wire = document.createElement("span");
+        wire.className = "about-ref-mono";
+        wire.textContent = tool.wireOperation;
 
-        top.appendChild(tName);
-        top.appendChild(bPill);
-        card.appendChild(top);
+        left.appendChild(tName);
+        left.appendChild(wire);
 
-        const wire = document.createElement("div");
-        wire.className = "about-card-mono";
-        wire.textContent = tool.wireOperation + " · " + tool.provider;
-        card.appendChild(wire);
+        const right = document.createElement("div");
+        right.className = "about-ref-right";
 
         const policyBadge = document.createElement("span");
         policyBadge.className = "tool-policy-badge " + classifyToolPolicyClass(tool.stepUpPolicy);
         policyBadge.textContent = tool.stepUpPolicy;
-        card.appendChild(policyBadge);
+
+        right.appendChild(policyBadge);
+        right.appendChild(createRowBoundaryPill(tool.primaryBoundary));
+        right.appendChild(createRefRowChevron());
+
+        summary.appendChild(left);
+        summary.appendChild(right);
+
+        const detail = document.createElement("div");
+        detail.className = "about-ref-detail";
+        detail.hidden = !isExpanded;
 
         const desc = document.createElement("p");
         desc.className = "about-card-desc";
         desc.textContent = tool.description;
-        card.appendChild(desc);
+        detail.appendChild(desc);
 
-        toolsGrid.appendChild(card);
+        const meta = document.createElement("div");
+        meta.className = "about-ref-detail-meta";
+        meta.textContent =
+          "Provider: " + tool.provider + " · Primary Boundary: " + tool.primaryBoundary;
+        detail.appendChild(meta);
+
+        wireRefRowSummaryToggle(row, summary, detail, function (expanded) {
+          state.about.expandedTools[tool.name] = expanded;
+          if (!expanded && state.about.highlightedToolName === tool.name) {
+            state.about.highlightedToolName = "";
+            row.classList.remove("highlighted-tool");
+          }
+        });
+
+        row.appendChild(summary);
+        row.appendChild(detail);
+        toolsGrid.appendChild(row);
       });
     }
 
@@ -2597,49 +2765,77 @@
         return;
       }
 
-      const card = document.createElement("article");
-      card.className =
-        "about-adr-card" +
-        (state.about.highlightedAdrNum === adr.number ? " highlighted-adr" : "");
-      card.setAttribute("data-adr-number", adr.number);
+      const isHighlighted = state.about.highlightedAdrNum === adr.number;
+      const isExpanded = Boolean(state.about.expandedAdrs[adr.number]) || isHighlighted;
 
-      const top = document.createElement("div");
-      top.className = "card-row-between";
+      const row = document.createElement("article");
+      row.className =
+        "about-ref-row about-adr-row" +
+        (isHighlighted ? " highlighted-adr" : "") +
+        (isExpanded ? " expanded" : "");
+      row.setAttribute("data-adr-number", adr.number);
+
+      const summary = document.createElement("div");
+      summary.className = "about-ref-summary";
+      summary.setAttribute("role", "button");
+      summary.setAttribute("tabindex", "0");
+      summary.setAttribute("aria-expanded", isExpanded ? "true" : "false");
+
+      const left = document.createElement("div");
+      left.className = "about-ref-left";
 
       const numBadge = document.createElement("span");
       numBadge.className = "adr-num-badge";
       numBadge.textContent = "ADR-" + adr.number;
 
-      const fileSpan = document.createElement("span");
-      fileSpan.className = "mime-tag";
-      fileSpan.textContent = adr.fileName;
-
-      top.appendChild(numBadge);
-      top.appendChild(fileSpan);
-      card.appendChild(top);
-
-      const title = document.createElement("div");
-      title.className = "about-card-title";
+      const title = document.createElement("span");
+      title.className = "about-ref-title";
       title.textContent = adr.title;
-      card.appendChild(title);
 
-      const summary = document.createElement("p");
-      summary.className = "about-card-desc";
-      summary.textContent = adr.summary;
-      card.appendChild(summary);
+      left.appendChild(numBadge);
+      left.appendChild(title);
 
-      const bRow = document.createElement("div");
-      bRow.className = "inspector-tags-row";
+      const right = document.createElement("div");
+      right.className = "about-ref-right";
+
+      const statusBadge = document.createElement("span");
+      statusBadge.className = "adr-status-badge";
+      statusBadge.textContent = adr.status || "Accepted";
+      right.appendChild(statusBadge);
+
       (adr.primaryBoundaries || []).forEach(function (bId) {
-        const chip = document.createElement("span");
-        chip.className = "about-tag-chip";
-        chip.textContent = boundaryShortCode(bId);
-        chip.title = bId;
-        bRow.appendChild(chip);
+        right.appendChild(createRowBoundaryPill(bId));
       });
-      card.appendChild(bRow);
+      right.appendChild(createRefRowChevron());
 
-      adrGrid.appendChild(card);
+      summary.appendChild(left);
+      summary.appendChild(right);
+
+      const detail = document.createElement("div");
+      detail.className = "about-ref-detail";
+      detail.hidden = !isExpanded;
+
+      const summaryText = document.createElement("p");
+      summaryText.className = "about-card-desc";
+      summaryText.textContent = adr.summary;
+      detail.appendChild(summaryText);
+
+      const fileMeta = document.createElement("div");
+      fileMeta.className = "about-ref-detail-meta";
+      fileMeta.textContent = "docs/adr/" + adr.fileName;
+      detail.appendChild(fileMeta);
+
+      wireRefRowSummaryToggle(row, summary, detail, function (expanded) {
+        state.about.expandedAdrs[adr.number] = expanded;
+        if (!expanded && state.about.highlightedAdrNum === adr.number) {
+          state.about.highlightedAdrNum = "";
+          row.classList.remove("highlighted-adr");
+        }
+      });
+
+      row.appendChild(summary);
+      row.appendChild(detail);
+      adrGrid.appendChild(row);
     });
   }
 
@@ -2648,6 +2844,13 @@
       tabBtn.addEventListener("click", function () {
         const tabId = tabBtn.getAttribute("data-about-tab") || "topology";
         switchAboutWorkspace(tabId);
+      });
+    });
+
+    document.querySelectorAll("[data-ref-subtab]").forEach(function (subBtn) {
+      subBtn.addEventListener("click", function () {
+        const subId = subBtn.getAttribute("data-ref-subtab") || "tools";
+        switchAboutReferenceSubtab(subId);
       });
     });
 
@@ -2687,6 +2890,17 @@
     if (btnRefreshAbout) {
       btnRefreshAbout.addEventListener("click", function () {
         loadAboutCatalog(true);
+      });
+    }
+
+    const btnToggleSSE = document.getElementById("btn-toggle-lifecycle-sse");
+    const sseDrawer = document.getElementById("lifecycle-sse-drawer");
+    if (btnToggleSSE && sseDrawer) {
+      btnToggleSSE.addEventListener("click", function () {
+        sseDrawer.hidden = !sseDrawer.hidden;
+        const expanded = !sseDrawer.hidden;
+        btnToggleSSE.setAttribute("aria-expanded", expanded ? "true" : "false");
+        btnToggleSSE.classList.toggle("expanded", expanded);
       });
     }
   }

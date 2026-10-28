@@ -918,12 +918,65 @@ func TestLiveEndToEndArenaEvals(t *testing.T) {
 		}
 
 		var catalog aegis.ArchitectureTopologyCatalog
-		if err := json.NewDecoder(resp.Body).Decode(&catalog); err != nil {
+		rawCatalogBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("ReadAll /api/about/catalog: %v", err)
+		}
+		if err := json.Unmarshal(rawCatalogBytes, &catalog); err != nil {
 			t.Fatalf("Decode ArchitectureTopologyCatalog: %v", err)
 		}
 		if err := aegis.VerifyArchitectureCatalogDrift(&catalog, rt, filepath.Clean("../../docs/adr")); err != nil {
 			t.Fatalf("VerifyArchitectureCatalogDrift (live): %v", err)
 		}
+
+		assertStageSafeSources := func(label string, rawJSON string, sources []aegis.SourceStatus) {
+			if proj := strings.TrimSpace(cfg.GCPProjectID); proj != "" {
+				if strings.Contains(strings.ToLower(rawJSON), strings.ToLower(proj)) {
+					t.Errorf("%s raw JSON leaked GCPProjectID %q", label, proj)
+				}
+				for _, s := range sources {
+					for _, field := range []string{s.Name, s.Endpoint, s.Detail} {
+						if strings.Contains(strings.ToLower(field), strings.ToLower(proj)) {
+							t.Errorf("%s source %s leaked GCPProjectID %q in %q", label, s.ID, proj, field)
+						}
+					}
+				}
+			}
+			if cluster := strings.TrimSpace(cfg.GKEClusterName); cluster != "" {
+				if strings.Contains(strings.ToLower(rawJSON), strings.ToLower(cluster)) {
+					t.Errorf("%s raw JSON leaked GKEClusterName %q", label, cluster)
+				}
+				for _, s := range sources {
+					for _, field := range []string{s.Name, s.Endpoint, s.Detail} {
+						if strings.Contains(strings.ToLower(field), strings.ToLower(cluster)) {
+							t.Errorf("%s source %s leaked GKEClusterName %q in %q", label, s.ID, cluster, field)
+						}
+					}
+				}
+			}
+		}
+
+		assertStageSafeSources("GET /api/about/catalog", string(rawCatalogBytes), catalog.Sources)
+
+		srcResp, err := srv.Client().Get(srv.URL + "/api/sources/status")
+		if err != nil {
+			t.Fatalf("GET /api/sources/status: %v", err)
+		}
+		rawSrcBytes, err := io.ReadAll(srcResp.Body)
+		srcResp.Body.Close()
+		if err != nil {
+			t.Fatalf("ReadAll /api/sources/status: %v", err)
+		}
+		if srcResp.StatusCode != http.StatusOK {
+			t.Fatalf("GET /api/sources/status status = %d, want 200", srcResp.StatusCode)
+		}
+		var srcPayload struct {
+			Sources []aegis.SourceStatus `json:"sources"`
+		}
+		if err := json.Unmarshal(rawSrcBytes, &srcPayload); err != nil {
+			t.Fatalf("Decode /api/sources/status: %v", err)
+		}
+		assertStageSafeSources("GET /api/sources/status", string(rawSrcBytes), srcPayload.Sources)
 
 		liveCount := 0
 		for _, src := range catalog.Sources {
@@ -1733,6 +1786,79 @@ func TestPhase4_AutoBridgedAtenetRouterRemediatorEval(t *testing.T) {
 			t.Errorf("SandboxExecutionCard.Fields[evilExfilProbe] = %q, want prefix blocked", sandboxCard.Fields["evilExfilProbe"])
 		}
 	})
+}
+
+func TestPhase5_AboutProgressiveDisclosureAndStageSafeSourcesEval(t *testing.T) {
+	const (
+		syntheticProj    = "synthetic-stage-proj-4910"
+		syntheticCluster = "synthetic-stage-gke-cluster"
+	)
+	cfg := aegis.ConfigFromEnvWithLookup(func(k string) string {
+		switch k {
+		case "GOOGLE_CLOUD_PROJECT":
+			return syntheticProj
+		case "GOOGLE_CLOUD_LOCATION":
+			return "us-central1"
+		case "GKE_CLUSTER_NAME":
+			return syntheticCluster
+		case "AGENT_PLATFORM_LIVE_LLM":
+			return "true"
+		default:
+			return ""
+		}
+	}, func() string { return "" })
+
+	rt := aegis.NewRuntime(cfg)
+	srv := newLoopbackHTTPServer(t, aegis.NewHTTPHandler(rt))
+	defer srv.Close()
+
+	// 1. Progressive-disclosure /about HTML shell: 3 workspace tabs, collapsed SSE drawer, 3 reference sub-tabs
+	aboutResp, err := srv.Client().Get(srv.URL + "/about")
+	if err != nil {
+		t.Fatalf("GET /about: %v", err)
+	}
+	aboutHTMLBytes, _ := io.ReadAll(aboutResp.Body)
+	aboutResp.Body.Close()
+	aboutHTML := string(aboutHTMLBytes)
+
+	for _, wantHTML := range []string{
+		`id="about-workspace-tabs"`,
+		`id="btn-run-in-arena"`,
+		`id="topology-pulse-log"`,
+		`id="btn-toggle-lifecycle-sse"`,
+		`id="lifecycle-sse-drawer"`,
+		`id="about-reference-subtabs"`,
+		`id="ref-subtab-tools"`,
+		`id="ref-subtab-sources"`,
+		`id="ref-subtab-adrs"`,
+		`id="ref-panel-tools"`,
+		`id="ref-panel-sources"`,
+		`id="ref-panel-adrs"`,
+	} {
+		if !strings.Contains(aboutHTML, wantHTML) {
+			t.Errorf("/about HTML missing Phase 5 progressive-disclosure element %q", wantHTML)
+		}
+	}
+
+	// 2. Stage-safe sanitization on both GET /api/about/catalog and GET /api/sources/status
+	for _, endpoint := range []string{"/api/about/catalog", "/api/sources/status"} {
+		resp, err := srv.Client().Get(srv.URL + endpoint)
+		if err != nil {
+			t.Fatalf("GET %s: %v", endpoint, err)
+		}
+		rawBytes, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s status = %d, want 200", endpoint, resp.StatusCode)
+		}
+		rawLower := strings.ToLower(string(rawBytes))
+		if strings.Contains(rawLower, syntheticProj) {
+			t.Errorf("GET %s leaked raw GCPProjectID %q: %s", endpoint, syntheticProj, string(rawBytes))
+		}
+		if strings.Contains(rawLower, syntheticCluster) {
+			t.Errorf("GET %s leaked raw GKEClusterName %q: %s", endpoint, syntheticCluster, string(rawBytes))
+		}
+	}
 }
 
 

@@ -299,22 +299,40 @@
 
         <!-- Module 2: AegisSecurityPlugin Callback State Machine & SSE Wire Preview -->
         <section id="about-lifecycle-module" class="about-module-card" aria-labelledby="about-lifecycle-heading" hidden>
-          <div class="about-module-header">
+          <div class="about-module-header lifecycle-compact-header">
             <div class="about-module-title-wrap">
               <span class="about-module-index">02</span>
               <div>
-                <h2 id="about-lifecycle-heading" class="about-module-title">AegisSecurityPlugin Callback State Machine &amp; SSE Wire Preview</h2>
-                <p class="about-module-desc">Click any of the 6 ADK Go v2 lifecycle hooks to inspect its short-circuit semantics, active boundaries, governed tools, and real-time SSE wire frame.</p>
+                <h2 id="about-lifecycle-heading" class="about-module-title">AegisSecurityPlugin Callback Pipeline</h2>
+                <p class="about-module-desc">Click any of the 6 ADK Go v2 lifecycle hooks to inspect enforcement rules, short-circuit behavior, active boundaries, and governed tools.</p>
               </div>
             </div>
           </div>
 
           <div id="lifecycle-stage-track" class="lifecycle-stage-track" role="tablist" aria-label="ADK Security Plugin Callback Stages"></div>
 
-          <div class="lifecycle-bottom-grid">
-            <div id="lifecycle-detail-panel" class="lifecycle-detail-panel" aria-live="polite"></div>
+          <div id="lifecycle-detail-panel" class="lifecycle-detail-panel" aria-live="polite"></div>
 
-            <div class="lifecycle-sse-box">
+          <div class="lifecycle-sse-disclosure">
+            <button
+              type="button"
+              id="btn-toggle-lifecycle-sse"
+              class="lifecycle-sse-toggle-btn"
+              aria-expanded="false"
+              aria-controls="lifecycle-sse-drawer"
+            >
+              <span class="lifecycle-sse-toggle-left">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <polyline points="16 18 22 12 16 6"/>
+                  <polyline points="8 6 2 12 8 18"/>
+                </svg>
+                <span>Inspect Sample SSE Frame</span>
+              </span>
+              <svg class="lifecycle-sse-chevron" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <polyline points="6 9 12 15 18 9"/>
+              </svg>
+            </button>
+            <div id="lifecycle-sse-drawer" class="lifecycle-sse-drawer" hidden>
               <div class="subpanel-header">
                 <span class="subpanel-title">Progressive SSE TurnStreamEvent Frame</span>
                 <span id="lifecycle-sse-event-badge" class="mime-tag">text/event-stream</span>
@@ -326,42 +344,66 @@
 
         <!-- Module 3: Live 8-Source Provenance, Tool Governance & ADR Matrix -->
         <section id="about-governance-module" class="about-module-card" aria-labelledby="about-governance-heading" hidden>
-          <div class="about-module-header">
-            <div class="about-module-title-wrap">
-              <span class="about-module-index">03</span>
-              <div>
-                <h2 id="about-governance-heading" class="about-module-title">Live 8-Source Provenance, Tool Governance &amp; Architecture Decision Records</h2>
-                <p class="about-module-desc">Live connection status across all 8 External Sources, 8 governed ADK functiontool policies, and all accepted ADRs synchronized with docs/adr/.</p>
-              </div>
+          <h2 id="about-governance-heading" class="sr-only">System Reference — Governed Tools, External Sources &amp; Architecture Decision Records</h2>
+          <div class="about-reference-toolbar">
+            <div id="about-reference-subtabs" class="about-reference-subtabs" role="tablist" aria-label="System Reference Sections">
+              <button
+                type="button"
+                id="ref-subtab-tools"
+                class="about-ref-subtab active"
+                role="tab"
+                aria-selected="true"
+                aria-controls="ref-panel-tools"
+                data-ref-subtab="tools"
+              >
+                Governed Tools (8)
+              </button>
+              <button
+                type="button"
+                id="ref-subtab-sources"
+                class="about-ref-subtab"
+                role="tab"
+                aria-selected="false"
+                aria-controls="ref-panel-sources"
+                data-ref-subtab="sources"
+              >
+                External Sources (8)
+              </button>
+              <button
+                type="button"
+                id="ref-subtab-adrs"
+                class="about-ref-subtab"
+                role="tab"
+                aria-selected="false"
+                aria-controls="ref-panel-adrs"
+                data-ref-subtab="adrs"
+              >
+                ADR Index (13)
+              </button>
             </div>
-            <button type="button" id="btn-refresh-about-catalog" class="ghost-pill-btn" title="Refresh live external source provenance">
-              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
-                <path d="M3 3v5h5"/>
-                <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/>
-                <path d="M16 16h5v5"/>
-              </svg>
-              <span>Refresh Provenance</span>
-            </button>
-          </div>
-
-          <div class="governance-subsection">
-            <div class="subpanel-header">
-              <span class="subpanel-title">8 External Sources — Live vs. Fixture Provenance</span>
+            <div class="about-reference-meta">
               <span id="about-sources-summary" class="subpanel-meta">Probing runtime connectors...</span>
+              <button type="button" id="btn-refresh-about-catalog" class="ghost-pill-btn" title="Refresh live external source provenance">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                  <path d="M3 3v5h5"/>
+                  <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0-6.74-2.74L21 16"/>
+                  <path d="M16 16h5v5"/>
+                </svg>
+                <span>Refresh Provenance</span>
+              </button>
             </div>
-            <div id="about-sources-grid" class="about-sources-grid"></div>
           </div>
 
-          <div class="governance-subsection">
-            <div class="subpanel-header">
-              <span class="subpanel-title">8 Governed ADK Go v2 Function Tools</span>
-              <span class="subpanel-meta">1:1 Parity with Registered Runner Tools</span>
-            </div>
+          <div id="ref-panel-tools" class="about-ref-panel" role="tabpanel" aria-labelledby="ref-subtab-tools">
             <div id="about-tools-grid" class="about-tools-grid"></div>
           </div>
 
-          <div class="governance-subsection">
+          <div id="ref-panel-sources" class="about-ref-panel" role="tabpanel" aria-labelledby="ref-subtab-sources" hidden>
+            <div id="about-sources-grid" class="about-sources-grid"></div>
+          </div>
+
+          <div id="ref-panel-adrs" class="about-ref-panel" role="tabpanel" aria-labelledby="ref-subtab-adrs" hidden>
             <div class="subpanel-header">
               <span class="subpanel-title">Accepted Architecture Decision Records (docs/adr/)</span>
               <div id="adr-filter-pills" class="adr-filter-pills" role="group" aria-label="Filter ADRs by Security Boundary"></div>

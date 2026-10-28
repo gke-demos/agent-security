@@ -1296,3 +1296,305 @@ func TestPortal_AboutHorizontalScrubberAndMicroInspector(t *testing.T) {
 		}
 	}
 }
+
+func TestPortal_AboutLifecyclePipelineAndCollapsibleSSEDrawer(t *testing.T) {
+	rt := aegis.NewRuntime(aegis.RuntimeConfig{})
+	srv := newLoopbackServer(t, aegis.NewHTTPHandler(rt))
+
+	resp, err := http.Get(srv.URL + "/about")
+	if err != nil {
+		t.Fatalf("GET /about error: %v", err)
+	}
+	bodyBytes, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read /about HTML: %v", err)
+	}
+	html := string(bodyBytes)
+
+	jsResp, err := http.Get(srv.URL + "/static/app.js")
+	if err != nil {
+		t.Fatalf("GET /static/app.js error: %v", err)
+	}
+	jsBytes, err := io.ReadAll(jsResp.Body)
+	jsResp.Body.Close()
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	js := string(jsBytes)
+
+	cssResp, err := http.Get(srv.URL + "/static/styles.css")
+	if err != nil {
+		t.Fatalf("GET /static/styles.css error: %v", err)
+	}
+	cssBytes, err := io.ReadAll(cssResp.Body)
+	cssResp.Body.Close()
+	if err != nil {
+		t.Fatalf("read styles.css: %v", err)
+	}
+	css := string(cssBytes)
+
+	// 1. Permanently open 2-column SSE split is replaced by collapsed-by-default SSE wire drawer
+	if strings.Contains(html, `class="lifecycle-bottom-grid"`) {
+		t.Errorf("/about HTML still contains permanently open .lifecycle-bottom-grid split")
+	}
+	for _, wantHTML := range []string{
+		`id="btn-toggle-lifecycle-sse"`,
+		`aria-expanded="false"`,
+		`aria-controls="lifecycle-sse-drawer"`,
+		`Inspect Sample SSE Frame`,
+		`id="lifecycle-sse-drawer"`,
+		`id="lifecycle-sse-event-badge"`,
+		`id="lifecycle-sse-preview"`,
+	} {
+		if !strings.Contains(html, wantHTML) {
+			t.Errorf("/about HTML missing collapsible lifecycle SSE drawer markup %q", wantHTML)
+		}
+	}
+
+	drawerTag, found := extractHTMLOpeningTagByID(html, "lifecycle-sse-drawer")
+	if !found {
+		t.Fatalf("missing #lifecycle-sse-drawer opening tag")
+	}
+	if !strings.Contains(drawerTag, " hidden") {
+		t.Errorf("expected #lifecycle-sse-drawer to carry hidden attribute by default, got %q", drawerTag)
+	}
+
+	drawerIdx := strings.Index(html, `id="lifecycle-sse-drawer"`)
+	previewIdx := strings.Index(html, `id="lifecycle-sse-preview"`)
+	badgeIdx := strings.Index(html, `id="lifecycle-sse-event-badge"`)
+	if drawerIdx < 0 || previewIdx < drawerIdx || badgeIdx < drawerIdx {
+		t.Errorf("expected #lifecycle-sse-event-badge (%d) and #lifecycle-sse-preview (%d) inside #lifecycle-sse-drawer (%d)", badgeIdx, previewIdx, drawerIdx)
+	}
+
+	// 2. Lifecycle JS renders directional connectors, 2-column hook comparison, clickable tool/boundary pills, and drawer toggle
+	fnStart := strings.Index(js, "function renderAboutLifecycleModule(")
+	if fnStart < 0 {
+		t.Fatalf("missing renderAboutLifecycleModule in app.js")
+	}
+	fnEndRel := strings.Index(js[fnStart+1:], "\n  function ")
+	lifecycleFn := js[fnStart:]
+	if fnEndRel >= 0 {
+		lifecycleFn = js[fnStart : fnStart+1+fnEndRel]
+	}
+
+	for _, wantFnSnippet := range []string{
+		"lifecycle-stage-connector",
+		"adk_request_confirmation / tool.Run",
+		"OnEvent -> SSE",
+		"inspector-compare-grid",
+		"What This Hook Enforces",
+		"Short-Circuit / Mutation Rule",
+		"selectAboutBoundary(",
+		"about-tool-jump-btn",
+		"jumpToAboutTool(",
+	} {
+		if !strings.Contains(lifecycleFn, wantFnSnippet) {
+			t.Errorf("renderAboutLifecycleModule missing expected Phase 5 snippet %q", wantFnSnippet)
+		}
+	}
+	for _, wantDrawerJS := range []string{
+		"btn-toggle-lifecycle-sse",
+		"lifecycle-sse-drawer",
+		"aria-expanded",
+	} {
+		if !strings.Contains(js, wantDrawerJS) {
+			t.Errorf("app.js missing SSE drawer toggle logic %q", wantDrawerJS)
+		}
+	}
+
+	// 3. CSS enforces non-wrapping horizontal pipeline on .lifecycle-stage-name & .lifecycle-stage-track
+	nameRuleIdx := strings.Index(css, ".lifecycle-stage-name")
+	if nameRuleIdx < 0 {
+		t.Fatalf("styles.css missing .lifecycle-stage-name rule")
+	}
+	nameRuleEnd := strings.Index(css[nameRuleIdx:], "}")
+	if nameRuleEnd < 0 || !strings.Contains(css[nameRuleIdx:nameRuleIdx+nameRuleEnd], "white-space: nowrap") {
+		t.Errorf("expected .lifecycle-stage-name rule to enforce white-space: nowrap")
+	}
+	for _, wantCSS := range []string{
+		".lifecycle-stage-connector",
+		".lifecycle-sse-toggle-btn",
+		".lifecycle-sse-drawer",
+	} {
+		if !strings.Contains(css, wantCSS) {
+			t.Errorf("styles.css missing lifecycle pipeline or SSE drawer class %q", wantCSS)
+		}
+	}
+}
+
+func TestPortal_AboutSystemReferenceSubtabsCompactRowsAndDeepLinks(t *testing.T) {
+	rt := aegis.NewRuntime(aegis.RuntimeConfig{})
+	srv := newLoopbackServer(t, aegis.NewHTTPHandler(rt))
+
+	resp, err := http.Get(srv.URL + "/about")
+	if err != nil {
+		t.Fatalf("GET /about error: %v", err)
+	}
+	bodyBytes, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read /about HTML: %v", err)
+	}
+	html := string(bodyBytes)
+
+	jsResp, err := http.Get(srv.URL + "/static/app.js")
+	if err != nil {
+		t.Fatalf("GET /static/app.js error: %v", err)
+	}
+	jsBytes, err := io.ReadAll(jsResp.Body)
+	jsResp.Body.Close()
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	js := string(jsBytes)
+
+	cssResp, err := http.Get(srv.URL + "/static/styles.css")
+	if err != nil {
+		t.Fatalf("GET /static/styles.css error: %v", err)
+	}
+	cssBytes, err := io.ReadAll(cssResp.Body)
+	cssResp.Body.Close()
+	if err != nil {
+		t.Fatalf("read styles.css: %v", err)
+	}
+	css := string(cssBytes)
+
+	// 1. 3-way segmented System Reference sub-switcher & panel progressive disclosure in index.html
+	for _, wantHTML := range []string{
+		`id="about-reference-subtabs"`,
+		`id="ref-subtab-tools"`,
+		`data-ref-subtab="tools"`,
+		`Governed Tools (8)`,
+		`id="ref-subtab-sources"`,
+		`data-ref-subtab="sources"`,
+		`External Sources (8)`,
+		`id="ref-subtab-adrs"`,
+		`data-ref-subtab="adrs"`,
+		`ADR Index (13)`,
+		`id="ref-panel-tools"`,
+		`id="ref-panel-sources"`,
+		`id="ref-panel-adrs"`,
+		`id="about-sources-summary"`,
+		`id="btn-refresh-about-catalog"`,
+	} {
+		if !strings.Contains(html, wantHTML) {
+			t.Errorf("/about HTML missing System Reference sub-tab or panel markup %q", wantHTML)
+		}
+	}
+
+	toolsPanelTag, ok := extractHTMLOpeningTagByID(html, "ref-panel-tools")
+	if !ok {
+		t.Fatalf("missing #ref-panel-tools opening tag")
+	}
+	if strings.Contains(toolsPanelTag, " hidden") {
+		t.Errorf("expected #ref-panel-tools to be visible by default, got %q", toolsPanelTag)
+	}
+	for _, hiddenPanelID := range []string{"ref-panel-sources", "ref-panel-adrs"} {
+		panelTag, found := extractHTMLOpeningTagByID(html, hiddenPanelID)
+		if !found {
+			t.Fatalf("missing #%s opening tag", hiddenPanelID)
+		}
+		if !strings.Contains(panelTag, " hidden") {
+			t.Errorf("expected #%s to carry hidden attribute by default, got %q", hiddenPanelID, panelTag)
+		}
+	}
+
+	// 2. Compact expandable .about-ref-row & .about-ref-detail + bidirectional cross-tab deep-links in app.js
+	for _, wantJS := range []string{
+		"function switchAboutReferenceSubtab(",
+		`switchAboutReferenceSubtab("adrs")`,
+		`switchAboutReferenceSubtab("tools")`,
+		"about-ref-row",
+		"about-ref-summary",
+		"about-ref-detail",
+		"expandedTools",
+		"expandedSources",
+		"expandedAdrs",
+		"ev.stopPropagation()",
+		"selectAboutBoundary(",
+	} {
+		if !strings.Contains(js, wantJS) {
+			t.Errorf("app.js missing System Reference compact row or cross-tab deep-link snippet %q", wantJS)
+		}
+	}
+
+	// 3. CSS styles compact rows, detail trays, and sub-switcher
+	for _, wantCSS := range []string{
+		".about-reference-subtabs",
+		".about-ref-subtab",
+		".about-ref-row",
+		".about-ref-summary",
+		".about-ref-detail",
+	} {
+		if !strings.Contains(css, wantCSS) {
+			t.Errorf("styles.css missing System Reference compact row or sub-tab class %q", wantCSS)
+		}
+	}
+}
+
+func TestPortal_AboutInterZoneCalloutClearanceAndLightModeZeroShift(t *testing.T) {
+	rt := aegis.NewRuntime(aegis.RuntimeConfig{})
+	srv := newLoopbackServer(t, aegis.NewHTTPHandler(rt))
+
+	jsResp, err := http.Get(srv.URL + "/static/app.js")
+	if err != nil {
+		t.Fatalf("GET /static/app.js error: %v", err)
+	}
+	jsBytes, err := io.ReadAll(jsResp.Body)
+	jsResp.Body.Close()
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	js := string(jsBytes)
+
+	cssResp, err := http.Get(srv.URL + "/static/styles.css")
+	if err != nil {
+		t.Fatalf("GET /static/styles.css error: %v", err)
+	}
+	cssBytes, err := io.ReadAll(cssResp.Body)
+	cssResp.Body.Close()
+	if err != nil {
+		t.Fatalf("read styles.css: %v", err)
+	}
+	css := string(cssBytes)
+
+	// 1. Inter-zone SVG hop callout clearance for EDGE_B2_B3, EDGE_B3_B2, EDGE_B2_B4, and EDGE_B2_B5
+	for _, wantJS := range []string{
+		"function resolveHopCalloutBox(",
+		`"EDGE_B2_B3"`,
+		`"EDGE_B3_B2"`,
+		`"EDGE_B2_B4"`,
+		`"EDGE_B2_B5"`,
+		"hop.edgeId",
+		"finalHop.edgeId",
+	} {
+		if !strings.Contains(js, wantJS) {
+			t.Errorf("app.js missing inter-zone SVG hop callout clearance logic %q", wantJS)
+		}
+	}
+
+	// 2. Projector Light Mode ([data-theme="light"]) uses pure color-token overrides with zero layout-shifting rules
+	if count := strings.Count(css, `[data-theme=`); count != 1 {
+		t.Errorf("expected exactly 1 [data-theme=...] token block in styles.css, got %d", count)
+	}
+	lightIdx := strings.Index(css, `[data-theme="light"]`)
+	if lightIdx < 0 {
+		t.Fatalf("missing [data-theme=\"light\"] block in styles.css")
+	}
+	openBrace := strings.Index(css[lightIdx:], "{")
+	closeBrace := strings.Index(css[lightIdx:], "}")
+	if openBrace < 0 || closeBrace < 0 || closeBrace <= openBrace {
+		t.Fatalf("malformed [data-theme=\"light\"] block in styles.css")
+	}
+	lightBody := css[lightIdx+openBrace+1 : lightIdx+closeBrace]
+	for _, rawLine := range strings.Split(lightBody, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" || strings.HasPrefix(line, "/*") {
+			continue
+		}
+		if !strings.HasPrefix(line, "--") && !strings.HasPrefix(line, "color-scheme:") {
+			t.Errorf("[data-theme=\"light\"] contains non-token declaration %q that could shift layout", line)
+		}
+	}
+}
