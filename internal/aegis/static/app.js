@@ -55,8 +55,102 @@
       alice: ["google_gmail", "atlassian_jira", "github", "gcp_iam"],
       bob: ["google_gmail", "atlassian_jira", "github", "gcp_iam"],
     },
+    ephemeralGrants: {
+      alice: [],
+      bob: [],
+    },
     scenarios: {},
   };
+
+  function base64UrlEncodeBytes(bytes) {
+    let binary = "";
+    for (let i = 0; i < bytes.length; i += 1) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  }
+
+  async function generateBrowserPKCEPair() {
+    const verifierBytes = new Uint8Array(32);
+    window.crypto.getRandomValues(verifierBytes);
+    const codeVerifier = base64UrlEncodeBytes(verifierBytes);
+    const encoded = new TextEncoder().encode(codeVerifier);
+    const digest = await window.crypto.subtle.digest("SHA-256", encoded);
+    const codeChallenge = base64UrlEncodeBytes(new Uint8Array(digest));
+    return {
+      codeVerifier: codeVerifier,
+      codeChallenge: codeChallenge,
+      codeChallengeMethod: "S256",
+    };
+  }
+
+  function applySessionSnapshot(snap) {
+    if (!snap) return;
+    if (snap.activePersona) state.persona = snap.activePersona;
+    if (snap.posture) state.posture = snap.posture;
+    if (snap.grantedProviders) state.grantedProviders = snap.grantedProviders;
+    if (snap.ephemeralGrants) state.ephemeralGrants = snap.ephemeralGrants;
+  }
+
+  function formatGrantTTL(ttlRemainingSeconds) {
+    const sec = Number(ttlRemainingSeconds) || 0;
+    if (sec <= 0) return "Expired";
+    if (sec >= 60) return Math.ceil(sec / 60) + "m";
+    return sec + "s";
+  }
+
+  async function authorizeProviderWithPKCE(provider, persona) {
+    const targetPersona = persona || state.persona;
+    const targetProvider = provider || "atlassian_jira";
+    const pkce = await generateBrowserPKCEPair();
+
+    const authURL =
+      "/oauth/" +
+      encodeURIComponent(targetProvider) +
+      "/authorize?session_id=" +
+      encodeURIComponent(state.sessionId) +
+      "&persona=" +
+      encodeURIComponent(targetPersona) +
+      "&code_challenge=" +
+      encodeURIComponent(pkce.codeChallenge) +
+      "&code_challenge_method=S256";
+
+    const authResp = await fetch(authURL);
+    if (!authResp.ok) return false;
+    const challenge = await authResp.json();
+
+    const grantResp = await fetch(
+      "/api/sessions/" + encodeURIComponent(state.sessionId) + "/oauth/grant",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          persona: targetPersona,
+          provider: targetProvider,
+          nonce: challenge.nonce || "",
+          codeVerifier: pkce.codeVerifier,
+        }),
+      }
+    );
+    if (!grantResp.ok) return false;
+    const snap = await grantResp.json();
+    applySessionSnapshot(snap);
+    syncPersonaAndVaultUI();
+    return true;
+  }
+
+  async function refreshSessionVaultSnapshot() {
+    try {
+      const resp = await fetch("/api/sessions/" + encodeURIComponent(state.sessionId));
+      if (resp.ok) {
+        const snap = await resp.json();
+        applySessionSnapshot(snap);
+        syncPersonaAndVaultUI();
+      }
+    } catch (err) {
+      console.error("refreshSessionVaultSnapshot failed:", err);
+    }
+  }
 
   function parseStaticSVG(svgMarkup) {
     const parser = new DOMParser();
@@ -100,6 +194,7 @@
     if (!modal) return;
     modal.hidden = false;
     modal.setAttribute("aria-hidden", "false");
+    refreshSessionVaultSnapshot();
     loadSourcesStatus();
   }
 
@@ -169,15 +264,35 @@
     }
 
     const grantedList = (state.grantedProviders && state.grantedProviders[state.persona]) || [];
+    const personaGrants = (state.ephemeralGrants && state.ephemeralGrants[state.persona]) || [];
+    const grantByProvider = {};
+    personaGrants.forEach(function (g) {
+      if (g && g.provider) {
+        grantByProvider[g.provider] = g;
+      }
+    });
+
     const chips = document.querySelectorAll(".provider-chip");
     chips.forEach(function (chip) {
       const prov = chip.getAttribute("data-provider");
       const dot = chip.querySelector(".provider-dot");
+      const pkceMeta = chip.querySelector(".provider-pkce-meta");
       const btn = chip.querySelector(".btn-revoke-provider");
       const isGranted = grantedList.indexOf(prov) !== -1;
+      const meta = grantByProvider[prov];
       if (dot) dot.classList.toggle("granted", isGranted);
+      if (pkceMeta) {
+        if (isGranted) {
+          const ttlLabel = meta ? formatGrantTTL(meta.ttlRemainingSeconds) : "15m";
+          pkceMeta.textContent = "PKCE · S256 · " + ttlLabel;
+          pkceMeta.classList.remove("expired");
+        } else {
+          pkceMeta.textContent = "PKCE · S256 · Required";
+          pkceMeta.classList.add("expired");
+        }
+      }
       if (btn) {
-        btn.textContent = isGranted ? "Test Revoke 3LO" : "Grant 3LO";
+        btn.textContent = isGranted ? "Test Revoke 3LO" : "Connect (OAuth + PKCE)";
         btn.setAttribute("data-mode", isGranted ? "revoke" : "grant");
       }
     });
@@ -253,9 +368,7 @@
       });
       if (resp.ok) {
         const snap = await resp.json();
-        if (snap.grantedProviders) {
-          state.grantedProviders = snap.grantedProviders;
-        }
+        applySessionSnapshot(snap);
         syncPersonaAndVaultUI();
       }
     } catch (err) {
@@ -352,31 +465,26 @@
     if (!act) return;
     if (act.kind === "oauth_consent") {
       const payload = act.payload || {};
-      if (btnEl) btnEl.textContent = "Granting OAuth Consent...";
-      const resp = await fetch("/api/sessions/" + encodeURIComponent(state.sessionId) + "/oauth/grant", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          persona: payload.persona || state.persona,
-          provider: payload.provider || "atlassian_jira",
-          nonce: payload.nonce || "",
-        }),
-      });
-      if (resp.ok) {
-        const snap = await resp.json();
-        if (snap.grantedProviders) {
-          state.grantedProviders = snap.grantedProviders;
-        }
+      if (btnEl) btnEl.textContent = "Verifying OAuth 2.0 + S256 PKCE...";
+      const ok = await authorizeProviderWithPKCE(
+        payload.provider || "atlassian_jira",
+        payload.persona || state.persona
+      );
+      if (ok) {
         const coldCheck = document.getElementById("chk-cold-3lo");
         if (coldCheck) coldCheck.checked = false;
         syncComposerFlagsIndicator();
-        syncPersonaAndVaultUI();
-        if (btnEl) btnEl.textContent = "3LO OAuth Granted";
+        if (btnEl) btnEl.textContent = "OAuth 2.0 + PKCE Authorized (15m TTL)";
         await executeTurn({
           forceCold3LO: false,
           userLabelOverride:
-            "Completed 3LO OAuth consent for " + (payload.provider || "provider") + " — resuming request",
+            "Completed OAuth 2.0 + S256 PKCE consent for " +
+            (payload.provider || "provider") +
+            " — resuming request",
         });
+      } else if (btnEl) {
+        btnEl.disabled = false;
+        btnEl.textContent = act.label || "Retry OAuth 2.0 + PKCE";
       }
       return;
     }
@@ -930,9 +1038,7 @@
       if (!resp.ok) return;
       const data = await resp.json();
       if (data.session) {
-        state.persona = data.session.activePersona || "alice";
-        state.posture = data.session.posture || state.posture;
-        state.grantedProviders = data.session.grantedProviders || state.grantedProviders;
+        applySessionSnapshot(data.session);
       }
       const coldCheck = document.getElementById("chk-cold-3lo");
       if (coldCheck) coldCheck.checked = false;
@@ -987,9 +1093,7 @@
       const sessResp = await fetch("/api/sessions/" + encodeURIComponent(state.sessionId));
       if (sessResp.ok) {
         const snap = await sessResp.json();
-        if (snap.activePersona) state.persona = snap.activePersona;
-        if (snap.posture) state.posture = snap.posture;
-        if (snap.grantedProviders) state.grantedProviders = snap.grantedProviders;
+        applySessionSnapshot(snap);
       }
       await loadSourcesStatus();
     } catch (err) {
@@ -1120,23 +1224,24 @@
       btn.addEventListener("click", async function () {
         const provider = btn.getAttribute("data-provider");
         const mode = btn.getAttribute("data-mode") || "revoke";
-        const endpoint =
-          mode === "grant"
-            ? "/api/sessions/" + encodeURIComponent(state.sessionId) + "/oauth/grant"
-            : "/api/sessions/" + encodeURIComponent(state.sessionId) + "/oauth/revoke";
-        const resp = await fetch(endpoint, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            persona: state.persona,
-            provider: provider,
-          }),
-        });
+        if (mode === "grant") {
+          await authorizeProviderWithPKCE(provider, state.persona);
+          return;
+        }
+        const resp = await fetch(
+          "/api/sessions/" + encodeURIComponent(state.sessionId) + "/oauth/revoke",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              persona: state.persona,
+              provider: provider,
+            }),
+          }
+        );
         if (resp.ok) {
           const snap = await resp.json();
-          if (snap.grantedProviders) {
-            state.grantedProviders = snap.grantedProviders;
-          }
+          applySessionSnapshot(snap);
           syncPersonaAndVaultUI();
         }
       });

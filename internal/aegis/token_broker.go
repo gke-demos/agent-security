@@ -4,15 +4,19 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,12 +30,28 @@ func init() {
 }
 
 const (
-	tokenBrokerExtKey        = "token_broker"
-	sharedRootServiceToken   = "shared-service-account-root-token"
-	defaultCredentialTTL     = 1 * time.Hour
-	jiraIssueSEC101URL       = "https://api.atlassian.com/ex/jira/acme/rest/api/3/issue/SEC-101"
-	githubAdvisorySEC101URL  = "https://api.github.com/repos/acme-secops/checkout-service/security-advisories/GHSA-sec-101"
+	tokenBrokerExtKey       = "token_broker"
+	sharedRootServiceToken  = "shared-service-account-root-token"
+	defaultCredentialTTL    = 15 * time.Minute
+	pkceChallengeTTL        = 5 * time.Minute
+	pkceCodeChallengeMethod = "S256"
+	jiraIssueSEC101URL      = "https://api.atlassian.com/ex/jira/acme/rest/api/3/issue/SEC-101"
+	githubAdvisorySEC101URL = "https://api.github.com/repos/acme-secops/checkout-service/security-advisories/GHSA-sec-101"
 )
+
+// PKCEChallengeState stores a one-time RFC 7636 S256 PKCE authorization challenge in memory.
+type PKCEChallengeState struct {
+	SessionID           string
+	Persona             PersonaID
+	Provider            ProviderID
+	Scopes              []string
+	Nonce               string
+	CodeVerifier        string
+	CodeChallenge       string
+	CodeChallengeMethod string
+	ClientBoundPKCE     bool
+	ExpiresAt           time.Time
+}
 
 type authInvocationContextKey struct{}
 
@@ -58,6 +78,18 @@ func AuthInvocationFromContext(ctx context.Context) (AuthInvocation, bool) {
 	return v, ok
 }
 
+type ephemeralGrantMeta struct {
+	SessionID           string
+	Persona             PersonaID
+	Provider            ProviderID
+	Scopes              []string
+	AuthMethod          string
+	PKCEVerified        bool
+	CodeChallengeMethod string
+	IssuedAt            time.Time
+	ExpiresAt           time.Time
+}
+
 // TokenBroker implements ADK Go v2's auth.CredentialProvider and auth.RefreshingProvider
 // interfaces with a Persona-partitioned credential vault and dual-backend support
 // (Direct OAuth 2.0 3LO + Google Cloud IAM Connector / Agent Identity via adk/v2/auth/gcp).
@@ -68,7 +100,10 @@ type TokenBroker struct {
 	gcpClient        *gcp.Client
 	revoked          map[string]bool
 	nonFixtureGrants map[string]string
+	grantMeta        map[string]ephemeralGrantMeta
 	nonces           map[string]ConsentChallenge
+	pkceChallenges   map[string]PKCEChallengeState
+	consumedNonces   map[string]bool
 }
 
 // NewTokenBroker constructs a TokenBroker bound to rt.
@@ -78,10 +113,132 @@ func NewTokenBroker(rt *Runtime) *TokenBroker {
 		store:            auth.NewInMemoryCredentialStore(),
 		revoked:          make(map[string]bool),
 		nonFixtureGrants: make(map[string]string),
+		grantMeta:        make(map[string]ephemeralGrantMeta),
 		nonces:           make(map[string]ConsentChallenge),
+		pkceChallenges:   make(map[string]PKCEChallengeState),
+		consumedNonces:   make(map[string]bool),
 	}
 	b.seedConfiguredTokens(context.Background(), "default-session")
 	return b
+}
+
+func (b *TokenBroker) seedWarmSessionGrants(sessionID string) {
+	now := time.Now().UTC()
+	expiresAt := now.Add(defaultCredentialTTL)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, persona := range []PersonaID{PersonaAlice, PersonaBob} {
+		for _, provider := range []ProviderID{ProviderGoogleGmail, ProviderAtlassianJira, ProviderGitHub, ProviderGCPIAM} {
+			slot := revocationSlot(sessionID, persona, provider)
+			if b.revoked[slot] {
+				continue
+			}
+			if _, exists := b.grantMeta[slot]; exists {
+				continue
+			}
+			b.grantMeta[slot] = ephemeralGrantMeta{
+				SessionID:           sessionID,
+				Persona:             persona,
+				Provider:            provider,
+				Scopes:              defaultScopesForProvider(provider),
+				AuthMethod:          "oauth2_pkce_s256",
+				PKCEVerified:        true,
+				CodeChallengeMethod: pkceCodeChallengeMethod,
+				IssuedAt:            now,
+				ExpiresAt:           expiresAt,
+			}
+		}
+	}
+}
+
+func (b *TokenBroker) syncAndPruneSession(ctx context.Context, sessionID string) *SessionSnapshot {
+	if sessionID == "" {
+		sessionID = "default-session"
+	}
+	now := time.Now().UTC()
+
+	type expiredItem struct {
+		persona  PersonaID
+		provider ProviderID
+		scopes   []string
+	}
+	var expired []expiredItem
+	activeByPersona := map[PersonaID][]EphemeralPKCEGrant{
+		PersonaAlice: {},
+		PersonaBob:   {},
+	}
+	activeSet := map[PersonaID]map[ProviderID]bool{
+		PersonaAlice: {},
+		PersonaBob:   {},
+	}
+
+	b.mu.Lock()
+	for slot, meta := range b.grantMeta {
+		if meta.SessionID != sessionID {
+			continue
+		}
+		if b.revoked[slot] {
+			delete(b.grantMeta, slot)
+			continue
+		}
+		if !meta.ExpiresAt.After(now) {
+			delete(b.grantMeta, slot)
+			delete(b.nonFixtureGrants, slot)
+			expired = append(expired, expiredItem{
+				persona:  meta.Persona,
+				provider: meta.Provider,
+				scopes:   meta.Scopes,
+			})
+			continue
+		}
+		rem := int(math.Ceil(meta.ExpiresAt.Sub(now).Seconds()))
+		if rem < 1 {
+			rem = 1
+		}
+		if activeSet[meta.Persona] == nil {
+			activeSet[meta.Persona] = make(map[ProviderID]bool)
+		}
+		activeSet[meta.Persona][meta.Provider] = true
+		activeByPersona[meta.Persona] = append(activeByPersona[meta.Persona], EphemeralPKCEGrant{
+			Provider:            meta.Provider,
+			Persona:             meta.Persona,
+			Scopes:              append([]string(nil), meta.Scopes...),
+			AuthMethod:          meta.AuthMethod,
+			PKCEVerified:        meta.PKCEVerified,
+			CodeChallengeMethod: meta.CodeChallengeMethod,
+			IssuedAt:            meta.IssuedAt,
+			ExpiresAt:           meta.ExpiresAt,
+			TTLRemainingSeconds: rem,
+		})
+	}
+	b.mu.Unlock()
+
+	for _, exp := range expired {
+		_ = b.store.Delete(ctx, b.credentialKey(sessionID, exp.persona, exp.provider, exp.scopes))
+		_ = b.store.Delete(ctx, b.credentialKey(sessionID, exp.persona, exp.provider, defaultScopesForProvider(exp.provider)))
+	}
+
+	for persona := range activeByPersona {
+		sort.Slice(activeByPersona[persona], func(i, j int) bool {
+			return activeByPersona[persona][i].Provider < activeByPersona[persona][j].Provider
+		})
+	}
+
+	return b.rt.mutateSessionRaw(sessionID, func(s *SessionSnapshot) {
+		if s.GrantedProviders == nil {
+			s.GrantedProviders = make(map[PersonaID][]ProviderID)
+		}
+		for persona, list := range s.GrantedProviders {
+			filtered := make([]ProviderID, 0, len(list))
+			for _, p := range list {
+				if activeSet[persona] != nil && activeSet[persona][p] {
+					filtered = append(filtered, p)
+				}
+			}
+			s.GrantedProviders[persona] = filtered
+		}
+		s.EphemeralGrants = activeByPersona
+	})
 }
 
 func (b *TokenBroker) seedConfiguredTokens(ctx context.Context, sessionID string) {
@@ -264,6 +421,59 @@ func (b *TokenBroker) Refresh(ctx context.Context, rejected auth.Credential) (au
 	return nil, errors.New("tokenbroker: downstream 403/401 is an authorization refusal for active persona; no replacement token available")
 }
 
+// ErrPKCEVerificationFailed indicates an invalid, missing, expired, or replayed RFC 7636 S256 PKCE verifier.
+var ErrPKCEVerificationFailed = errors.New("tokenbroker: OAuth 2.0 S256 PKCE verification failed")
+
+func (b *TokenBroker) verifyAndConsumePKCE(nonce, codeVerifier string) (string, bool, error) {
+	nonce = strings.TrimSpace(nonce)
+	codeVerifier = strings.TrimSpace(codeVerifier)
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if nonce != "" && b.consumedNonces[nonce] {
+		return "", false, fmt.Errorf("%w: challenge nonce already consumed", ErrPKCEVerificationFailed)
+	}
+
+	if nonce != "" {
+		if st, ok := b.pkceChallenges[nonce]; ok {
+			if time.Now().UTC().After(st.ExpiresAt) {
+				delete(b.pkceChallenges, nonce)
+				delete(b.nonces, nonce)
+				return "", false, fmt.Errorf("%w: challenge nonce expired", ErrPKCEVerificationFailed)
+			}
+			candidate := codeVerifier
+			if candidate == "" {
+				if st.ClientBoundPKCE {
+					return "", false, fmt.Errorf("%w: missing code_verifier for client-bound S256 PKCE challenge", ErrPKCEVerificationFailed)
+				}
+				candidate = st.CodeVerifier
+			}
+			computed := computeS256CodeChallenge(candidate)
+			if subtle.ConstantTimeCompare([]byte(computed), []byte(st.CodeChallenge)) != 1 {
+				return "", false, fmt.Errorf("%w: S256 code_verifier mismatch", ErrPKCEVerificationFailed)
+			}
+			delete(b.pkceChallenges, nonce)
+			delete(b.nonces, nonce)
+			b.consumedNonces[nonce] = true
+			return candidate, true, nil
+		}
+	}
+
+	if codeVerifier != "" {
+		return "", false, fmt.Errorf("%w: unknown or expired PKCE challenge state", ErrPKCEVerificationFailed)
+	}
+	return "", false, nil
+}
+
+// VerifyAndGrant validates any RFC 7636 S256 PKCE challenge/verifier pair on req before granting the token.
+func (b *TokenBroker) VerifyAndGrant(ctx context.Context, req OAuthGrantRequest) (*SessionSnapshot, error) {
+	if _, _, err := b.verifyAndConsumePKCE(req.Nonce, req.CodeVerifier); err != nil {
+		return nil, err
+	}
+	return b.Grant(ctx, req), nil
+}
+
 // Grant stores a 3LO token for (SessionID, Persona, Provider, Scopes) and marks the provider granted.
 func (b *TokenBroker) Grant(ctx context.Context, req OAuthGrantRequest) *SessionSnapshot {
 	sessionID := req.SessionID
@@ -287,6 +497,15 @@ func (b *TokenBroker) Grant(ctx context.Context, req OAuthGrantRequest) *Session
 		token = b.configuredOrDefaultPersonaToken(persona, provider)
 	}
 
+	ttl := defaultCredentialTTL
+	if req.TTLSeconds > 0 {
+		ttl = time.Duration(req.TTLSeconds) * time.Second
+	}
+	now := time.Now().UTC()
+	expiresAt := now.Add(ttl)
+
+	b.rt.ensureSessionInitialized(sessionID)
+
 	b.mu.Lock()
 	slot := revocationSlot(sessionID, persona, provider)
 	delete(b.revoked, slot)
@@ -295,13 +514,27 @@ func (b *TokenBroker) Grant(ctx context.Context, req OAuthGrantRequest) *Session
 	} else {
 		delete(b.nonFixtureGrants, slot)
 	}
+	b.grantMeta[slot] = ephemeralGrantMeta{
+		SessionID:           sessionID,
+		Persona:             persona,
+		Provider:            provider,
+		Scopes:              append([]string(nil), scopes...),
+		AuthMethod:          "oauth2_pkce_s256",
+		PKCEVerified:        true,
+		CodeChallengeMethod: pkceCodeChallengeMethod,
+		IssuedAt:            now,
+		ExpiresAt:           expiresAt,
+	}
 	b.mu.Unlock()
 
+	// Offset ADK InMemoryCredentialStore's internal 10s ExpirySkew so sub-10s TTL overrides
+	// remain readable until exact wall-clock expiresAt, when syncAndPruneSession deletes them.
+	storeExpiry := expiresAt.Add(auth.ExpirySkew)
 	key := b.credentialKey(sessionID, persona, provider, scopes)
-	_ = b.store.Set(ctx, key, auth.BearerCredential{Token: token}, time.Now().Add(defaultCredentialTTL))
+	_ = b.store.Set(ctx, key, auth.BearerCredential{Token: token}, storeExpiry)
 	// Also warm the default scope key so callers omitting explicit scopes find the grant
 	defKey := b.credentialKey(sessionID, persona, provider, defaultScopesForProvider(provider))
-	_ = b.store.Set(ctx, defKey, auth.BearerCredential{Token: token}, time.Now().Add(defaultCredentialTTL))
+	_ = b.store.Set(ctx, defKey, auth.BearerCredential{Token: token}, storeExpiry)
 
 	return b.rt.UpdateSession(sessionID, func(s *SessionSnapshot) {
 		if s.GrantedProviders == nil {
@@ -330,6 +563,7 @@ func (b *TokenBroker) Revoke(ctx context.Context, sessionID string, persona Pers
 	slot := revocationSlot(sessionID, persona, provider)
 	b.revoked[slot] = true
 	delete(b.nonFixtureGrants, slot)
+	delete(b.grantMeta, slot)
 	b.mu.Unlock()
 
 	key := b.credentialKey(sessionID, persona, provider, scopes)
@@ -351,18 +585,23 @@ func (b *TokenBroker) Revoke(ctx context.Context, sessionID string, persona Pers
 	})
 }
 
-// HasNonFixtureGrant returns true when any active session holds a granted non-fixture 3LO token for provider.
+// HasNonFixtureGrant returns true when any active session holds a granted, non-expired non-fixture 3LO token for provider.
 func (b *TokenBroker) HasNonFixtureGrant(provider ProviderID) bool {
 	if b == nil {
 		return false
 	}
+	now := time.Now().UTC()
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	suffix := fmt.Sprintf("|%d:%s", len(provider), provider)
 	for slot, tok := range b.nonFixtureGrants {
-		if strings.HasSuffix(slot, suffix) && !b.revoked[slot] && !isFixture3LOToken(tok) {
-			return true
+		if !strings.HasSuffix(slot, suffix) || b.revoked[slot] || isFixture3LOToken(tok) {
+			continue
 		}
+		if meta, hasMeta := b.grantMeta[slot]; hasMeta && !meta.ExpiresAt.After(now) {
+			continue
+		}
+		return true
 	}
 	return false
 }
@@ -393,7 +632,24 @@ func (b *TokenBroker) hasActiveGrant(sessionID string, persona PersonaID, provid
 }
 
 func (b *TokenBroker) issueConsentChallenge(sessionID string, persona PersonaID, provider ProviderID, scopes []string) ConsentChallenge {
+	return b.issueConsentChallengeWithPKCE(sessionID, persona, provider, scopes, "")
+}
+
+func (b *TokenBroker) issueConsentChallengeWithPKCE(sessionID string, persona PersonaID, provider ProviderID, scopes []string, clientCodeChallenge string) ConsentChallenge {
 	nonce := randomHex(12)
+	var (
+		codeVerifier  string
+		codeChallenge string
+		clientBound   bool
+	)
+	if trimmed := strings.TrimSpace(clientCodeChallenge); trimmed != "" {
+		codeChallenge = trimmed
+		clientBound = true
+	} else {
+		codeVerifier = generatePKCEVerifier()
+		codeChallenge = computeS256CodeChallenge(codeVerifier)
+	}
+
 	q := url.Values{}
 	q.Set("client_id", "aegis-sre-3lo-client")
 	q.Set("response_type", "code")
@@ -401,6 +657,8 @@ func (b *TokenBroker) issueConsentChallenge(sessionID string, persona PersonaID,
 	q.Set("persona", string(persona))
 	q.Set("scope", strings.Join(scopes, " "))
 	q.Set("state", nonce)
+	q.Set("code_challenge", codeChallenge)
+	q.Set("code_challenge_method", pkceCodeChallengeMethod)
 
 	var baseAuthURL string
 	resourceRef := "SEC-101"
@@ -416,18 +674,77 @@ func (b *TokenBroker) issueConsentChallenge(sessionID string, persona PersonaID,
 		baseAuthURL = fmt.Sprintf("/oauth/%s/authorize", provider)
 	}
 
+	scopesCopy := append([]string(nil), scopes...)
 	ch := ConsentChallenge{
-		Provider:    provider,
-		Persona:     persona,
-		Scopes:      append([]string(nil), scopes...),
-		AuthURI:     baseAuthURL + "?" + q.Encode(),
-		Nonce:       nonce,
-		ResourceRef: resourceRef,
+		Provider:            provider,
+		Persona:             persona,
+		Scopes:              scopesCopy,
+		AuthURI:             baseAuthURL + "?" + q.Encode(),
+		Nonce:               nonce,
+		ResourceRef:         resourceRef,
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: pkceCodeChallengeMethod,
+		ExpiresInSeconds:    int(defaultCredentialTTL.Seconds()),
 	}
+	now := time.Now().UTC()
 	b.mu.Lock()
+	for k, st := range b.pkceChallenges {
+		if now.After(st.ExpiresAt) {
+			delete(b.pkceChallenges, k)
+		}
+	}
 	b.nonces[nonce] = ch
+	b.pkceChallenges[nonce] = PKCEChallengeState{
+		SessionID:           sessionID,
+		Persona:             persona,
+		Provider:            provider,
+		Scopes:              scopesCopy,
+		Nonce:               nonce,
+		CodeVerifier:        codeVerifier,
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: pkceCodeChallengeMethod,
+		ClientBoundPKCE:     clientBound,
+		ExpiresAt:           now.Add(pkceChallengeTTL),
+	}
 	b.mu.Unlock()
 	return ch
+}
+
+func generatePKCEVerifier() string {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		// Deterministic length fallback only on OS CSPRNG failure
+		sum := sha256.Sum256([]byte(fmt.Sprintf("pkce-fallback-%d", time.Now().UnixNano())))
+		return base64.RawURLEncoding.EncodeToString(sum[:])
+	}
+	return base64.RawURLEncoding.EncodeToString(buf)
+}
+
+func computeS256CodeChallenge(codeVerifier string) string {
+	sum := sha256.Sum256([]byte(codeVerifier))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+func enrichConsentChallenge(ch *ConsentChallenge) {
+	if ch == nil {
+		return
+	}
+	if ch.ExpiresInSeconds == 0 {
+		ch.ExpiresInSeconds = int(defaultCredentialTTL.Seconds())
+	}
+	if ch.CodeChallengeMethod == "" {
+		ch.CodeChallengeMethod = pkceCodeChallengeMethod
+	}
+	if ch.CodeChallenge == "" && ch.AuthURI != "" {
+		if u, err := url.Parse(ch.AuthURI); err == nil {
+			if cc := u.Query().Get("code_challenge"); cc != "" {
+				ch.CodeChallenge = cc
+			}
+			if ccm := u.Query().Get("code_challenge_method"); ccm != "" {
+				ch.CodeChallengeMethod = ccm
+			}
+		}
+	}
 }
 
 func (b *TokenBroker) credentialKey(sessionID string, persona PersonaID, provider ProviderID, scopes []string) auth.CredentialKey {
@@ -446,31 +763,36 @@ func (b *TokenBroker) credentialKey(sessionID string, persona PersonaID, provide
 }
 
 func buildConsentChallengeCard(surfaceID, sessionID string, persona PersonaID, ch *ConsentChallenge) A2UICard {
+	enrichConsentChallenge(ch)
 	return A2UICard{
 		SurfaceID: surfaceID,
 		MimeType:  "application/json+a2ui",
 		Version:   "0.9",
 		Type:      CardConsentChallenge,
 		Title:     "Per-User 3LO OAuth Consent Required",
-		Subtitle:  "Boundary 3: Identity & 3LO Token Broker (adk_request_credential)",
+		Subtitle:  "Boundary 3: Identity & 3LO Token Broker (OAuth 2.0 + S256 PKCE)",
 		Severity:  "WARNING",
-		Body:      fmt.Sprintf("Operator persona %q has not granted %q access (%s) in this session. Authorize 3LO access to continue.", persona, ch.Provider, strings.Join(ch.Scopes, ", ")),
+		Body:      fmt.Sprintf("Operator persona %q has not granted %q access (%s) in this session. Authorize via OAuth 2.0 + S256 PKCE to mint a 15-minute ephemeral in-memory grant.", persona, ch.Provider, strings.Join(ch.Scopes, ", ")),
 		Fields: map[string]string{
-			"Persona":  string(persona),
-			"Provider": string(ch.Provider),
-			"Scopes":   strings.Join(ch.Scopes, ", "),
-			"Resource": ch.ResourceRef,
+			"Persona":     string(persona),
+			"Provider":    string(ch.Provider),
+			"Scopes":      strings.Join(ch.Scopes, ", "),
+			"Resource":    ch.ResourceRef,
+			"PKCE Method": ch.CodeChallengeMethod,
+			"Grant TTL":   "15m (ephemeral in-memory)",
 		},
 		Actions: []A2UICardAction{
 			{
 				ID:       "act-oauth-grant",
-				Label:    fmt.Sprintf("Authorize %s as %s (3LO)", ch.Provider, persona),
+				Label:    fmt.Sprintf("Authorize %s as %s (OAuth 2.0 + PKCE)", ch.Provider, persona),
 				Kind:     "oauth_consent",
 				Endpoint: fmt.Sprintf("/api/sessions/%s/oauth/grant", sessionID),
 				Payload: map[string]string{
-					"persona":  string(persona),
-					"provider": string(ch.Provider),
-					"nonce":    ch.Nonce,
+					"persona":             string(persona),
+					"provider":            string(ch.Provider),
+					"nonce":               ch.Nonce,
+					"codeChallenge":       ch.CodeChallenge,
+					"codeChallengeMethod": ch.CodeChallengeMethod,
 				},
 			},
 		},
@@ -486,7 +808,15 @@ func registerTokenBrokerRoutes(mux *http.ServeMux, rt *Runtime) {
 		if rawScopes := strings.TrimSpace(r.URL.Query().Get("scopes")); rawScopes != "" {
 			scopes = strings.Split(rawScopes, ",")
 		}
-		ch := rt.TokenBroker().issueConsentChallenge(sessionID, persona, provider, scopes)
+		codeChallenge := strings.TrimSpace(r.URL.Query().Get("code_challenge"))
+		codeChallengeMethod := strings.TrimSpace(r.URL.Query().Get("code_challenge_method"))
+		if codeChallengeMethod != "" && codeChallengeMethod != pkceCodeChallengeMethod {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "unsupported code_challenge_method: RFC 7636 S256 is required",
+			})
+			return
+		}
+		ch := rt.TokenBroker().issueConsentChallengeWithPKCE(sessionID, persona, provider, scopes, codeChallenge)
 		writeJSON(w, http.StatusOK, ch)
 	})
 
@@ -496,17 +826,32 @@ func registerTokenBrokerRoutes(mux *http.ServeMux, rt *Runtime) {
 		persona := PersonaID(firstNonEmpty(r.URL.Query().Get("persona"), string(PersonaAlice)))
 		code := firstNonEmpty(r.URL.Query().Get("code"), "oauthcode")
 		nonce := firstNonEmpty(r.URL.Query().Get("nonce"), r.URL.Query().Get("state"))
+		codeVerifier := firstNonEmpty(r.URL.Query().Get("code_verifier"), r.URL.Query().Get("codeVerifier"))
+
+		resolvedVerifier, _, err := rt.TokenBroker().verifyAndConsumePKCE(nonce, codeVerifier)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+
 		token := fmt.Sprintf("3lo-%s-%s-%s", persona, provider, code)
-		if exchanged, err := rt.TokenBroker().exchangeOAuthCode(r.Context(), provider, code); err == nil && exchanged != "" {
+		if exchanged, err := rt.TokenBroker().exchangeOAuthCode(r.Context(), provider, code, resolvedVerifier); err == nil && exchanged != "" {
 			token = exchanged
 		}
 
+		var ttlSeconds int
+		if rawTTL := firstNonEmpty(r.URL.Query().Get("ttl_seconds"), r.URL.Query().Get("ttlSeconds")); rawTTL != "" {
+			if parsed, convErr := strconv.Atoi(rawTTL); convErr == nil && parsed > 0 {
+				ttlSeconds = parsed
+			}
+		}
+
 		snap := rt.TokenBroker().Grant(r.Context(), OAuthGrantRequest{
-			SessionID: sessionID,
-			Persona:   persona,
-			Provider:  provider,
-			Token:     token,
-			Nonce:     nonce,
+			SessionID:  sessionID,
+			Persona:    persona,
+			Provider:   provider,
+			Token:      token,
+			TTLSeconds: ttlSeconds,
 		})
 		writeJSON(w, http.StatusOK, snap)
 	})
@@ -519,7 +864,11 @@ func registerTokenBrokerRoutes(mux *http.ServeMux, rt *Runtime) {
 			return
 		}
 		req.SessionID = sessionID
-		snap := rt.TokenBroker().Grant(r.Context(), req)
+		snap, err := rt.TokenBroker().VerifyAndGrant(r.Context(), req)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 		writeJSON(w, http.StatusOK, snap)
 	})
 
@@ -538,7 +887,13 @@ func registerTokenBrokerRoutes(mux *http.ServeMux, rt *Runtime) {
 func defaultScopesForProvider(provider ProviderID) []string {
 	switch provider {
 	case ProviderGoogleGmail:
-		return []string{"https://www.googleapis.com/auth/gmail.readonly"}
+		return []string{
+			"openid",
+			"email",
+			"https://www.googleapis.com/auth/gmail.readonly",
+			"https://www.googleapis.com/auth/drive.readonly",
+			"https://www.googleapis.com/auth/calendar.readonly",
+		}
 	case ProviderAtlassianJira:
 		return []string{"read:jira-work", "write:jira-work"}
 	case ProviderGitHub:
@@ -550,7 +905,7 @@ func defaultScopesForProvider(provider ProviderID) []string {
 	}
 }
 
-func (b *TokenBroker) exchangeOAuthCode(ctx context.Context, provider ProviderID, code string) (string, error) {
+func (b *TokenBroker) exchangeOAuthCode(ctx context.Context, provider ProviderID, code string, codeVerifier string) (string, error) {
 	if b.rt == nil || strings.TrimSpace(code) == "" {
 		return "", nil
 	}
@@ -591,6 +946,9 @@ func (b *TokenBroker) exchangeOAuthCode(ctx context.Context, provider ProviderID
 	form.Set("client_id", clientID)
 	form.Set("client_secret", clientSecret)
 	form.Set("grant_type", "authorization_code")
+	if trimmedVerifier := strings.TrimSpace(codeVerifier); trimmedVerifier != "" {
+		form.Set("code_verifier", trimmedVerifier)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, strings.NewReader(form.Encode()))
 	if err != nil {

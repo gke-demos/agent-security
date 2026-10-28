@@ -347,7 +347,7 @@
             <div class="control-block-header">
               <div>
                 <h3 class="control-heading">3LO OAuth Token Vault &amp; Fixtures</h3>
-                <p class="control-desc">Revoke a provider grant for the active persona to test cold 3LO OAuth consent cards in chat.</p>
+                <p class="control-desc">Ephemeral 15-minute in-memory OAuth 2.0 + S256 PKCE grants (zero browser-stored PATs). Revoke a grant to test cold PKCE consent cards in chat.</p>
               </div>
               <button type="button" id="btn-seed-fixtures" class="action-btn secondary-btn">
                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -367,22 +367,26 @@
               <div class="provider-badges" id="provider-badges">
                 <div class="provider-chip" data-provider="google_gmail">
                   <span class="provider-dot granted"></span>
-                  <span class="provider-title">Gmail</span>
+                  <span class="provider-title">Google Workspace SSO</span>
+                  <span class="provider-pkce-meta">PKCE · S256 · 15m</span>
                   <button type="button" class="btn-revoke-provider" data-provider="google_gmail">Test Revoke 3LO</button>
                 </div>
                 <div class="provider-chip" data-provider="atlassian_jira">
                   <span class="provider-dot granted"></span>
                   <span class="provider-title">Jira Cloud</span>
+                  <span class="provider-pkce-meta">PKCE · S256 · 15m</span>
                   <button type="button" class="btn-revoke-provider" data-provider="atlassian_jira">Test Revoke 3LO</button>
                 </div>
                 <div class="provider-chip" data-provider="github">
                   <span class="provider-dot granted"></span>
                   <span class="provider-title">GitHub</span>
+                  <span class="provider-pkce-meta">PKCE · S256 · 15m</span>
                   <button type="button" class="btn-revoke-provider" data-provider="github">Test Revoke 3LO</button>
                 </div>
                 <div class="provider-chip" data-provider="gcp_iam">
                   <span class="provider-dot granted"></span>
                   <span class="provider-title">GCP IAM / MCP</span>
+                  <span class="provider-pkce-meta">PKCE · S256 · 15m</span>
                   <button type="button" class="btn-revoke-provider" data-provider="gcp_iam">Test Revoke 3LO</button>
                 </div>
               </div>

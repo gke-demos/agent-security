@@ -75,7 +75,32 @@ func (r *Runtime) GetExtension(key string) (any, bool) {
 	return v, ok
 }
 
-func (r *Runtime) getOrCreateSessionLocked(sessionID string) *SessionSnapshot {
+func cloneSessionSnapshot(s *SessionSnapshot) *SessionSnapshot {
+	if s == nil {
+		return nil
+	}
+	cp := *s
+	if s.GrantedProviders != nil {
+		cp.GrantedProviders = make(map[PersonaID][]ProviderID, len(s.GrantedProviders))
+		for k, v := range s.GrantedProviders {
+			cp.GrantedProviders[k] = append([]ProviderID(nil), v...)
+		}
+	}
+	if s.EphemeralGrants != nil {
+		cp.EphemeralGrants = make(map[PersonaID][]EphemeralPKCEGrant, len(s.EphemeralGrants))
+		for k, v := range s.EphemeralGrants {
+			grantsCopy := make([]EphemeralPKCEGrant, len(v))
+			for i := range v {
+				grantsCopy[i] = v[i]
+				grantsCopy[i].Scopes = append([]string(nil), v[i].Scopes...)
+			}
+			cp.EphemeralGrants[k] = grantsCopy
+		}
+	}
+	return &cp
+}
+
+func (r *Runtime) getOrCreateSessionLocked(sessionID string) (*SessionSnapshot, bool) {
 	sess, ok := r.sessions[sessionID]
 	if !ok {
 		sess = &SessionSnapshot{
@@ -86,37 +111,57 @@ func (r *Runtime) getOrCreateSessionLocked(sessionID string) *SessionSnapshot {
 				PersonaAlice: {ProviderGoogleGmail, ProviderAtlassianJira, ProviderGitHub, ProviderGCPIAM},
 				PersonaBob:   {ProviderGoogleGmail, ProviderAtlassianJira, ProviderGitHub, ProviderGCPIAM},
 			},
+			EphemeralGrants: make(map[PersonaID][]EphemeralPKCEGrant),
 		}
 		r.sessions[sessionID] = sess
 	}
-	return sess
+	return sess, !ok
 }
 
-// GetOrCreateSession returns the SessionSnapshot for sessionID, initializing default state if needed.
+func (r *Runtime) ensureSessionInitialized(sessionID string) {
+	r.mu.Lock()
+	_, created := r.getOrCreateSessionLocked(sessionID)
+	r.mu.Unlock()
+	if created {
+		r.TokenBroker().seedWarmSessionGrants(sessionID)
+	}
+}
+
+func (r *Runtime) mutateSessionRaw(sessionID string, fn func(s *SessionSnapshot)) *SessionSnapshot {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	sess, _ := r.getOrCreateSessionLocked(sessionID)
+	if fn != nil {
+		fn(sess)
+	}
+	return cloneSessionSnapshot(sess)
+}
+
+// GetOrCreateSession returns the SessionSnapshot for sessionID, initializing default state and pruning expired grants.
 func (r *Runtime) GetOrCreateSession(sessionID string) *SessionSnapshot {
 	if sessionID == "" {
 		sessionID = "default-session"
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.getOrCreateSessionLocked(sessionID)
+	r.ensureSessionInitialized(sessionID)
+	return r.TokenBroker().syncAndPruneSession(context.Background(), sessionID)
 }
 
-// UpdateSession mutates a session under lock.
+// UpdateSession mutates a session under lock and synchronizes ephemeral grant metadata.
 func (r *Runtime) UpdateSession(sessionID string, fn func(s *SessionSnapshot)) *SessionSnapshot {
 	if sessionID == "" {
 		sessionID = "default-session"
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	sess := r.getOrCreateSessionLocked(sessionID)
-	fn(sess)
-	return sess
+	r.ensureSessionInitialized(sessionID)
+	r.mutateSessionRaw(sessionID, fn)
+	return r.TokenBroker().syncAndPruneSession(context.Background(), sessionID)
 }
 
 // CompleteOAuthConsent completes a 3LO OAuth grant for a Persona and Provider via the Runtime's TokenBroker.
 func (r *Runtime) CompleteOAuthConsent(ctx context.Context, cb OAuthCallback) (*ConsentResult, error) {
-	snap := r.TokenBroker().Grant(ctx, cb)
+	snap, err := r.TokenBroker().VerifyAndGrant(ctx, cb)
+	if err != nil {
+		return nil, err
+	}
 	persona := cb.Persona
 	if persona == "" {
 		persona = snap.ActivePersona

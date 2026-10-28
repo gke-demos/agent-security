@@ -116,21 +116,21 @@ const (
 
 // SecurityPosture holds the 5 independently toggleable Security Shields (ADR-0002).
 type SecurityPosture struct {
-	PromptScreenEnabled        bool `json:"promptScreenEnabled"`
-	PIIRedactorEnabled         bool `json:"piiRedactorEnabled"`
-	TokenBrokerEnabled         bool `json:"tokenBrokerEnabled"`
+	PromptScreenEnabled         bool `json:"promptScreenEnabled"`
+	PIIRedactorEnabled          bool `json:"piiRedactorEnabled"`
+	TokenBrokerEnabled          bool `json:"tokenBrokerEnabled"`
 	StepUpAndA2UICatalogEnabled bool `json:"stepUpAndA2UICatalogEnabled"`
-	SandboxEgressMITMEnabled   bool `json:"sandboxEgressMitmEnabled"`
+	SandboxEgressMITMEnabled    bool `json:"sandboxEgressMitmEnabled"`
 }
 
 // AllBluePosture returns a SecurityPosture with all 5 Security Shields active.
 func AllBluePosture() SecurityPosture {
 	return SecurityPosture{
-		PromptScreenEnabled:        true,
-		PIIRedactorEnabled:         true,
-		TokenBrokerEnabled:         true,
+		PromptScreenEnabled:         true,
+		PIIRedactorEnabled:          true,
+		TokenBrokerEnabled:          true,
 		StepUpAndA2UICatalogEnabled: true,
-		SandboxEgressMITMEnabled:   true,
+		SandboxEgressMITMEnabled:    true,
 	}
 }
 
@@ -178,12 +178,15 @@ type A2UICardAction struct {
 
 // ConsentChallenge represents an adk_request_credential 3LO interrupt.
 type ConsentChallenge struct {
-	Provider    ProviderID `json:"provider"`
-	Persona     PersonaID  `json:"persona"`
-	Scopes      []string   `json:"scopes"`
-	AuthURI     string     `json:"authUri"`
-	Nonce       string     `json:"nonce"`
-	ResourceRef string     `json:"resourceRef"`
+	Provider            ProviderID `json:"provider"`
+	Persona             PersonaID  `json:"persona"`
+	Scopes              []string   `json:"scopes"`
+	AuthURI             string     `json:"authUri"`
+	Nonce               string     `json:"nonce"`
+	ResourceRef         string     `json:"resourceRef"`
+	CodeChallenge       string     `json:"codeChallenge,omitempty"`
+	CodeChallengeMethod string     `json:"codeChallengeMethod,omitempty"`
+	ExpiresInSeconds    int        `json:"expiresInSeconds,omitempty"`
 }
 
 // StepUpConfirmation represents an adk_request_confirmation HITL interrupt.
@@ -214,14 +217,14 @@ type OutboundWireRecord struct {
 
 // TurnRequest is the input to AegisRuntime.ExecuteTurn.
 type TurnRequest struct {
-	SessionID            string          `json:"sessionId"`
-	Persona              PersonaID       `json:"persona"`
-	ScenarioID           ScenarioID      `json:"scenarioId"`
-	Posture              SecurityPosture `json:"posture"`
-	Prompt               string          `json:"prompt"`
-	CleanPIIOnly         bool            `json:"cleanPiiOnly,omitempty"`
-	RequireCold3LOConsent bool           `json:"requireCold3loConsent,omitempty"`
-	ForwardedBearerToken string          `json:"-"`
+	SessionID             string          `json:"sessionId"`
+	Persona               PersonaID       `json:"persona"`
+	ScenarioID            ScenarioID      `json:"scenarioId"`
+	Posture               SecurityPosture `json:"posture"`
+	Prompt                string          `json:"prompt"`
+	CleanPIIOnly          bool            `json:"cleanPiiOnly,omitempty"`
+	RequireCold3LOConsent bool            `json:"requireCold3loConsent,omitempty"`
+	ForwardedBearerToken  string          `json:"-"`
 }
 
 // TurnResult is the output of AegisRuntime.ExecuteTurn.
@@ -254,13 +257,15 @@ type ConfirmationResolution struct {
 
 // OAuthGrantRequest grants or completes a 3LO token for a Persona and Provider.
 type OAuthGrantRequest struct {
-	SessionID   string     `json:"sessionId"`
-	Persona     PersonaID  `json:"persona"`
-	Provider    ProviderID `json:"provider"`
-	Scopes      []string   `json:"scopes,omitempty"`
-	Token       string     `json:"token,omitempty"`
-	AccessToken string     `json:"accessToken,omitempty"`
-	Nonce       string     `json:"nonce,omitempty"`
+	SessionID    string     `json:"sessionId"`
+	Persona      PersonaID  `json:"persona"`
+	Provider     ProviderID `json:"provider"`
+	Scopes       []string   `json:"scopes,omitempty"`
+	Token        string     `json:"token,omitempty"`
+	AccessToken  string     `json:"accessToken,omitempty"`
+	Nonce        string     `json:"nonce,omitempty"`
+	CodeVerifier string     `json:"codeVerifier,omitempty"`
+	TTLSeconds   int        `json:"ttlSeconds,omitempty"`
 }
 
 // OAuthCallback carries parameters to complete an OAuth 2.0 3LO grant or callback.
@@ -315,14 +320,29 @@ type AegisRuntime interface {
 	GetSourcesStatus(ctx context.Context) ([]SourceStatus, error)
 }
 
+// EphemeralPKCEGrant exposes non-secret metadata for an active OAuth 2.0 + S256 PKCE
+// grant held in the TokenBroker in-memory vault. Raw bearer tokens are never included.
+type EphemeralPKCEGrant struct {
+	Provider            ProviderID `json:"provider"`
+	Persona             PersonaID  `json:"persona"`
+	Scopes              []string   `json:"scopes"`
+	AuthMethod          string     `json:"authMethod"`
+	PKCEVerified        bool       `json:"pkceVerified"`
+	CodeChallengeMethod string     `json:"codeChallengeMethod"`
+	IssuedAt            time.Time  `json:"issuedAt"`
+	ExpiresAt           time.Time  `json:"expiresAt"`
+	TTLRemainingSeconds int        `json:"ttlRemainingSeconds"`
+}
+
 // SessionSnapshot holds the current state of an Operator session.
 type SessionSnapshot struct {
-	SessionID           string                     `json:"sessionId"`
-	ActivePersona       PersonaID                  `json:"activePersona"`
-	Posture             SecurityPosture            `json:"posture"`
-	GrantedProviders    map[PersonaID][]ProviderID `json:"grantedProviders"`
-	PendingConfirmation *StepUpConfirmation        `json:"pendingConfirmation,omitempty"`
-	LastTurn            *TurnResult                `json:"lastTurn,omitempty"`
+	SessionID           string                             `json:"sessionId"`
+	ActivePersona       PersonaID                          `json:"activePersona"`
+	Posture             SecurityPosture                    `json:"posture"`
+	GrantedProviders    map[PersonaID][]ProviderID         `json:"grantedProviders"`
+	EphemeralGrants     map[PersonaID][]EphemeralPKCEGrant `json:"ephemeralGrants,omitempty"`
+	PendingConfirmation *StepUpConfirmation                `json:"pendingConfirmation,omitempty"`
+	LastTurn            *TurnResult                        `json:"lastTurn,omitempty"`
 }
 
 // RuntimeConfig configures NewRuntime.

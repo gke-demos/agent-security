@@ -220,7 +220,7 @@ func registerA2ARoutes(mux *http.ServeMux, rt *Runtime) {
 				SessionID: sessionID,
 				Persona:   persona,
 				Provider:  ProviderGoogleGmail,
-				Scopes:    []string{"https://www.googleapis.com/auth/gmail.readonly"},
+				Scopes:    defaultScopesForProvider(ProviderGoogleGmail),
 				Token:     forwardedToken,
 			})
 			rt.TokenBroker().Grant(r.Context(), OAuthGrantRequest{

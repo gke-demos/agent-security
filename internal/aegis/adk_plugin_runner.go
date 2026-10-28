@@ -59,40 +59,40 @@ type governedToolInput struct {
 type adkTurnExecutionState = adkActiveTurnContext
 
 type adkActiveTurnContext struct {
-	mu                     sync.Mutex
-	rt                     *Runtime
-	req                    TurnRequest
-	rawScenarioID          ScenarioID
-	adkUserID              string
-	adkSessionID           string
-	sink                   TurnEventSink
-	textDeltaEmitted       bool
-	isConfirmationResume   bool
-	confirmationResolution *ConfirmationResolution
-	resolvedStepUp         *StepUpConfirmation
-	plannedTools           []plannedToolCall
-	nextToolIdx            int
-	userPromptScreened     bool
+	mu                      sync.Mutex
+	rt                      *Runtime
+	req                     TurnRequest
+	rawScenarioID           ScenarioID
+	adkUserID               string
+	adkSessionID            string
+	sink                    TurnEventSink
+	textDeltaEmitted        bool
+	isConfirmationResume    bool
+	confirmationResolution  *ConfirmationResolution
+	resolvedStepUp          *StepUpConfirmation
+	plannedTools            []plannedToolCall
+	nextToolIdx             int
+	userPromptScreened      bool
 	sanitizedUserPromptText string
-	registryDiscovered     bool
-	loggedReadOnlyUAP      bool
-	cold3LOConsentChecked  bool
-	halted                 bool
-	redEmailExploited      bool
-	sharedSessionLeaked    bool
-	cleanPeerSummary       string
-	outcome                TurnOutcome
-	assistantText          string
-	sanitizedInputPreview  string
-	outboundCommentPreview string
-	cards                  []A2UICard
-	trace                  []BoundaryTraceEvent
-	wireRecords            []OutboundWireRecord
-	consentChallenge       *ConsentChallenge
-	stepUpConfirmation     *StepUpConfirmation
-	modelCallCount         int
-	pluginCallbacks        []string
-	executedTools          []string
+	registryDiscovered      bool
+	loggedReadOnlyUAP       bool
+	cold3LOConsentChecked   bool
+	halted                  bool
+	redEmailExploited       bool
+	sharedSessionLeaked     bool
+	cleanPeerSummary        string
+	outcome                 TurnOutcome
+	assistantText           string
+	sanitizedInputPreview   string
+	outboundCommentPreview  string
+	cards                   []A2UICard
+	trace                   []BoundaryTraceEvent
+	wireRecords             []OutboundWireRecord
+	consentChallenge        *ConsentChallenge
+	stepUpConfirmation      *StepUpConfirmation
+	modelCallCount          int
+	pluginCallbacks         []string
+	executedTools           []string
 }
 
 func (tc *adkActiveTurnContext) emitLocked(ev TurnStreamEvent) {
@@ -1655,6 +1655,7 @@ func check3LOConsentBeforeTool(ctx agent.Context, r *Runtime, tc *adkActiveTurnC
 				Nonce:       consentErr.Nonce,
 				ResourceRef: resourceRef,
 			}
+			enrichConsentChallenge(ch)
 			tc.addStep(BoundaryTraceEvent{
 				Boundary:   BoundaryIdentity3LO,
 				Shield:     "Token Broker (3LO)",

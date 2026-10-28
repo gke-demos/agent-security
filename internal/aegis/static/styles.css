@@ -1427,6 +1427,21 @@ body {
   background: var(--accent-green);
 }
 
+.provider-pkce-meta {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: var(--bg-code);
+  border: 1px solid var(--border-subtle);
+  color: var(--accent-blue);
+}
+
+.provider-pkce-meta.expired {
+  color: var(--text-muted);
+}
+
 .btn-revoke-provider {
   padding: 2px 6px;
   border-radius: 4px;
