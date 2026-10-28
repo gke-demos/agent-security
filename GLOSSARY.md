@@ -80,6 +80,14 @@ _Avoid_: HTML snippet, iframe widget, raw markdown card
 A structured interrupt emitted when a tool requires a per-user 3LO authorization grant that is not yet present in the Token Broker.
 _Avoid_: Auth error, login redirect
 
+**Ephemeral PKCE Grant**:
+A short-lived per-persona OAuth 2.0 access token obtained via an S256 Proof Key for Code Exchange (`PKCE`) authorization code flow and held strictly inside the Token Broker's in-memory vault with an automatic TTL expiration timestamp, never persisted in browser storage or databases.
+_Avoid_: Stored PAT, long-lived API key, localStorage token
+
+**Architecture Topology Catalog**:
+The canonical structured specification of AegisSRE's six security boundaries, `AegisSecurityPlugin` callback state machine, Red-vs-Blue signal trajectories, and ADR pointers rendered by the interactive `/about` visualizer.
+_Avoid_: Static docs page, markdown wall
+
 **Attenuated Delegation**:
 A cross-agent task handoff that strips upstream user credentials, narrows permission scope, and screens the peer agent's response as untrusted input before updating parent state.
 _Avoid_: Token passthrough, full impersonation
