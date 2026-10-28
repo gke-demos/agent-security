@@ -130,7 +130,7 @@ func parseBoolEnv(val string) bool {
 }
 
 func resolveGitHubCLIToken() string {
-	if flag.Lookup("test.v") != nil {
+	if flag.Lookup("test.v") != nil && !parseBoolEnv(os.Getenv("AEGIS_LIVE_EVALS")) {
 		return ""
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
