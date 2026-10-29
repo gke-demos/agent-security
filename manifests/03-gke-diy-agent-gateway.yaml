@@ -49,7 +49,7 @@ spec:
             value: /healthz
       backendRefs:
         - name: aegis-sre
-          port: 8080
+          port: 80
 ---
 apiVersion: networking.gke.io/v1
 kind: GCPAgentGateway
@@ -58,16 +58,16 @@ metadata:
   namespace: aegis-system
   labels:
     app.kubernetes.io/name: aegis-sre
+  annotations:
+    # Linked Agent Registry catalogs (protocols: MCP):
+    # - //agentregistry.googleapis.com/projects/${PROJECT_ID}/locations/global
+    # - //agentregistry.googleapis.com/projects/${PROJECT_ID}/locations/${REGION}
+    agentregistry.googleapis.com/registries: "//agentregistry.googleapis.com/projects/${PROJECT_ID}/locations/global,//agentregistry.googleapis.com/projects/${PROJECT_ID}/locations/${REGION}"
 spec:
   targetRefs:
     - group: gateway.networking.k8s.io
       kind: Gateway
       name: aegis-ingress-gateway
-  protocols:
-    - MCP
-  registries:
-    - //agentregistry.googleapis.com/projects/${PROJECT_ID}/locations/global
-    - //agentregistry.googleapis.com/projects/${PROJECT_ID}/locations/${REGION}
 ---
 apiVersion: networking.gke.io/v1
 kind: GCPAuthzExtension
@@ -77,14 +77,16 @@ metadata:
   labels:
     app.kubernetes.io/name: aegis-sre
 spec:
-  service: modelarmor.${REGION}.rep.googleapis.com:443
-  timeout: 2s
+  # ExtProcGRPC callout endpoint: modelarmor.${REGION}.rep.googleapis.com:443
+  googleAPIServiceName: modelarmor.${REGION}.rep.googleapis.com
+  wireFormat: ExtProcGRPC
+  timeout: 2000ms
   failOpen: false
   forwardHeaders:
     - Authorization
     - X-Goog-User-Project
   metadata:
-    model_armor_settings: '[{"template":"projects/${PROJECT_ID}/locations/${REGION}/templates/aegis-prompt-screen"}]'
+    model_armor_settings: '[{"template_id":"projects/${PROJECT_ID}/locations/${REGION}/templates/aegis-prompt-screen","Enforcement_type":"INSPECT_AND_BLOCK"}]'
 ---
 apiVersion: networking.gke.io/v1
 kind: GCPAuthzExtension
@@ -94,9 +96,13 @@ metadata:
   labels:
     app.kubernetes.io/name: aegis-sre
 spec:
-  service: iap.googleapis.com:443
-  timeout: 2s
+  # ExtProcGRPC callout endpoint: iap.googleapis.com:443
+  googleAPIServiceName: iap.googleapis.com
+  wireFormat: ExtProcGRPC
+  timeout: 2000ms
   failOpen: false
+  metadata:
+    iapPolicyVersion: "V2"
 ---
 apiVersion: networking.gke.io/v1
 kind: GCPAuthzPolicy
@@ -111,8 +117,9 @@ spec:
       kind: Gateway
       name: aegis-ingress-gateway
   enforcementLevel: L7
+  policyProfile: REQUEST_AUTHZ
   action: ALLOW
-  httpRules:
+  rules:
     - to:
         operations:
           - methods: ["GET", "POST", "HEAD", "OPTIONS"]
@@ -135,7 +142,7 @@ spec:
 #   customProviders:
 #     extensionRefs:
 #       - name: aegis-modelarmor-content-ext
-#   httpRules:
+#   rules:
 #     - to:
 #         operations:
 #           - mcp:
