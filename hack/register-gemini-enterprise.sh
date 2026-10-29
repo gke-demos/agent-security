@@ -4,7 +4,15 @@ set -euo pipefail
 PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || echo 'your-gcp-project-id')}"
 LOCATION="${LOCATION:-global}"
 ENGINE_ID="${GEMINI_ENTERPRISE_ENGINE_ID:-default-enterprise-engine}"
-AEGIS_PUBLIC_URL="${AEGIS_PUBLIC_URL:-https://aegis.example.com}"
+
+if [[ -z "${AEGIS_PUBLIC_URL:-}" ]]; then
+  GATEWAY_ADDR="$(kubectl -n aegis-system get gateway aegis-ingress-gateway -o jsonpath='{.status.addresses[0].value}' 2>/dev/null || true)"
+  if [[ -n "${GATEWAY_ADDR}" ]]; then
+    AEGIS_PUBLIC_URL="http://${GATEWAY_ADDR}"
+  else
+    AEGIS_PUBLIC_URL="https://aegis.example.com"
+  fi
+fi
 
 AGENT_CARD_URL="${AEGIS_PUBLIC_URL%/}/.well-known/agent-card.json"
 A2A_RPC_URL="${AEGIS_PUBLIC_URL%/}/a2a"

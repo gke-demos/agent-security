@@ -1,8 +1,13 @@
+# Provisioned via:
+# gcloud model-armor templates create aegis-prompt-screen --location=${REGION} ...
 apiVersion: modelarmor.googleapis.com/v1
 kind: Template
 metadata:
-  name: aegis-sre-zero-trust-template
+  name: aegis-prompt-screen
+  labels:
+    app.kubernetes.io/name: aegis-sre
 spec:
+  name: projects/${PROJECT_ID}/locations/${REGION}/templates/aegis-prompt-screen
   filterConfig:
     piAndJailbreakFilterSettings:
       filterEnforcement: ENABLED
@@ -13,7 +18,15 @@ spec:
       raiFilters:
         - filterType: DANGEROUS
           confidenceLevel: MEDIUM_AND_ABOVE
+        - filterType: HARASSMENT
+          confidenceLevel: MEDIUM_AND_ABOVE
+        - filterType: HATE_SPEECH
+          confidenceLevel: MEDIUM_AND_ABOVE
+        - filterType: SEXUALLY_EXPLICIT
+          confidenceLevel: MEDIUM_AND_ABOVE
     sdpSettings:
+      basicConfig:
+        filterEnforcement: ENABLED
       advancedConfig:
         inspectTemplate: projects/${PROJECT_ID}/locations/global/inspectTemplates/aegis-sdp-inspect
         deidentifyTemplate: projects/${PROJECT_ID}/locations/global/deidentifyTemplates/aegis-sdp-deidentify
