@@ -585,7 +585,7 @@ func canonicalBoundaryCatalogNodes() []BoundaryCatalogNode {
 			GovernedTools: []string{
 				"create_github_pull_request",
 			},
-			ADRNumbers: []string{"0001", "0002", "0006", "0008", "0009", "0011"},
+			ADRNumbers: []string{"0001", "0002", "0006", "0008", "0009", "0011", "0015"},
 		},
 		{
 			ID:                   BoundaryReasoningGuard,
@@ -611,7 +611,7 @@ func canonicalBoundaryCatalogNodes() []BoundaryCatalogNode {
 				"delegate_sandbox_test",
 				"create_github_pull_request",
 			},
-			ADRNumbers: []string{"0002", "0005", "0007", "0008", "0009", "0014"},
+			ADRNumbers: []string{"0002", "0005", "0007", "0008", "0009", "0014", "0015"},
 		},
 		{
 			ID:                   BoundaryIdentity3LO,
@@ -664,7 +664,7 @@ func canonicalBoundaryCatalogNodes() []BoundaryCatalogNode {
 				"get_gke_cluster",
 				"delete_gke_cluster",
 			},
-			ADRNumbers: []string{"0004", "0006", "0007", "0008", "0010", "0014"},
+			ADRNumbers: []string{"0004", "0006", "0007", "0008", "0010", "0014", "0015"},
 		},
 		{
 			ID:                   BoundaryCrossAgentA2A,
@@ -1546,6 +1546,18 @@ func canonicalADRCatalogEntries() []ADRCatalogEntry {
 				BoundaryIdentity3LO,
 				BoundaryReasoningGuard,
 				BoundaryCrossAgentA2A,
+			},
+		},
+		{
+			Number:   "0015",
+			Slug:     "in-cluster-ext-proc-callout-live-checkout-telemetry-and-stage-runbook",
+			FileName: "0015-in-cluster-ext-proc-callout-live-checkout-telemetry-and-stage-runbook.md",
+			Title:    "In-Cluster ExtProcGRPC Authz Extension Callout, Live checkout-service Pod Telemetry, and Stage Presenter Runbook",
+			Summary:  "Co-hosts the :8443 HTTP/2 TLS ExtProcGRPC callout (GCPAuthzExtension + GCPTrafficExtension) inside aegis-server, ingests live checkout-service 502 pod logs from Cloud Logging, and syncs README.md and docs/stage-runbook.md.",
+			PrimaryBoundaries: []BoundaryID{
+				BoundaryReasoningGuard,
+				BoundaryPlatformGovernance,
+				BoundaryGenerativeUI,
 			},
 		},
 	}

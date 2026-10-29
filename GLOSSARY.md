@@ -62,6 +62,10 @@ _Avoid_: Log scrubber, string sanitizer
 A governed ingress and egress data plane that mediates traffic into agents and from agents to external MCP tools, enforcing identity verification, content guardrails, and per-tool authorization rules on the wire.
 _Avoid_: API proxy, reverse proxy, load balancer
 
+**Authz Extension Callout**:
+An in-cluster external processing gRPC endpoint invoked by the ingress Agent Gateway on incoming headers and request bodies to enforce wire-level content inspection and inject verified authorization metadata before requests reach the agent runtime.
+_Avoid_: Webhook filter, custom middleware, sidecar interceptor
+
 **Unified Access Policy**:
 A principal-and-tool access rule evaluated at the Agent Gateway boundary that permits or denies individual MCP tool invocations based on workload identity and tool metadata.
 _Avoid_: Firewall rule, IAM role binding
