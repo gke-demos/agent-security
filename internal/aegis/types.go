@@ -382,6 +382,7 @@ type RuntimeConfig struct {
 	GCPAuthProviderID          string
 	AgentGatewayIngressURL     string
 	AgentGatewayEgressProxyURL string
+	AgentGatewayRootCAPath     string
 	HTTPClient                 *http.Client
 }
 

@@ -138,3 +138,88 @@ func TestTokenBroker_StoreEnforcementAndBoundedNonceState(t *testing.T) {
 		t.Fatalf("expected consumed nonce %q to be pruned after 15m TTL", chNew.Nonce)
 	}
 }
+
+type mockGCPCredentialProvider struct {
+	calls        int
+	lastResource string
+	lastPersona  PersonaID
+	token        string
+}
+
+func (m *mockGCPCredentialProvider) Credential(ctx context.Context) (auth.Credential, error) {
+	m.calls++
+	if inv, ok := AuthInvocationFromContext(ctx); ok {
+		m.lastResource = inv.GCPResourceName
+		m.lastPersona = inv.Persona
+	}
+	return auth.BearerCredential{Token: m.token}, nil
+}
+
+func TestTokenBroker_PersonaFirstWithGCPAuthProviderIDFallback(t *testing.T) {
+	ctx := context.Background()
+	const wantProviderID = "projects/987654321098/locations/global/authProviders/aegis-github-provider"
+	rt := NewRuntime(RuntimeConfig{
+		GCPAuthProviderID: wantProviderID,
+	})
+	tb := rt.TokenBroker()
+
+	mockGCP := &mockGCPCredentialProvider{
+		token: "gcp-auth-provider-fallback-token",
+	}
+	tb.SetGCPProvider(mockGCP)
+
+	const sessionID = "persona-first-gcp-fallback-sess"
+	ch := tb.issueConsentChallengeWithPKCE(sessionID, PersonaAlice, ProviderGitHub, defaultScopesForProvider(ProviderGitHub), "")
+	if _, err := tb.VerifyAndGrant(ctx, OAuthGrantRequest{
+		SessionID:   sessionID,
+		Persona:     PersonaAlice,
+		Provider:    ProviderGitHub,
+		Nonce:       ch.Nonce,
+		AccessToken: "alice-15m-pkce-github-token",
+	}); err != nil {
+		t.Fatalf("VerifyAndGrant(alice github PKCE): %v", err)
+	}
+
+	// 1. Persona-first priority: when Alice has an active 15m PKCE grant AND GCPAuthProviderID + gcpProvider are configured,
+	// Credential() must return Alice's Persona-partitioned PKCE token first without calling gcpProvider.
+	invCtx := WithAuthInvocation(ctx, AuthInvocation{
+		SessionID: sessionID,
+		Persona:   PersonaAlice,
+		Provider:  ProviderGitHub,
+	})
+	cred, err := tb.Credential(invCtx)
+	if err != nil {
+		t.Fatalf("Credential(alice active PKCE): %v", err)
+	}
+	hdr := http.Header{}
+	_ = cred.Apply(hdr)
+	if got := hdr.Get("Authorization"); got != "Bearer alice-15m-pkce-github-token" {
+		t.Fatalf("Credential(alice active PKCE) Authorization = %q, want %q", got, "Bearer alice-15m-pkce-github-token")
+	}
+	if mockGCP.calls != 0 {
+		t.Fatalf("mockGCP.calls = %d while local Persona grant active, want 0", mockGCP.calls)
+	}
+
+	// 2. Fallback to GCPAuthProviderID: when no local Persona grant exists for the provider,
+	// Credential() delegates to gcpProvider using RuntimeConfig.GCPAuthProviderID.
+	tb.Revoke(ctx, sessionID, PersonaAlice, ProviderGitHub, nil)
+	if tb.hasActiveGrant(ctx, sessionID, PersonaAlice, ProviderGitHub) {
+		t.Fatalf("expected hasActiveGrant == false after Revoke")
+	}
+
+	fallbackCred, err := tb.Credential(invCtx)
+	if err != nil {
+		t.Fatalf("Credential(GCPAuthProviderID fallback): %v", err)
+	}
+	fallbackHdr := http.Header{}
+	_ = fallbackCred.Apply(fallbackHdr)
+	if got := fallbackHdr.Get("Authorization"); got != "Bearer gcp-auth-provider-fallback-token" {
+		t.Fatalf("Credential(GCPAuthProviderID fallback) Authorization = %q, want %q", got, "Bearer gcp-auth-provider-fallback-token")
+	}
+	if mockGCP.calls != 1 {
+		t.Fatalf("mockGCP.calls = %d, want 1", mockGCP.calls)
+	}
+	if mockGCP.lastResource != wantProviderID {
+		t.Fatalf("mockGCP.lastResource = %q, want %q", mockGCP.lastResource, wantProviderID)
+	}
+}

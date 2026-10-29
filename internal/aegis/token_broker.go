@@ -105,6 +105,7 @@ type TokenBroker struct {
 	store            auth.CredentialStore
 	mu               sync.RWMutex
 	gcpClient        *gcp.Client
+	gcpProvider      auth.CredentialProvider
 	revoked          map[grantSlotKey]bool
 	nonFixtureGrants map[grantSlotKey]string
 	grantMeta        map[grantSlotKey]ephemeralGrantMeta
@@ -380,6 +381,13 @@ func (b *TokenBroker) SetGCPClient(client *gcp.Client) {
 	b.gcpClient = client
 }
 
+// SetGCPProvider configures an optional ADK v2 auth.CredentialProvider for Agent Identity / IAM Connector fallback.
+func (b *TokenBroker) SetGCPProvider(provider auth.CredentialProvider) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.gcpProvider = provider
+}
+
 // BuildGCPProvider creates an ADK v2 auth.CredentialProvider backed by google.golang.org/adk/v2/auth/gcp.
 func (b *TokenBroker) BuildGCPProvider(ctx context.Context, scheme gcp.ProviderScheme) (auth.CredentialProvider, error) {
 	b.mu.RLock()
@@ -420,19 +428,63 @@ func (b *TokenBroker) Credential(ctx context.Context) (auth.Credential, error) {
 		return auth.BearerCredential{Token: sharedRootServiceToken}, nil
 	}
 
-	// If a GCP IAM Connector / Agent Identity resource name is supplied and a gcp.Client is wired,
-	// delegate retrieval to google.golang.org/adk/v2/auth/gcp.
-	if inv.GCPResourceName != "" {
+	key := b.credentialKey(inv.SessionID, inv.Persona, inv.Provider, inv.Scopes)
+
+	// 1. Persona-first priority: if an active 15m S256 Ephemeral PKCE Grant or seeded persona grant
+	// exists for (SessionID, Persona, Provider) and cold consent is not forced, resolve from the
+	// Persona-partitioned vault first so Alice vs. Bob confused-deputy isolation always wins
+	// (unless the caller explicitly requested a per-invocation GCPResourceName on an unseeded warm fixture slot).
+	if !inv.RequireCold3LOConsent && b.hasActiveGrant(ctx, inv.SessionID, inv.Persona, inv.Provider) {
+		slot := grantSlotKey{sessionID: inv.SessionID, persona: inv.Persona, provider: inv.Provider}
 		b.mu.RLock()
+		meta, hasMeta := b.grantMeta[slot]
+		nonFixtureTok := b.nonFixtureGrants[slot]
+		hasGCPBackend := b.gcpProvider != nil || b.gcpClient != nil
+		b.mu.RUnlock()
+
+		explicitInvocationGCPOverride := strings.TrimSpace(inv.GCPResourceName) != "" &&
+			hasGCPBackend &&
+			!meta.PKCEVerified &&
+			nonFixtureTok == "" &&
+			b.configuredPersonaToken(inv.Persona, inv.Provider) == ""
+
+		if !explicitInvocationGCPOverride {
+			if cached, hit, err := b.store.Get(ctx, key); err == nil && hit {
+				return cached, nil
+			}
+			if hasMeta && meta.ExpiresAt.After(time.Now().UTC()) {
+				storeExpiry := meta.ExpiresAt.Add(auth.ExpirySkew)
+				defKey := b.credentialKey(inv.SessionID, inv.Persona, inv.Provider, defaultScopesForProvider(inv.Provider))
+				if defCred, hit, err := b.store.Get(ctx, defKey); err == nil && hit {
+					_ = b.store.Set(ctx, key, defCred, storeExpiry)
+					return defCred, nil
+				}
+				token := b.configuredOrDefaultPersonaToken(inv.Persona, inv.Provider)
+				cred := auth.BearerCredential{Token: token}
+				_ = b.store.Set(ctx, key, cred, storeExpiry)
+				return cred, nil
+			}
+		}
+	}
+
+	// 2. Fallback to GCP IAM Connector / Agent Identity AuthProvider when configured via
+	// inv.GCPResourceName or RuntimeConfig.GCPAuthProviderID (GCP_AUTH_PROVIDER_ID).
+	if gcpResource := firstNonEmpty(strings.TrimSpace(inv.GCPResourceName), b.GCPAuthProviderID()); gcpResource != "" {
+		b.mu.RLock()
+		gcpProvider := b.gcpProvider
 		gcpClient := b.gcpClient
 		b.mu.RUnlock()
+		if gcpProvider != nil {
+			invWithResource := inv
+			invWithResource.GCPResourceName = gcpResource
+			return gcpProvider.Credential(WithAuthInvocation(ctx, invWithResource))
+		}
 		if gcpClient != nil {
-			key := b.credentialKey(inv.SessionID, inv.Persona, inv.Provider, inv.Scopes)
 			if cached, hit, err := b.store.Get(ctx, key); err == nil && hit {
 				return cached, nil
 			}
 			retrieval, err := gcpClient.RetrieveCredential(ctx, gcp.Request{
-				Resource:    inv.GCPResourceName,
+				Resource:    gcpResource,
 				UserID:      fmt.Sprintf("%s:%s", inv.SessionID, inv.Persona),
 				Scopes:      inv.Scopes,
 				ContinueURI: inv.ContinueURI,
@@ -447,45 +499,12 @@ func (b *TokenBroker) Credential(ctx context.Context) (auth.Credential, error) {
 		}
 	}
 
-	if inv.RequireCold3LOConsent || !b.hasActiveGrant(ctx, inv.SessionID, inv.Persona, inv.Provider) {
-		challenge := b.issueConsentChallenge(inv.SessionID, inv.Persona, inv.Provider, inv.Scopes)
-		key := b.credentialKey(inv.SessionID, inv.Persona, inv.Provider, inv.Scopes)
-		return nil, fmt.Errorf("tokenbroker: 3LO consent required for %s/%s: %w", inv.Persona, inv.Provider, &auth.ConsentRequiredError{
-			AuthURI: challenge.AuthURI,
-			Nonce:   challenge.Nonce,
-			Key:     key.Key,
-		})
-	}
-
-	key := b.credentialKey(inv.SessionID, inv.Persona, inv.Provider, inv.Scopes)
-	if cached, hit, err := b.store.Get(ctx, key); err == nil && hit {
-		return cached, nil
-	}
-
-	slot := grantSlotKey{sessionID: inv.SessionID, persona: inv.Persona, provider: inv.Provider}
-	b.mu.RLock()
-	meta, hasMeta := b.grantMeta[slot]
-	b.mu.RUnlock()
-	if !hasMeta || !meta.ExpiresAt.After(time.Now().UTC()) {
-		challenge := b.issueConsentChallenge(inv.SessionID, inv.Persona, inv.Provider, inv.Scopes)
-		return nil, fmt.Errorf("tokenbroker: 3LO consent required for %s/%s: %w", inv.Persona, inv.Provider, &auth.ConsentRequiredError{
-			AuthURI: challenge.AuthURI,
-			Nonce:   challenge.Nonce,
-			Key:     key.Key,
-		})
-	}
-
-	storeExpiry := meta.ExpiresAt.Add(auth.ExpirySkew)
-	defKey := b.credentialKey(inv.SessionID, inv.Persona, inv.Provider, defaultScopesForProvider(inv.Provider))
-	if defCred, hit, err := b.store.Get(ctx, defKey); err == nil && hit {
-		_ = b.store.Set(ctx, key, defCred, storeExpiry)
-		return defCred, nil
-	}
-
-	token := b.configuredOrDefaultPersonaToken(inv.Persona, inv.Provider)
-	cred := auth.BearerCredential{Token: token}
-	_ = b.store.Set(ctx, key, cred, storeExpiry)
-	return cred, nil
+	challenge := b.issueConsentChallenge(inv.SessionID, inv.Persona, inv.Provider, inv.Scopes)
+	return nil, fmt.Errorf("tokenbroker: 3LO consent required for %s/%s: %w", inv.Persona, inv.Provider, &auth.ConsentRequiredError{
+		AuthURI: challenge.AuthURI,
+		Nonce:   challenge.Nonce,
+		Key:     key.Key,
+	})
 }
 
 // Refresh implements auth.RefreshingProvider.

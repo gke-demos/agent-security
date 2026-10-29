@@ -2,23 +2,13 @@ package aegis
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/json"
-	"encoding/pem"
 	"io"
-	"math/big"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestExecuteTurn_DefaultFixtureProvenance(t *testing.T) {
@@ -677,12 +667,14 @@ func TestInspectAgentIdentitySPIFFE_AndStageSafeSourceStatusEnrichment(t *testin
 		"GCP_AUTH_PROVIDER_ID":            "projects/987654321098/locations/global/authProviders/aegis-github-provider",
 		"AGENT_GATEWAY_INGRESS_URL":       "https://agent-ingress.example.internal",
 		"AGENT_GATEWAY_EGRESS_PROXY_URL":  "http://10.128.0.50:443",
+		"AGENT_GATEWAY_ROOT_CA_PATH":      "/etc/ssl/certs/agent-gateway-ca.pem",
 	}
 	cfgCustom := ConfigFromEnvWithLookup(func(k string) string { return envCustom[k] }, nil)
 	if cfgCustom.SPIFFECredentialBundlePath != "/tmp/custom-spiffe-bundle.pem" ||
 		cfgCustom.GCPAuthProviderID != "projects/987654321098/locations/global/authProviders/aegis-github-provider" ||
 		cfgCustom.AgentGatewayIngressURL != "https://agent-ingress.example.internal" ||
-		cfgCustom.AgentGatewayEgressProxyURL != "http://10.128.0.50:443" {
+		cfgCustom.AgentGatewayEgressProxyURL != "http://10.128.0.50:443" ||
+		cfgCustom.AgentGatewayRootCAPath != "/etc/ssl/certs/agent-gateway-ca.pem" {
 		t.Fatalf("cfgCustom Phase 6 fields mismatch: %+v", cfgCustom)
 	}
 
@@ -695,36 +687,10 @@ func TestInspectAgentIdentitySPIFFE_AndStageSafeSourceStatusEnrichment(t *testin
 	}
 
 	// 4. Generate a synthetic X.509 SVID certificate bundle with a real GKE Agent Identity SPIFFE URI SAN
-	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("ecdsa.GenerateKey: %v", err)
-	}
 	rawSPIFFE := "spiffe://agents.global.org-123456789012.system.id.goog/resources/container/projects/987654321098/locations/us-central1-a/clusters/my-secret-gke-cluster/ns/aegis-system/sa/aegis-sre"
-	spiffeURL, err := url.Parse(rawSPIFFE)
+	bundlePath, err := WriteSyntheticSPIFFECredentialBundle(t.TempDir(), rawSPIFFE)
 	if err != nil {
-		t.Fatalf("url.Parse: %v", err)
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(42),
-		Subject:      pkix.Name{CommonName: "aegis-sre"},
-		NotBefore:    time.Now().Add(-1 * time.Hour),
-		NotAfter:     time.Now().Add(23 * time.Hour),
-		URIs:         []*url.URL{spiffeURL},
-	}
-	derBytes, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &privKey.PublicKey, privKey)
-	if err != nil {
-		t.Fatalf("x509.CreateCertificate: %v", err)
-	}
-	keyDER, err := x509.MarshalECPrivateKey(privKey)
-	if err != nil {
-		t.Fatalf("x509.MarshalECPrivateKey: %v", err)
-	}
-	bundlePath := filepath.Join(t.TempDir(), "x509.credential-bundle.private-key.pem")
-	var pemBuf strings.Builder
-	_ = pem.Encode(&pemBuf, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	_ = pem.Encode(&pemBuf, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
-	if err := os.WriteFile(bundlePath, []byte(pemBuf.String()), 0o600); err != nil {
-		t.Fatalf("os.WriteFile: %v", err)
+		t.Fatalf("WriteSyntheticSPIFFECredentialBundle: %v", err)
 	}
 
 	rtVerified := NewRuntime(RuntimeConfig{
@@ -770,5 +736,22 @@ func TestInspectAgentIdentitySPIFFE_AndStageSafeSourceStatusEnrichment(t *testin
 		if !strings.Contains(byID[srcID].Detail, wantSanitizedProvider) {
 			t.Errorf("Source %s Detail = %q, want it to contain stage-safe GCPAuthProviderID %q", srcID, byID[srcID].Detail, wantSanitizedProvider)
 		}
+	}
+
+	// 6. Verify un-slashed projects/<id>/locations/... and projects/<number>/locations/... are scrubbed by sanitizeStageSafeText
+	gotUnslashedID := sanitizeStageSafeText("projects/my-secret-proj/locations/us-central1/authProviders/github", RuntimeConfig{})
+	const wantUnslashedID = "projects/${PROJECT_ID}/locations/us-central1/authProviders/github"
+	if gotUnslashedID != wantUnslashedID {
+		t.Errorf("sanitizeStageSafeText(unslashed project id) = %q, want %q", gotUnslashedID, wantUnslashedID)
+	}
+	gotSlashedID := sanitizeStageSafeText("/projects/my-secret-proj/locations/us-central1/authProviders/github", RuntimeConfig{})
+	const wantSlashedID = "/projects/${PROJECT_ID}/locations/us-central1/authProviders/github"
+	if gotSlashedID != wantSlashedID {
+		t.Errorf("sanitizeStageSafeText(slashed project id) = %q, want %q", gotSlashedID, wantSlashedID)
+	}
+	gotUnslashedNum := sanitizeStageSafeText("projects/123456789/locations/global/authProviders/github", RuntimeConfig{})
+	const wantUnslashedNum = "projects/${PROJECT_NUMBER}/locations/global/authProviders/github"
+	if gotUnslashedNum != wantUnslashedNum {
+		t.Errorf("sanitizeStageSafeText(unslashed project number) = %q, want %q", gotUnslashedNum, wantUnslashedNum)
 	}
 }
