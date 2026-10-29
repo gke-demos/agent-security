@@ -17,16 +17,16 @@
 
 ---
 
-## Dual-Entry Architecture & Path-Based Portal Routes (`ADR-0001`–`0015`)
+## Dual-Entry Architecture & Path-Based Portal Routes (`ADR-0001`–`0015`, `ADR-0016`)
 
 Because managed enterprise portal trials expire monthly, AegisSRE provides a **Dual-Entry Architecture**:
 
 1. **Standalone GKE A2UI v0.9 Web Portal (`GET /` and `GET /about`)**:
    - **`GET /` (Incident Response Arena)**: Minimalist chat-first interface with progressive SSE streaming (`POST /api/sessions/{sessionId}/turns/stream`), inline collapsible 6-Boundary Security Trace drawers, `⌘K` Security Controls modal (5-Shield Red-vs-Blue posture toggles, `Alice` vs. `Bob` Persona Switcher, OAuth 2.0 + PKCE vault status), and an icon-only **Projector Light Mode** toggle (`aegis_theme` is the sole key ever stored in `localStorage`).
-   - **`GET /about` (`Architecture Topology Catalog`)**: Progressive-disclosure 3-tab Architecture Workspace backed by `GET /api/about/catalog` (verified against `docs/adr/0001`..`0015` via `VerifyArchitectureCatalogDrift`), keeping strictly one focused conceptual lens visible at a time:
+   - **`GET /about` (`Architecture Topology Catalog`)**: Progressive-disclosure 3-tab Architecture Workspace backed by `GET /api/about/catalog` (verified against `docs/adr/0001`..`0015` and `0016` via `VerifyArchitectureCatalogDrift`), keeping strictly one focused conceptual lens visible at a time:
      1. **`Security Topology`**: Single-screen 3-zone (`Ingress` / `Reasoning Core` / `Execution Planes`) 6-Boundary SVG canvas with 2-line node summaries, active-path dimming, top-layer active-hop callout badges, a unified scenario/posture toolbar with **`Run in Arena`** handoff, a horizontal step scrubber, and a Selected-Boundary Micro-Inspector,
      2. **`ADK Plugin Flow`**: Non-wrapping horizontal `AegisSecurityPlugin` 6-callback + `adk_request_confirmation / tool.Run` pipeline with a 2-column hook rule inspector and a collapsed-by-default `TurnStreamEvent` SSE wire drawer,
-     3. **`System Reference`**: Segmented sub-switcher (`Governed Tools (8)`, `External Sources (8)`, `ADR Index (15)`) with compact click-to-expand rows and stage-safe `LIVE` vs. `FIXTURE` provenance labels that never expose personal Google Cloud project or cluster identifiers.
+     3. **`System Reference`**: Segmented sub-switcher (`Governed Tools (8)`, `External Sources (8)`, `ADR Index (15)` / `ADR Index (16)`) with compact click-to-expand rows and stage-safe `LIVE` vs. `FIXTURE` provenance labels (`8/8 LIVE` when `LIVE_SAAS=true`) that never expose personal Google Cloud project or cluster identifiers.
 2. **Gemini Enterprise A2A v2 Endpoint (`POST /a2a` & `GET /.well-known/agent-card.json`)**: Advertises `"text/plain"` input/output modes and `serverSideOauth2` token forwarding, deduplicates consecutive identical `TextPart`s sent by Discovery Engine, and binds forwarded user OAuth tokens into the caller's `Token Broker` partition.
 
 For the 10-minute live keynote presenter walkthrough across `/about`, `/`, `⌘K`, and wire-level `Gateway/aegis-ingress-gateway` CLI checks, see [`docs/stage-runbook.md`](docs/stage-runbook.md).
@@ -69,7 +69,7 @@ make setup-live
 make run-live
 ```
 
-### 3. Deploy to GKE with Agent Substrate `v0.5.0` & Agent Gateway (`ADR-0013`, `ADR-0014`, `ADR-0015`)
+### 3. Deploy to GKE with Agent Substrate `v0.5.0` & Agent Gateway (`ADR-0013`, `ADR-0014`, `ADR-0015`, `ADR-0016`)
 
 All scripts and targets automatically use `kubectl config current-context` and `gcloud config get-value project`:
 
@@ -80,8 +80,8 @@ make seed-fixtures
 
 - `manifests/01-agent-substrate-v050.yaml` provisions the `aegis-system` namespace (`ate.dev/api-access: "true"`) and `WorkerPool/aegis-remediator-pool` (`gvisor` sandbox class).
 - `manifests/01b-substrate-actor-template.yaml` defines the `ActorTemplate` (`SNAPSHOT_FIDELITY_MEMORY` Golden Snapshot running `--mode=remediator-actor` with `/run/ate/trust-bundle.pem`) and default-deny `EgressPolicy` allowing HTTPS (`443`) strictly to `api.github.com`.
-- `manifests/02-aegis-deployment.yaml` mounts Pod Agent Identity SPIFFE SVIDs (`/var/run/secrets/workload-spiffe-credentials/`), exposes containerPort `8080` (`http`) alongside `:8443` (`ext-proc-tls`, `EXT_PROC_TLS_ADDR=":8443"`), and configures `LIVE_SUBSTRATE=true`, `SUBSTRATE_GATEWAY_URL=http://atenet-router.ate-system.svc.cluster.local/sandbox/execute`, and `SUBSTRATE_TARGET_ACTOR=aegis-system/remediator-1` (locally auto-bridged on `127.0.0.1` via short-lived `kubectl port-forward` to `svc/atenet-router` when `KUBERNETES_SERVICE_HOST` is unset).
-- `manifests/03-gke-diy-agent-gateway.yaml` provisions `Gateway/aegis-ingress-gateway` (`gke-l7-regional-external-managed`), `HTTPRoute/aegis-a2a-route`, `GCPAgentGateway/aegis-client-to-agent-gateway`, `GCPAuthzPolicy/aegis-a2a-ingress-policy`, and the in-cluster `:8443` HTTP/2 TLS `ExtProcGRPC` callout (`Service/aegis-model-armor-ext-proc` with `appProtocol: HTTP2`, `GCPAuthzExtension/aegis-model-armor-ext-proc`, and `GCPTrafficExtension/aegis-model-armor-body-ext`).
+- `manifests/02-aegis-deployment.yaml` mounts Pod Agent Identity SPIFFE SVIDs (`/var/run/secrets/workload-spiffe-credentials/`), exposes containerPort `8080` (`http`) alongside `:8443` (`ext-proc-tls`, `EXT_PROC_TLS_ADDR=":8443"`), and configures `LIVE_SUBSTRATE=true`, `LIVE_SAAS=true`, co-hosted authenticated SaaS targets (`GMAIL_API_URL=http://127.0.0.1:8080/api/targets/gmail/v1` and `JIRA_BASE_URL=http://127.0.0.1:8080/api/targets/jira`), `SUBSTRATE_GATEWAY_URL=http://atenet-router.ate-system.svc.cluster.local/sandbox/execute`, and `SUBSTRATE_TARGET_ACTOR=aegis-system/remediator-1` (locally auto-bridged on `127.0.0.1` via short-lived `kubectl port-forward` to `svc/atenet-router` when `KUBERNETES_SERVICE_HOST` is unset).
+- `manifests/03-gke-diy-agent-gateway.yaml` provisions `Gateway/aegis-ingress-gateway` (`gke-l7-regional-external-managed`), `HTTPRoute/aegis-a2a-route`, `GCPAgentGateway/aegis-client-to-agent-gateway`, `GCPAuthzPolicy/aegis-a2a-ingress-policy`, and the in-cluster `:8443` HTTP/2 TLS `ExtProcGRPC` callout (`Service/aegis-model-armor-ext-proc` with `appProtocol: HTTP2`, `GCPAuthzExtension/aegis-model-armor-ext-proc`, and `GCPTrafficExtension/aegis-model-armor-body-ext` with `FullDuplexStreamed` `StreamedBodyResponse` body echo).
 - `manifests/04-checkout-target-workload.yaml` deploys `Deployment/checkout-service` (`app: checkout-service`, `version: v2.4.0`) in `aegis-system`, emitting structured JSON `502 Bad Gateway` logs (`checkout_handler.go:142`) to `stdout` every `15s` for live Cloud Logging (`logging.entries.list`) ingestion.
 
 ### 4. Register with Gemini Enterprise Agent Platform (Optional)

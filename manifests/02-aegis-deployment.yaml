@@ -59,6 +59,12 @@ spec:
               value: "true"
             - name: LIVE_SUBSTRATE
               value: "true"
+            - name: LIVE_SAAS
+              value: "true"
+            - name: GMAIL_API_URL
+              value: "http://127.0.0.1:8080/api/targets/gmail/v1"
+            - name: JIRA_BASE_URL
+              value: "http://127.0.0.1:8080/api/targets/jira"
             - name: SUBSTRATE_GATEWAY_URL
               value: "http://atenet-router.ate-system.svc.cluster.local/sandbox/execute"
             - name: SUBSTRATE_TARGET_ACTOR

@@ -567,3 +567,175 @@ func TestLiveJiraConnector_Scenario02AndStepUpComment(t *testing.T) {
 		}
 	})
 }
+
+func TestCoHostedTargetSaaSEndpoints_GmailAndJira3LO(t *testing.T) {
+	ctx := context.Background()
+
+	rt := aegis.NewRuntime(aegis.RuntimeConfig{
+		AliceGmailToken: "gmail_tok_aegis_live_alice_3lo",
+		BobGmailToken:   "gmail_tok_aegis_live_bob_3lo",
+		AliceJiraToken:  "atatt3x_aegis_live_alice_jira_3lo",
+		BobJiraToken:    "atatt3x_aegis_live_bob_jira_3lo",
+	})
+	srv := httptest.NewServer(aegis.NewHTTPHandler(rt))
+	defer srv.Close()
+
+	// Re-create runtime pointing at the co-hosted /api/targets/gmail/v1 and /api/targets/jira routes on srv.URL
+	coHostedRT := aegis.NewRuntime(aegis.RuntimeConfig{
+		GmailAPIURL:     srv.URL + "/api/targets/gmail/v1",
+		JiraBaseURL:     srv.URL + "/api/targets/jira",
+		AliceGmailToken: "gmail_tok_aegis_live_alice_3lo",
+		BobGmailToken:   "gmail_tok_aegis_live_bob_3lo",
+		AliceJiraToken:  "atatt3x_aegis_live_alice_jira_3lo",
+		BobJiraToken:    "atatt3x_aegis_live_bob_jira_3lo",
+		HTTPClient:      srv.Client(),
+	})
+	srv.Config.Handler = aegis.NewHTTPHandler(coHostedRT)
+
+	t.Run("Direct HTTP auth checks on /api/targets/gmail/v1 and /api/targets/jira", func(t *testing.T) {
+		// 1. Missing bearer token -> 401 Unauthorized
+		for _, path := range []string{
+			"/api/targets/gmail/v1/users/me/messages",
+			"/api/targets/gmail/v1/users/me/messages/msg-p0-escalation",
+			"/api/targets/jira/rest/api/3/issue/SEC-101",
+		} {
+			resp, err := srv.Client().Get(srv.URL + path)
+			if err != nil {
+				t.Fatalf("GET %s: %v", path, err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("GET %s without Bearer token status = %d, want 401", path, resp.StatusCode)
+			}
+		}
+
+		// 2. Gmail clean vs adversarial payloads with Bearer token
+		reqCleanList, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/targets/gmail/v1/users/me/messages?clean=true", nil)
+		reqCleanList.Header.Set("Authorization", "Bearer gmail_tok_aegis_live_alice_3lo")
+		respCleanList, err := srv.Client().Do(reqCleanList)
+		if err != nil {
+			t.Fatalf("GET gmail messages?clean=true: %v", err)
+		}
+		cleanListBytes, _ := io.ReadAll(respCleanList.Body)
+		_ = respCleanList.Body.Close()
+		if respCleanList.StatusCode != http.StatusOK || !strings.Contains(string(cleanListBytes), "msg-p0-clean-pii") {
+			t.Fatalf("GET gmail messages?clean=true = (%d, %s), want 200 with msg-p0-clean-pii", respCleanList.StatusCode, string(cleanListBytes))
+		}
+
+		// 3. Jira Alice 200 OK vs Bob 403 Forbidden on SEC-101
+		reqAliceJira, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/targets/jira/rest/api/3/issue/SEC-101", nil)
+		reqAliceJira.Header.Set("Authorization", "Bearer atatt3x_aegis_live_alice_jira_3lo")
+		respAliceJira, err := srv.Client().Do(reqAliceJira)
+		if err != nil {
+			t.Fatalf("GET jira SEC-101 (Alice): %v", err)
+		}
+		_ = respAliceJira.Body.Close()
+		if respAliceJira.StatusCode != http.StatusOK {
+			t.Fatalf("GET jira SEC-101 (Alice) status = %d, want 200", respAliceJira.StatusCode)
+		}
+
+		reqBobJira, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/targets/jira/rest/api/3/issue/SEC-101", nil)
+		reqBobJira.Header.Set("Authorization", "Bearer atatt3x_aegis_live_bob_jira_3lo")
+		respBobJira, err := srv.Client().Do(reqBobJira)
+		if err != nil {
+			t.Fatalf("GET jira SEC-101 (Bob): %v", err)
+		}
+		_ = respBobJira.Body.Close()
+		if respBobJira.StatusCode != http.StatusForbidden {
+			t.Fatalf("GET jira SEC-101 (Bob) status = %d, want 403", respBobJira.StatusCode)
+		}
+
+		reqBobComment, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/targets/jira/rest/api/3/issue/SEC-101/comment", strings.NewReader(`{"body":"test"}`))
+		reqBobComment.Header.Set("Authorization", "Bearer atatt3x_aegis_live_bob_jira_3lo")
+		respBobComment, err := srv.Client().Do(reqBobComment)
+		if err != nil {
+			t.Fatalf("POST jira SEC-101/comment (Bob): %v", err)
+		}
+		_ = respBobComment.Body.Close()
+		if respBobComment.StatusCode != http.StatusForbidden {
+			t.Fatalf("POST jira SEC-101/comment (Bob) status = %d, want 403", respBobComment.StatusCode)
+		}
+	})
+
+	t.Run("End-to-end ExecuteTurn and ResolveConfirmation against co-hosted Gmail and Jira endpoints", func(t *testing.T) {
+		// Adversarial SCENARIO-01 is blocked by Model Armor after live Gmail fetch
+		s1Adv, err := coHostedRT.ExecuteTurn(ctx, aegis.TurnRequest{
+			SessionID:    "cohosted-s1-adv",
+			Persona:      aegis.PersonaAlice,
+			ScenarioID:   aegis.Scenario01PromptInjectionAndPII,
+			Posture:      aegis.AllBluePosture(),
+			Prompt:       "Triage the latest customer escalation email.",
+			CleanPIIOnly: false,
+		})
+		if err != nil {
+			t.Fatalf("ExecuteTurn(SCENARIO-01 adv): %v", err)
+		}
+		if s1Adv.Outcome != aegis.OutcomeBlocked {
+			t.Fatalf("SCENARIO-01 adv Outcome = %q, want %q", s1Adv.Outcome, aegis.OutcomeBlocked)
+		}
+
+		// Clean-PII SCENARIO-01 succeeds with SDP masking after live Gmail fetch
+		s1Clean, err := coHostedRT.ExecuteTurn(ctx, aegis.TurnRequest{
+			SessionID:    "cohosted-s1-clean",
+			Persona:      aegis.PersonaAlice,
+			ScenarioID:   aegis.Scenario01PromptInjectionAndPII,
+			Posture:      aegis.AllBluePosture(),
+			Prompt:       "Triage the clean customer escalation email.",
+			CleanPIIOnly: true,
+		})
+		if err != nil {
+			t.Fatalf("ExecuteTurn(SCENARIO-01 clean): %v", err)
+		}
+		if s1Clean.Outcome != aegis.OutcomeDefendedSuccess {
+			t.Fatalf("SCENARIO-01 clean Outcome = %q, want %q", s1Clean.Outcome, aegis.OutcomeDefendedSuccess)
+		}
+
+		// SCENARIO-02 Bob denied with 403 on co-hosted Jira
+		s2Bob, err := coHostedRT.ExecuteTurn(ctx, aegis.TurnRequest{
+			SessionID:  "cohosted-s2-bob",
+			Persona:    aegis.PersonaBob,
+			ScenarioID: aegis.Scenario02ConfusedDeputy3LO,
+			Posture:    aegis.AllBluePosture(),
+			Prompt:     "Read SEC-101 as contractor Bob.",
+		})
+		if err != nil {
+			t.Fatalf("ExecuteTurn(SCENARIO-02 Bob): %v", err)
+		}
+		if s2Bob.Outcome != aegis.OutcomeBlocked {
+			t.Fatalf("SCENARIO-02 Bob Outcome = %q, want %q", s2Bob.Outcome, aegis.OutcomeBlocked)
+		}
+
+		// SCENARIO-05 full chain + Step-Up confirmation posts Jira comment with 201 Created
+		s5Res, err := coHostedRT.ExecuteTurn(ctx, aegis.TurnRequest{
+			SessionID:  "cohosted-s5-alice",
+			Persona:    aegis.PersonaAlice,
+			ScenarioID: aegis.Scenario05FullChainZeroTrust,
+			Posture:    aegis.AllBluePosture(),
+			Prompt:     "Run full-chain triage and remediation.",
+		})
+		if err != nil {
+			t.Fatalf("ExecuteTurn(SCENARIO-05): %v", err)
+		}
+		if s5Res.StepUpConfirmation == nil {
+			t.Fatalf("expected StepUpConfirmation in SCENARIO-05, got Outcome=%q", s5Res.Outcome)
+		}
+		approved, err := coHostedRT.ResolveConfirmation(ctx, aegis.ConfirmationResolution{
+			SessionID:      "cohosted-s5-alice",
+			ConfirmationID: s5Res.StepUpConfirmation.ConfirmationID,
+			Confirmed:      true,
+		})
+		if err != nil {
+			t.Fatalf("ResolveConfirmation(SCENARIO-05): %v", err)
+		}
+		foundJira201 := false
+		for _, wr := range approved.WireRecords {
+			if wr.Provider == aegis.ProviderAtlassianJira && wr.Method == http.MethodPost && wr.StatusCode == http.StatusCreated && wr.Provenance == aegis.ProvenanceLive {
+				foundJira201 = true
+			}
+		}
+		if !foundJira201 {
+			t.Errorf("approved WireRecords = %+v, want LIVE POST /rest/api/3/issue/SEC-101/comment with 201", approved.WireRecords)
+		}
+	})
+}
+
