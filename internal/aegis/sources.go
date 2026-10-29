@@ -2,6 +2,8 @@ package aegis
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"flag"
 	"fmt"
 	"net/http"
@@ -11,6 +13,8 @@ import (
 	"strings"
 	"time"
 )
+
+const defaultSPIFFECredentialBundlePath = "/var/run/secrets/workload-spiffe-credentials/x509.credential-bundle.private-key.pem"
 
 var defaultGitHubCLITokenResolver = resolveGitHubCLIToken
 
@@ -88,6 +92,10 @@ func ConfigFromEnvWithLookup(getenv func(string) string, ghTokenFn func() string
 		JiraOAuthClientID:          strings.TrimSpace(getenv("JIRA_OAUTH_CLIENT_ID")),
 		JiraOAuthClientSecret:      strings.TrimSpace(getenv("JIRA_OAUTH_CLIENT_SECRET")),
 		OAuthTokenEndpointOverride: strings.TrimSpace(getenv("OAUTH_TOKEN_ENDPOINT_OVERRIDE")),
+		SPIFFECredentialBundlePath: firstNonEmpty(strings.TrimSpace(getenv("SPIFFE_CREDENTIAL_BUNDLE_PATH")), defaultSPIFFECredentialBundlePath),
+		GCPAuthProviderID:          strings.TrimSpace(getenv("GCP_AUTH_PROVIDER_ID")),
+		AgentGatewayIngressURL:     strings.TrimSpace(getenv("AGENT_GATEWAY_INGRESS_URL")),
+		AgentGatewayEgressProxyURL: strings.TrimSpace(getenv("AGENT_GATEWAY_EGRESS_PROXY_URL")),
 	}
 
 	if cfg.GCPProjectID != "" {
@@ -265,12 +273,71 @@ func (r *Runtime) GetSourcesStatus(_ context.Context) ([]SourceStatus, error) {
 	}
 
 	for i := range statuses {
+		switch statuses[i].ID {
+		case SourceGCPObservability, SourceAgentRegistry:
+			if _, spiffeSanitized, spiffeVerified := r.InspectAgentIdentitySPIFFE(); spiffeVerified {
+				statuses[i].Detail += " · SVID " + spiffeSanitized
+			}
+		case SourceGitHub, SourceGoogleGmail, SourceAtlassianJira:
+			if providerID := strings.TrimSpace(cfg.GCPAuthProviderID); providerID != "" {
+				statuses[i].Detail += " · AuthProvider " + sanitizeStageSafeText(providerID, cfg)
+			}
+		}
 		statuses[i] = sanitizeStageSafeSourceStatus(statuses[i], cfg)
 	}
 	return statuses, nil
 }
 
-var stageSafeProjectsSegmentRe = regexp.MustCompile(`/projects/[^/\s:)]+`)
+var (
+	stageSafeOrgIDRe              = regexp.MustCompile(`org-[0-9]+`)
+	stageSafeNumericProjectSegRe  = regexp.MustCompile(`(^|/)projects/[0-9]+(/|$)`)
+	stageSafeProjectsSegmentRe    = regexp.MustCompile(`/projects/[^/\s:$)]+`)
+	spiffeLocationsSegmentRe      = regexp.MustCompile(`/locations/[^/]+/`)
+	spiffeClustersSegmentRe       = regexp.MustCompile(`/clusters/[^/]+/`)
+)
+
+// InspectAgentIdentitySPIFFE inspects the mounted GKE Agent Identity X.509 SVID
+// credential bundle at r.cfg.SPIFFECredentialBundlePath when present, parses all
+// PEM CERTIFICATE blocks, extracts the first spiffe:// URI SAN, and returns the
+// raw URI, a stage-safe sanitized URI, and verified=true.
+func (r *Runtime) InspectAgentIdentitySPIFFE() (rawURI string, sanitizedURI string, verified bool) {
+	if r == nil {
+		return "", "", false
+	}
+	cfg := r.Config()
+	bundlePath := firstNonEmpty(strings.TrimSpace(cfg.SPIFFECredentialBundlePath), defaultSPIFFECredentialBundlePath)
+	rawBytes, err := os.ReadFile(bundlePath)
+	if err != nil || len(rawBytes) == 0 {
+		return "", "", false
+	}
+	rest := rawBytes
+	for len(rest) > 0 {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			continue
+		}
+		for _, u := range cert.URIs {
+			if u != nil && strings.EqualFold(u.Scheme, "spiffe") {
+				rawURI = u.String()
+				sanitized := stageSafeOrgIDRe.ReplaceAllString(rawURI, "org-$${ORG_ID}")
+				sanitized = stageSafeNumericProjectSegRe.ReplaceAllString(sanitized, "${1}projects/$${PROJECT_NUMBER}${2}")
+				sanitized = spiffeLocationsSegmentRe.ReplaceAllString(sanitized, "/locations/$${CLUSTER_LOCATION}/")
+				sanitized = spiffeClustersSegmentRe.ReplaceAllString(sanitized, "/clusters/$${CLUSTER_NAME}/")
+				sanitized = sanitizeStageSafeText(sanitized, cfg)
+				return rawURI, sanitized, true
+			}
+		}
+	}
+	return "", "", false
+}
 
 func formatStageSafeGeminiEndpoint(cfg RuntimeConfig) string {
 	raw := firstNonEmpty(cfg.GeminiEndpoint, "https://aiplatform.googleapis.com/v1 (gemini-2.5-flash)")
@@ -337,7 +404,9 @@ func sanitizeStageSafeText(text string, cfg RuntimeConfig) string {
 	if text == "" {
 		return text
 	}
-	out := stageSafeProjectsSegmentRe.ReplaceAllString(text, "/projects/active-gcp-project")
+	out := stageSafeOrgIDRe.ReplaceAllString(text, "org-$${ORG_ID}")
+	out = stageSafeNumericProjectSegRe.ReplaceAllString(out, "${1}projects/$${PROJECT_NUMBER}${2}")
+	out = stageSafeProjectsSegmentRe.ReplaceAllString(out, "/projects/active-gcp-project")
 	if proj := strings.TrimSpace(cfg.GCPProjectID); proj != "" {
 		out = replaceCaseInsensitiveLiteral(out, proj, "active-gcp-project")
 	}

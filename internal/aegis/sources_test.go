@@ -2,12 +2,23 @@ package aegis
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestExecuteTurn_DefaultFixtureProvenance(t *testing.T) {
@@ -646,6 +657,118 @@ func TestTokenBroker_EnvPersonaSeedingAndLiveOAuthCallbackExchange(t *testing.T)
 	for _, st := range seedStatuses {
 		if (st.ID == SourceGoogleGmail || st.ID == SourceAtlassianJira) && st.Provenance != ProvenanceLive {
 			t.Errorf("seedRT source %s Provenance = %q, want LIVE", st.ID, st.Provenance)
+		}
+	}
+}
+
+func TestInspectAgentIdentitySPIFFE_AndStageSafeSourceStatusEnrichment(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Verify default SPIFFECredentialBundlePath when SPIFFE_CREDENTIAL_BUNDLE_PATH is unset
+	cfgDefault := ConfigFromEnvWithLookup(func(string) string { return "" }, nil)
+	const wantDefaultSPIFFEPath = "/var/run/secrets/workload-spiffe-credentials/x509.credential-bundle.private-key.pem"
+	if cfgDefault.SPIFFECredentialBundlePath != wantDefaultSPIFFEPath {
+		t.Fatalf("cfgDefault.SPIFFECredentialBundlePath = %q, want %q", cfgDefault.SPIFFECredentialBundlePath, wantDefaultSPIFFEPath)
+	}
+
+	// 2. Verify custom env vars for Phase 6 runtime config
+	envCustom := map[string]string{
+		"SPIFFE_CREDENTIAL_BUNDLE_PATH":   "/tmp/custom-spiffe-bundle.pem",
+		"GCP_AUTH_PROVIDER_ID":            "projects/987654321098/locations/global/authProviders/aegis-github-provider",
+		"AGENT_GATEWAY_INGRESS_URL":       "https://agent-ingress.example.internal",
+		"AGENT_GATEWAY_EGRESS_PROXY_URL":  "http://10.128.0.50:443",
+	}
+	cfgCustom := ConfigFromEnvWithLookup(func(k string) string { return envCustom[k] }, nil)
+	if cfgCustom.SPIFFECredentialBundlePath != "/tmp/custom-spiffe-bundle.pem" ||
+		cfgCustom.GCPAuthProviderID != "projects/987654321098/locations/global/authProviders/aegis-github-provider" ||
+		cfgCustom.AgentGatewayIngressURL != "https://agent-ingress.example.internal" ||
+		cfgCustom.AgentGatewayEgressProxyURL != "http://10.128.0.50:443" {
+		t.Fatalf("cfgCustom Phase 6 fields mismatch: %+v", cfgCustom)
+	}
+
+	// 3. When SPIFFE bundle path does not exist, InspectAgentIdentitySPIFFE returns verified=false
+	rtMissing := NewRuntime(RuntimeConfig{
+		SPIFFECredentialBundlePath: filepath.Join(t.TempDir(), "nonexistent.pem"),
+	})
+	if raw, san, ok := rtMissing.InspectAgentIdentitySPIFFE(); ok || raw != "" || san != "" {
+		t.Fatalf("InspectAgentIdentitySPIFFE on missing file = (%q, %q, %v), want ('', '', false)", raw, san, ok)
+	}
+
+	// 4. Generate a synthetic X.509 SVID certificate bundle with a real GKE Agent Identity SPIFFE URI SAN
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("ecdsa.GenerateKey: %v", err)
+	}
+	rawSPIFFE := "spiffe://agents.global.org-123456789012.system.id.goog/resources/container/projects/987654321098/locations/us-central1-a/clusters/my-secret-gke-cluster/ns/aegis-system/sa/aegis-sre"
+	spiffeURL, err := url.Parse(rawSPIFFE)
+	if err != nil {
+		t.Fatalf("url.Parse: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(42),
+		Subject:      pkix.Name{CommonName: "aegis-sre"},
+		NotBefore:    time.Now().Add(-1 * time.Hour),
+		NotAfter:     time.Now().Add(23 * time.Hour),
+		URIs:         []*url.URL{spiffeURL},
+	}
+	derBytes, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &privKey.PublicKey, privKey)
+	if err != nil {
+		t.Fatalf("x509.CreateCertificate: %v", err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(privKey)
+	if err != nil {
+		t.Fatalf("x509.MarshalECPrivateKey: %v", err)
+	}
+	bundlePath := filepath.Join(t.TempDir(), "x509.credential-bundle.private-key.pem")
+	var pemBuf strings.Builder
+	_ = pem.Encode(&pemBuf, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	_ = pem.Encode(&pemBuf, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+	if err := os.WriteFile(bundlePath, []byte(pemBuf.String()), 0o600); err != nil {
+		t.Fatalf("os.WriteFile: %v", err)
+	}
+
+	rtVerified := NewRuntime(RuntimeConfig{
+		GCPProjectID:               "my-secret-gcp-project",
+		GKEClusterName:             "my-secret-gke-cluster",
+		SPIFFECredentialBundlePath: bundlePath,
+		GCPAuthProviderID:          "projects/987654321098/locations/global/authProviders/aegis-github-provider",
+	})
+	gotRaw, gotSanitized, gotOK := rtVerified.InspectAgentIdentitySPIFFE()
+	if !gotOK {
+		t.Fatalf("InspectAgentIdentitySPIFFE verified = false, want true")
+	}
+	if gotRaw != rawSPIFFE {
+		t.Errorf("InspectAgentIdentitySPIFFE rawURI = %q, want %q", gotRaw, rawSPIFFE)
+	}
+	wantSanitized := "spiffe://agents.global.org-${ORG_ID}.system.id.goog/resources/container/projects/${PROJECT_NUMBER}/locations/${CLUSTER_LOCATION}/clusters/${CLUSTER_NAME}/ns/aegis-system/sa/aegis-sre"
+	if gotSanitized != wantSanitized {
+		t.Errorf("InspectAgentIdentitySPIFFE sanitizedURI = %q, want %q", gotSanitized, wantSanitized)
+	}
+
+	// 5. Verify GetSourcesStatus enriches SourceAgentRegistry (and SourceGCPObservability) with stage-safe SPIFFE summary
+	// and enriches 3LO sources with stage-safe GCPAuthProviderID without leaking raw org ID or project number
+	statuses, err := rtVerified.GetSourcesStatus(ctx)
+	if err != nil {
+		t.Fatalf("rtVerified.GetSourcesStatus: %v", err)
+	}
+	byID := map[ExternalSourceID]SourceStatus{}
+	for _, st := range statuses {
+		byID[st.ID] = st
+		combined := st.Name + " | " + st.Endpoint + " | " + st.Detail
+		if strings.Contains(combined, "123456789012") || strings.Contains(combined, "987654321098") || strings.Contains(combined, "my-secret-gke-cluster") || strings.Contains(combined, "my-secret-gcp-project") {
+			t.Errorf("SourceStatus %s leaked raw org/project/cluster identifier: %q", st.ID, combined)
+		}
+	}
+	if !strings.Contains(byID[SourceAgentRegistry].Detail, wantSanitized) {
+		t.Errorf("SourceAgentRegistry.Detail = %q, want it to contain sanitized SPIFFE URI %q", byID[SourceAgentRegistry].Detail, wantSanitized)
+	}
+	if !strings.Contains(byID[SourceGCPObservability].Detail, wantSanitized) {
+		t.Errorf("SourceGCPObservability.Detail = %q, want it to contain sanitized SPIFFE URI %q", byID[SourceGCPObservability].Detail, wantSanitized)
+	}
+	wantSanitizedProvider := "projects/${PROJECT_NUMBER}/locations/global/authProviders/aegis-github-provider"
+	for _, srcID := range []ExternalSourceID{SourceGitHub, SourceGoogleGmail, SourceAtlassianJira} {
+		if !strings.Contains(byID[srcID].Detail, wantSanitizedProvider) {
+			t.Errorf("Source %s Detail = %q, want it to contain stage-safe GCPAuthProviderID %q", srcID, byID[srcID].Detail, wantSanitizedProvider)
 		}
 	}
 }

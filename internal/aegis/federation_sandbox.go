@@ -90,6 +90,10 @@ func registerA2ARoutes(mux *http.ServeMux, rt *Runtime) {
 			scheme = "https"
 		}
 		baseURL := fmt.Sprintf("%s://%s", scheme, r.Host)
+		spiffeURI := canonicalAgentIdentitySPIFFE
+		if _, san, ok := rt.InspectAgentIdentitySPIFFE(); ok && san != "" {
+			spiffeURI = san
+		}
 
 		agentCard := map[string]any{
 			"name":               "AegisSRE Zero-Trust Triage Orchestrator",
@@ -106,6 +110,11 @@ func registerA2ARoutes(mux *http.ServeMux, rt *Runtime) {
 					{
 						"uri":         "https://a2ui.org/specification/v0.9",
 						"description": "A2UI v0.9 declarative 6-component security catalog",
+					},
+					{
+						"uri":         "https://cloud.google.com/kubernetes-engine/docs/how-to/agent-gateway",
+						"description": "Dual-Path Agent Gateway (CLIENT_TO_AGENT GCPAgentGateway + AGENT_TO_ANYWHERE UAP Policy V2)",
+						"spiffeId":    spiffeURI,
 					},
 				},
 			},

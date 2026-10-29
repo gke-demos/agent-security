@@ -378,6 +378,10 @@ type RuntimeConfig struct {
 	JiraOAuthClientID          string
 	JiraOAuthClientSecret      string
 	OAuthTokenEndpointOverride string
+	SPIFFECredentialBundlePath string
+	GCPAuthProviderID          string
+	AgentGatewayIngressURL     string
+	AgentGatewayEgressProxyURL string
 	HTTPClient                 *http.Client
 }
 

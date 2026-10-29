@@ -849,3 +849,62 @@ func TestPKCEVault_Slice5_CallbackStateRequiredAuthMethodsAndChallengeSupersedin
 		t.Fatalf("expected a2a_server_side_oauth2 grant in pkce-s5-a2a, got %+v", a2aSnap.EphemeralGrants)
 	}
 }
+
+func TestPKCEVault_PureJSSHA256FallbackAndRFC7636Vector(t *testing.T) {
+	rt := aegis.NewRuntime(aegis.RuntimeConfig{})
+	srv := httptest.NewServer(aegis.NewHTTPHandler(rt))
+	defer srv.Close()
+
+	jsResp, err := http.Get(srv.URL + "/static/app.js")
+	if err != nil {
+		t.Fatalf("GET /static/app.js: %v", err)
+	}
+	jsBytes, _ := io.ReadAll(jsResp.Body)
+	jsResp.Body.Close()
+	js := string(jsBytes)
+
+	for _, wantSnippet := range []string{
+		"function sha256Bytes(",
+		"0x6a09e667",
+		"0x428a2f98",
+		"window.crypto.subtle",
+		"typeof window.crypto.subtle.digest === \"function\"",
+	} {
+		if !strings.Contains(js, wantSnippet) {
+			t.Errorf("app.js missing pure-JS SHA-256 fallback snippet %q", wantSnippet)
+		}
+	}
+
+	// RFC 7636 Appendix B test vector:
+	// code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+	// code_challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+	const (
+		rfc7636Verifier  = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+		rfc7636Challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+	)
+	sum := sha256.Sum256([]byte(rfc7636Verifier))
+	if got := base64.RawURLEncoding.EncodeToString(sum[:]); got != rfc7636Challenge {
+		t.Fatalf("RFC 7636 Appendix B Go baseline mismatch: got %q, want %q", got, rfc7636Challenge)
+	}
+
+	// Verify the server-side PKCE flow accepts the RFC 7636 Appendix B vector end-to-end
+	authResp, err := http.Get(srv.URL + "/oauth/github/authorize?session_id=pkce-rfc7636&persona=alice&code_challenge=" + url.QueryEscape(rfc7636Challenge) + "&code_challenge_method=S256")
+	if err != nil {
+		t.Fatalf("GET /oauth/github/authorize: %v", err)
+	}
+	var ch aegis.ConsentChallenge
+	if err := json.NewDecoder(authResp.Body).Decode(&ch); err != nil {
+		authResp.Body.Close()
+		t.Fatalf("decode ConsentChallenge: %v", err)
+	}
+	authResp.Body.Close()
+
+	cbResp, err := http.Get(srv.URL + "/oauth/github/callback?session_id=pkce-rfc7636&persona=alice&code=rfc7636_code&state=" + url.QueryEscape(ch.Nonce) + "&code_verifier=" + url.QueryEscape(rfc7636Verifier))
+	if err != nil {
+		t.Fatalf("GET /oauth/github/callback: %v", err)
+	}
+	cbResp.Body.Close()
+	if cbResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /oauth/github/callback with RFC 7636 Appendix B vector status = %d, want 200 OK", cbResp.StatusCode)
+	}
+}

@@ -161,12 +161,40 @@ func (tc *adkActiveTurnContext) addStep(ev BoundaryTraceEvent) {
 	})
 }
 
+const (
+	dualPathGatewayIngressHeader = "aegis-system/aegis-ingress-gateway (GCPAgentGateway/aegis-client-to-agent-gateway, GCPAuthzPolicy/aegis-a2a-ingress-policy)"
+	dualPathGatewayEgressHeader  = "gemini-enterprise-agent-gateway (UAP Policy V2: aegis-egress-uap)"
+	canonicalAgentIdentitySPIFFE = "spiffe://agents.global.org-${ORG_ID}.system.id.goog/resources/container/projects/${PROJECT_NUMBER}/locations/${CLUSTER_LOCATION}/clusters/${CLUSTER_NAME}/ns/aegis-system/sa/aegis-sre"
+)
+
 func (tc *adkActiveTurnContext) addWire(records ...OutboundWireRecord) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 	for _, rec := range records {
 		if rec.Provenance == "" {
 			rec.Provenance = ProvenanceFixture
+		}
+		if tc.req.Posture.StepUpAndA2UICatalogEnabled || tc.req.Posture.PromptScreenEnabled {
+			copiedHeaders := make(map[string]string, len(rec.Headers)+3)
+			for k, v := range rec.Headers {
+				copiedHeaders[k] = v
+			}
+			if copiedHeaders["X-Agent-Gateway-Ingress"] == "" {
+				copiedHeaders["X-Agent-Gateway-Ingress"] = dualPathGatewayIngressHeader
+			}
+			if copiedHeaders["X-Agent-Gateway-Egress"] == "" {
+				copiedHeaders["X-Agent-Gateway-Egress"] = dualPathGatewayEgressHeader
+			}
+			if copiedHeaders["X-Agent-Identity-Spiffe"] == "" {
+				spiffeURI := canonicalAgentIdentitySPIFFE
+				if tc.rt != nil {
+					if _, san, ok := tc.rt.InspectAgentIdentitySPIFFE(); ok && san != "" {
+						spiffeURI = san
+					}
+				}
+				copiedHeaders["X-Agent-Identity-Spiffe"] = spiffeURI
+			}
+			rec.Headers = copiedHeaders
 		}
 		tc.wireRecords = append(tc.wireRecords, rec)
 		recCopy := rec
