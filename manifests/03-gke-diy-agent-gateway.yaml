@@ -207,6 +207,16 @@ spec:
                 value: /mcp
               - type: Exact
                 value: /healthz
+# REQUEST_AUTHZ custom provider binding invoking the in-cluster :8443 ExtProcGRPC
+# GCPAuthzExtension/aegis-model-armor-ext-proc callout on POST /a2a and /api/sessions/*:
+#   enforcementLevel: L7
+#   policyProfile: REQUEST_AUTHZ
+#   action: CUSTOM
+#   customProviders:
+#     extensionRefs:
+#       - group: networking.gke.io
+#         kind: GCPAuthzExtension
+#         name: aegis-model-armor-ext-proc
 # Optional GKE 1.37+ Agent Policy profile when the hosted GKE Gateway controller
 # has `enable_gcp_agent_gateway_policy` enabled:
 #   policyProfile: CONTENT_AUTHZ

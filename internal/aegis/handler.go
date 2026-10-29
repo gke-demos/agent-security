@@ -59,12 +59,7 @@ func NewHandler(rt *Runtime) http.Handler {
 			return
 		}
 		req.SessionID = sessionID
-		if strings.TrimSpace(req.IngressAuthzExtension) == "" {
-			req.IngressAuthzExtension = strings.TrimSpace(r.Header.Get("X-Aegis-Authz-Extension"))
-		}
-		if strings.TrimSpace(req.IngressExtProcVerdict) == "" {
-			req.IngressExtProcVerdict = strings.TrimSpace(r.Header.Get("X-Aegis-Ext-Proc-Verdict"))
-		}
+		applyIngressExtProcHeaders(&req, r.Header)
 		res, err := rt.ExecuteTurn(r.Context(), req)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -81,12 +76,7 @@ func NewHandler(rt *Runtime) http.Handler {
 			return
 		}
 		req.SessionID = sessionID
-		if strings.TrimSpace(req.IngressAuthzExtension) == "" {
-			req.IngressAuthzExtension = strings.TrimSpace(r.Header.Get("X-Aegis-Authz-Extension"))
-		}
-		if strings.TrimSpace(req.IngressExtProcVerdict) == "" {
-			req.IngressExtProcVerdict = strings.TrimSpace(r.Header.Get("X-Aegis-Ext-Proc-Verdict"))
-		}
+		applyIngressExtProcHeaders(&req, r.Header)
 		sink := initSSESink(w)
 		if _, err := rt.ExecuteTurnStream(r.Context(), req, sink); err != nil {
 			writeSSEError(w, err)
@@ -164,6 +154,18 @@ func writeSSEError(w http.ResponseWriter, err error) {
 	_, _ = fmt.Fprintf(w, "event: turn.error\ndata: %s\n\n", payload)
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
+	}
+}
+
+func applyIngressExtProcHeaders(req *TurnRequest, h http.Header) {
+	if req == nil || h == nil {
+		return
+	}
+	if strings.TrimSpace(req.IngressAuthzExtension) == "" {
+		req.IngressAuthzExtension = strings.TrimSpace(h.Get("X-Aegis-Authz-Extension"))
+	}
+	if strings.TrimSpace(req.IngressExtProcVerdict) == "" {
+		req.IngressExtProcVerdict = strings.TrimSpace(h.Get("X-Aegis-Ext-Proc-Verdict"))
 	}
 }
 

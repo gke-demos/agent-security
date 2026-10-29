@@ -157,7 +157,7 @@ func (tc *adkActiveTurnContext) addStep(ev BoundaryTraceEvent) {
 			ev.Detail = fmt.Sprintf("%s · %s", ev.Detail, clientToAgentGatewayPostureDetail(tc.rt))
 		}
 	}
-	if ev.Boundary == BoundaryReasoningGuard {
+	if ev.Boundary == BoundaryReasoningGuard || ev.Boundary == BoundaryGenerativeUI {
 		hasIngressHeader := strings.TrimSpace(tc.req.IngressAuthzExtension) != "" || strings.TrimSpace(tc.req.IngressExtProcVerdict) != ""
 		hasGatewayIngress := tc.req.Posture.PromptScreenEnabled && tc.rt != nil && strings.TrimSpace(tc.rt.cfg.AgentGatewayIngressURL) != ""
 		if hasIngressHeader || hasGatewayIngress {

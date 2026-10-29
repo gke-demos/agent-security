@@ -55,11 +55,6 @@ func (r *Runtime) Guard() *ContentGuard {
 	return r.guard
 }
 
-// ContentGuard returns the runtime's ContentGuard.
-func (r *Runtime) ContentGuard() *ContentGuard {
-	return r.guard
-}
-
 // Config returns the runtime's RuntimeConfig.
 func (r *Runtime) Config() RuntimeConfig {
 	return r.cfg

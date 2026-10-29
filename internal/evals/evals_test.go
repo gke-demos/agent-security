@@ -2482,13 +2482,13 @@ func TestPhase7_InClusterExtProcCalloutLiveCheckoutTelemetryAndRunbookEval(t *te
 			t.Fatalf("decodedRed = %+v, want BYPASSED_RED", decodedRed)
 		}
 
-		// 1d. Verify HTTP header propagation into BoundaryReasoningGuard trace metadata + GET /api/gateway/ext-proc/events
+		// 1d. Verify HTTP header propagation into BoundaryReasoningGuard (B2) and BoundaryGenerativeUI (B1) trace metadata + GET /api/gateway/ext-proc/events
 		appSrv := newLoopbackHTTPServer(t, aegis.NewHTTPHandler(rt))
 		defer appSrv.Close()
 
 		turnPayload, _ := json.Marshal(aegis.TurnRequest{
 			Persona:      aegis.PersonaAlice,
-			ScenarioID:   aegis.Scenario01PromptInjectionAndPII,
+			ScenarioID:   aegis.Scenario05FullChainZeroTrust,
 			Posture:      aegis.AllBluePosture(),
 			Prompt:       "Triage checkout-service 502 status in us-central1.",
 			CleanPIIOnly: true,
@@ -2512,17 +2512,22 @@ func TestPhase7_InClusterExtProcCalloutLiveCheckoutTelemetryAndRunbookEval(t *te
 		}
 		_ = httpResp.Body.Close()
 
-		var sawAuthzMeta bool
+		var sawB2AuthzMeta, sawB1AuthzMeta bool
 		for _, ev := range turnRes.BoundaryTrace {
 			if ev.Boundary == aegis.BoundaryReasoningGuard &&
 				ev.Metadata["authzExtension"] == "verified" &&
 				ev.Metadata["extProcVerdict"] == "ALLOW" {
-				sawAuthzMeta = true
-				break
+				sawB2AuthzMeta = true
+			}
+			if ev.Boundary == aegis.BoundaryGenerativeUI &&
+				ev.Metadata["authzExtension"] == "verified" &&
+				ev.Metadata["extProcVerdict"] == "ALLOW" {
+				sawB1AuthzMeta = true
 			}
 		}
-		if !sawAuthzMeta {
-			t.Errorf("TurnResult.BoundaryTrace missing BoundaryReasoningGuard Metadata[authzExtension=verified, extProcVerdict=ALLOW]: %+v", turnRes.BoundaryTrace)
+		if !sawB2AuthzMeta || !sawB1AuthzMeta {
+			t.Errorf("TurnResult.BoundaryTrace missing B2/B1 Metadata[authzExtension=verified, extProcVerdict=ALLOW] (sawB2=%v, sawB1=%v): %+v",
+				sawB2AuthzMeta, sawB1AuthzMeta, turnRes.BoundaryTrace)
 		}
 
 		eventsResp, err := appSrv.Client().Get(appSrv.URL + "/api/gateway/ext-proc/events")
@@ -2685,6 +2690,7 @@ func TestPhase7_InClusterExtProcCalloutLiveCheckoutTelemetryAndRunbookEval(t *te
 				"kind: GCPAuthzExtension",
 				"kind: GCPTrafficExtension",
 				"name: aegis-model-armor-body-ext",
+				"action: CUSTOM",
 			},
 			"manifests/04-checkout-target-workload.yaml": {
 				"kind: Deployment",

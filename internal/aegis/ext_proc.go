@@ -248,12 +248,13 @@ func generateEphemeralExtProcTLSCert() (tls.Certificate, error) {
 func (s *extProcServer) handleProcessStream(_ any, stream grpc.ServerStream) error {
 	var guard *ContentGuard
 	if s.rt != nil {
-		guard = s.rt.ContentGuard()
+		guard = s.rt.Guard()
 	}
 	if guard == nil {
 		guard = NewContentGuard(RuntimeConfig{})
 	}
 
+	ctx := stream.Context()
 	streamHeaders := make(map[string]string)
 	matchedThreat := false
 
@@ -274,10 +275,10 @@ func (s *extProcServer) handleProcessStream(_ any, stream grpc.ServerStream) err
 			for k, v := range parsedReq.headers {
 				streamHeaders[strings.ToLower(strings.TrimSpace(k))] = v
 			}
-			respBytes = evaluateExtProcPhase(guard, streamHeaders, parsedReq.headersConcat(), true, &matchedThreat)
+			respBytes = evaluateExtProcPhase(ctx, guard, streamHeaders, parsedReq.headersConcat(), true, &matchedThreat)
 
 		case parsedReq.hasRequestBody:
-			respBytes = evaluateExtProcPhase(guard, streamHeaders, string(parsedReq.body), false, &matchedThreat)
+			respBytes = evaluateExtProcPhase(ctx, guard, streamHeaders, string(parsedReq.body), false, &matchedThreat)
 
 		case parsedReq.hasResponseHeaders:
 			respBytes = encodeExtProcContinueResponse(3, map[string]string{
@@ -310,6 +311,7 @@ func (s *extProcServer) handleProcessStream(_ any, stream grpc.ServerStream) err
 }
 
 func evaluateExtProcPhase(
+	ctx context.Context,
 	guard *ContentGuard,
 	streamHeaders map[string]string,
 	candidateText string,
@@ -333,7 +335,10 @@ func evaluateExtProcPhase(
 		})
 	}
 
-	screenRes := guard.ScreenPrompt(candidateText, true, true)
+	screenRes := guard.InspectAndSanitize(ctx, candidateText, SecurityPosture{
+		PromptScreenEnabled: true,
+		PIIRedactorEnabled:  true,
+	})
 	if screenRes.Blocked {
 		*matchedThreat = true
 		reason := "Prompt injection or adversarial payload blocked at Agent Gateway ext_proc boundary"
@@ -468,55 +473,52 @@ func decodeExtProcProcessingRequest(b []byte) decodedProcessingRequest {
 	return res
 }
 
-func parseExtProcHttpHeaders(b []byte, out map[string]string) {
+func forEachProtoBytesField(b []byte, wantNum protowire.Number, fn func([]byte) error) error {
 	for len(b) > 0 {
 		num, typ, n := protowire.ConsumeTag(b)
 		if n < 0 {
-			break
+			return protowire.ParseError(n)
 		}
 		b = b[n:]
-		if num == 1 && typ == protowire.BytesType { // HeaderMap
+		if num == wantNum && typ == protowire.BytesType {
 			val, m := protowire.ConsumeBytes(b)
 			if m < 0 {
-				return
+				return protowire.ParseError(m)
 			}
 			b = b[m:]
-			parseExtProcHeaderMap(val, out)
+			if err := fn(val); err != nil {
+				return err
+			}
 			continue
 		}
 		m := protowire.ConsumeFieldValue(num, typ, b)
 		if m < 0 {
-			break
+			return protowire.ParseError(m)
 		}
 		b = b[m:]
 	}
+	return nil
+}
+
+func forEachProtoBytesField1(b []byte, fn func([]byte) error) error {
+	return forEachProtoBytesField(b, 1, fn)
+}
+
+func parseExtProcHttpHeaders(b []byte, out map[string]string) {
+	_ = forEachProtoBytesField1(b, func(val []byte) error {
+		parseExtProcHeaderMap(val, out)
+		return nil
+	})
 }
 
 func parseExtProcHeaderMap(b []byte, out map[string]string) {
-	for len(b) > 0 {
-		num, typ, n := protowire.ConsumeTag(b)
-		if n < 0 {
-			break
+	_ = forEachProtoBytesField1(b, func(val []byte) error {
+		k, v := parseExtProcHeaderValue(val)
+		if k != "" {
+			out[strings.ToLower(k)] = v
 		}
-		b = b[n:]
-		if num == 1 && typ == protowire.BytesType { // repeated HeaderValue
-			val, m := protowire.ConsumeBytes(b)
-			if m < 0 {
-				return
-			}
-			b = b[m:]
-			k, v := parseExtProcHeaderValue(val)
-			if k != "" {
-				out[strings.ToLower(k)] = v
-			}
-			continue
-		}
-		m := protowire.ConsumeFieldValue(num, typ, b)
-		if m < 0 {
-			break
-		}
-		b = b[m:]
-	}
+		return nil
+	})
 }
 
 // parseExtProcHeaderValue decodes envoy.config.core.v3.HeaderValue, preferring
@@ -778,102 +780,34 @@ func DecodeExtProcResponse(b []byte) (ExtProcDecodedResponse, error) {
 }
 
 func decodeExtProcPhaseResponse(b []byte, headers map[string]string) {
-	for len(b) > 0 {
-		num, typ, n := protowire.ConsumeTag(b)
-		if n < 0 {
-			break
-		}
-		b = b[n:]
-		if num == 1 && typ == protowire.BytesType { // CommonResponse
-			val, m := protowire.ConsumeBytes(b)
-			if m < 0 {
-				return
-			}
-			b = b[m:]
-			decodeExtProcCommonResponse(val, headers)
-			continue
-		}
-		m := protowire.ConsumeFieldValue(num, typ, b)
-		if m < 0 {
-			break
-		}
-		b = b[m:]
-	}
+	_ = forEachProtoBytesField1(b, func(val []byte) error {
+		decodeExtProcCommonResponse(val, headers)
+		return nil
+	})
 }
 
 func decodeExtProcCommonResponse(b []byte, headers map[string]string) {
-	for len(b) > 0 {
-		num, typ, n := protowire.ConsumeTag(b)
-		if n < 0 {
-			break
-		}
-		b = b[n:]
-		if num == 2 && typ == protowire.BytesType { // HeaderMutation
-			val, m := protowire.ConsumeBytes(b)
-			if m < 0 {
-				return
-			}
-			b = b[m:]
-			decodeExtProcHeaderMutation(val, headers)
-			continue
-		}
-		m := protowire.ConsumeFieldValue(num, typ, b)
-		if m < 0 {
-			break
-		}
-		b = b[m:]
-	}
+	_ = forEachProtoBytesField(b, 2, func(val []byte) error {
+		decodeExtProcHeaderMutation(val, headers)
+		return nil
+	})
 }
 
 func decodeExtProcHeaderMutation(b []byte, headers map[string]string) {
-	for len(b) > 0 {
-		num, typ, n := protowire.ConsumeTag(b)
-		if n < 0 {
-			break
-		}
-		b = b[n:]
-		if num == 1 && typ == protowire.BytesType { // HeaderValueOption
-			val, m := protowire.ConsumeBytes(b)
-			if m < 0 {
-				return
-			}
-			b = b[m:]
-			decodeExtProcHeaderValueOption(val, headers)
-			continue
-		}
-		m := protowire.ConsumeFieldValue(num, typ, b)
-		if m < 0 {
-			break
-		}
-		b = b[m:]
-	}
+	_ = forEachProtoBytesField1(b, func(val []byte) error {
+		decodeExtProcHeaderValueOption(val, headers)
+		return nil
+	})
 }
 
 func decodeExtProcHeaderValueOption(b []byte, headers map[string]string) {
-	for len(b) > 0 {
-		num, typ, n := protowire.ConsumeTag(b)
-		if n < 0 {
-			break
+	_ = forEachProtoBytesField1(b, func(val []byte) error {
+		k, v := parseExtProcHeaderValue(val)
+		if k != "" {
+			headers[strings.ToLower(k)] = v
 		}
-		b = b[n:]
-		if num == 1 && typ == protowire.BytesType { // HeaderValue
-			val, m := protowire.ConsumeBytes(b)
-			if m < 0 {
-				return
-			}
-			b = b[m:]
-			k, v := parseExtProcHeaderValue(val)
-			if k != "" {
-				headers[strings.ToLower(k)] = v
-			}
-			continue
-		}
-		m := protowire.ConsumeFieldValue(num, typ, b)
-		if m < 0 {
-			break
-		}
-		b = b[m:]
-	}
+		return nil
+	})
 }
 
 func decodeExtProcImmediateResponse(b []byte, out *ExtProcDecodedResponse) {
