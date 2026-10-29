@@ -122,7 +122,8 @@ spec:
   extensionChains:
     - name: model-armor-body-chain
       matchCondition:
-        celExpression: "request.method == 'POST' && (request.path == '/a2a' || request.path.startsWith('/api/sessions/'))"
+        celExpressions:
+          - celMatcher: "request.method == 'POST' && (request.path == '/a2a' || request.path.startsWith('/api/sessions/'))"
       extensions:
         - name: model-armor-ext-proc
           authority: aegis-model-armor-ext-proc.aegis-system.svc.cluster.local
@@ -131,6 +132,7 @@ spec:
           supportedEvents:
             - RequestHeaders
             - RequestBody
+            - RequestTrailers
           requestBodySendMode: FullDuplexStreamed
           backendRef:
             group: ""

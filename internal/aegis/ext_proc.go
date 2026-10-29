@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/http2"
@@ -23,6 +24,56 @@ import (
 	"google.golang.org/grpc/encoding"
 	"google.golang.org/protobuf/encoding/protowire"
 )
+
+func init() {
+	RegisterHTTPRoutes(registerExtProcHTTPRoutes)
+}
+
+// ExtProcCalloutEvent records an Envoy ExternalProcessor/Process callout verdict for live observability.
+type ExtProcCalloutEvent struct {
+	Timestamp string `json:"timestamp"`
+	Phase     string `json:"phase"`
+	Path      string `json:"path,omitempty"`
+	Verdict   string `json:"verdict"`
+	Status    int    `json:"status"`
+}
+
+var (
+	extProcEventsMu sync.RWMutex
+	extProcEvents   []ExtProcCalloutEvent
+)
+
+func recordExtProcCalloutEvent(phase, path, verdict string, status int) {
+	extProcEventsMu.Lock()
+	defer extProcEventsMu.Unlock()
+	extProcEvents = append(extProcEvents, ExtProcCalloutEvent{
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Phase:     phase,
+		Path:      path,
+		Verdict:   verdict,
+		Status:    status,
+	})
+	if len(extProcEvents) > 32 {
+		extProcEvents = append([]ExtProcCalloutEvent(nil), extProcEvents[len(extProcEvents)-32:]...)
+	}
+}
+
+func registerExtProcHTTPRoutes(mux *http.ServeMux, _ *Runtime) {
+	mux.HandleFunc("GET /api/gateway/ext-proc/events", func(w http.ResponseWriter, _ *http.Request) {
+		extProcEventsMu.RLock()
+		events := append([]ExtProcCalloutEvent(nil), extProcEvents...)
+		extProcEventsMu.RUnlock()
+		if events == nil {
+			events = []ExtProcCalloutEvent{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":     "ok",
+			"component":  "aegis-model-armor-ext-proc",
+			"wireFormat": "ExtProcGRPC",
+			"events":     events,
+		})
+	})
+}
 
 // rawBytesCodec implements grpc/encoding.Codec for raw []byte protobuf wire frames,
 // allowing Envoy ext_proc v3 bidirectional streams to be served without external .proto codegen.
@@ -238,6 +289,13 @@ func (s *extProcServer) handleProcessStream(_ any, stream grpc.ServerStream) err
 				"x-aegis-authz-extension": "verified",
 			})
 
+		case parsedReq.hasRequestTrailers:
+			// ProcessingResponse.request_trailers (field 5, TrailersResponse)
+			var procResp []byte
+			procResp = protowire.AppendTag(procResp, 5, protowire.BytesType)
+			procResp = protowire.AppendBytes(procResp, nil)
+			respBytes = procResp
+
 		default:
 			respBytes = encodeExtProcContinueResponse(1, map[string]string{
 				"x-aegis-authz-extension":  "verified",
@@ -259,12 +317,16 @@ func evaluateExtProcPhase(
 	matchedThreat *bool,
 ) []byte {
 	responseFieldNum := protowire.Number(2) // request_body -> BodyResponse (field 2)
+	phaseName := "request_body"
 	if isHeadersPhase {
 		responseFieldNum = 1 // request_headers -> HeadersResponse (field 1)
+		phaseName = "request_headers"
 	}
+	path := strings.TrimSpace(streamHeaders[":path"])
 
 	promptScreenHeader := strings.TrimSpace(streamHeaders["x-aegis-prompt-screen"])
 	if strings.EqualFold(promptScreenHeader, "false") {
+		recordExtProcCalloutEvent(phaseName, path, "BYPASSED_RED", http.StatusOK)
 		return encodeExtProcContinueResponse(responseFieldNum, map[string]string{
 			"x-aegis-authz-extension":  "verified",
 			"x-aegis-ext-proc-verdict": "BYPASSED_RED",
@@ -279,8 +341,10 @@ func evaluateExtProcPhase(
 			reason = screenRes.ThreatReason
 		}
 		if isExtProcEdgeEnforced(streamHeaders) {
+			recordExtProcCalloutEvent(phaseName, path, "BLOCKED_BY_GCP_AUTHZ_EXTENSION", http.StatusForbidden)
 			return encodeExtProcImmediate403(reason)
 		}
+		recordExtProcCalloutEvent(phaseName, path, "MATCH_FOUND", http.StatusOK)
 		return encodeExtProcContinueResponse(responseFieldNum, map[string]string{
 			"x-aegis-authz-extension":  "verified",
 			"x-aegis-ext-proc-verdict": "MATCH_FOUND",
@@ -291,6 +355,7 @@ func evaluateExtProcPhase(
 	if *matchedThreat {
 		verdict = "MATCH_FOUND"
 	}
+	recordExtProcCalloutEvent(phaseName, path, verdict, http.StatusOK)
 	return encodeExtProcContinueResponse(responseFieldNum, map[string]string{
 		"x-aegis-authz-extension":  "verified",
 		"x-aegis-ext-proc-verdict": verdict,
@@ -313,6 +378,7 @@ type decodedProcessingRequest struct {
 	hasRequestBody     bool
 	hasResponseHeaders bool
 	hasResponseBody    bool
+	hasRequestTrailers bool
 	headers            map[string]string
 	body               []byte
 }
@@ -380,6 +446,16 @@ func decodeExtProcProcessingRequest(b []byte) decodedProcessingRequest {
 				b = b[m:]
 				res.hasResponseBody = true
 				res.body = parseExtProcHttpBody(val)
+				continue
+			}
+		case 6: // request_trailers (HttpTrailers)
+			if typ == protowire.BytesType {
+				_, m := protowire.ConsumeBytes(b)
+				if m < 0 {
+					return res
+				}
+				b = b[m:]
+				res.hasRequestTrailers = true
 				continue
 			}
 		}
