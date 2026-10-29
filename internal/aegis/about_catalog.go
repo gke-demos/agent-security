@@ -585,7 +585,7 @@ func canonicalBoundaryCatalogNodes() []BoundaryCatalogNode {
 			GovernedTools: []string{
 				"create_github_pull_request",
 			},
-			ADRNumbers: []string{"0001", "0002", "0006", "0008", "0009", "0011", "0015"},
+			ADRNumbers: []string{"0001", "0002", "0006", "0008", "0009", "0011", "0015", "0016"},
 		},
 		{
 			ID:                   BoundaryReasoningGuard,
@@ -611,7 +611,7 @@ func canonicalBoundaryCatalogNodes() []BoundaryCatalogNode {
 				"delegate_sandbox_test",
 				"create_github_pull_request",
 			},
-			ADRNumbers: []string{"0002", "0005", "0007", "0008", "0009", "0014", "0015"},
+			ADRNumbers: []string{"0002", "0005", "0007", "0008", "0009", "0014", "0015", "0016"},
 		},
 		{
 			ID:                   BoundaryIdentity3LO,
@@ -638,7 +638,7 @@ func canonicalBoundaryCatalogNodes() []BoundaryCatalogNode {
 				"fetch_github_advisory",
 				"create_github_pull_request",
 			},
-			ADRNumbers: []string{"0002", "0003", "0007", "0008", "0010", "0012", "0014"},
+			ADRNumbers: []string{"0002", "0003", "0007", "0008", "0010", "0012", "0014", "0016"},
 		},
 		{
 			ID:                   BoundaryPlatformGovernance,
@@ -664,7 +664,7 @@ func canonicalBoundaryCatalogNodes() []BoundaryCatalogNode {
 				"get_gke_cluster",
 				"delete_gke_cluster",
 			},
-			ADRNumbers: []string{"0004", "0006", "0007", "0008", "0010", "0014", "0015"},
+			ADRNumbers: []string{"0004", "0006", "0007", "0008", "0010", "0014", "0015", "0016"},
 		},
 		{
 			ID:                   BoundaryCrossAgentA2A,
@@ -1558,6 +1558,19 @@ func canonicalADRCatalogEntries() []ADRCatalogEntry {
 				BoundaryReasoningGuard,
 				BoundaryPlatformGovernance,
 				BoundaryGenerativeUI,
+			},
+		},
+		{
+			Number:   "0016",
+			Slug:     "full-duplex-streamed-ext-proc-body-echo-and-8-of-8-live-sources",
+			FileName: "0016-full-duplex-streamed-ext-proc-body-echo-and-8-of-8-live-sources.md",
+			Title:    "FullDuplexStreamed ExtProcGRPC Body Echo, Live Gateway/aegis-ingress-gateway Verification, and 8/8 LIVE External Source Provenance",
+			Summary:  "Aligns ProcessingRequest/ProcessingResponse tags (request_body=4, BodyResponse=3), echoes StreamedBodyResponse (BodyMutation.streamed_response=3) on FullDuplexStreamed chunks, and serves co-hosted target Gmail/Jira HTTP endpoints for 8/8 LIVE External Sources.",
+			PrimaryBoundaries: []BoundaryID{
+				BoundaryGenerativeUI,
+				BoundaryReasoningGuard,
+				BoundaryIdentity3LO,
+				BoundaryPlatformGovernance,
 			},
 		},
 	}
