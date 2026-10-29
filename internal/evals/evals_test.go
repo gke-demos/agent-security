@@ -547,16 +547,37 @@ func TestRepositoryManifestsScriptsAndHygiene(t *testing.T) {
 			"kind: Deployment",
 			"kind: Service",
 			"aegis-sre",
+			`registry.gke.io/functional-type: "AGENT"`,
+			`a2a-protocol.org/agent-card`,
+			`iam.gke.io/spiffe-identity-type: "agent-identity"`,
+			"GOOGLE_API_ENABLE_RUNTIME_BOUND_TOKEN",
 			"SUBSTRATE_TARGET_ACTOR",
 			"aegis-system/remediator-1",
 			"http://atenet-router.ate-system.svc.cluster.local/sandbox/execute",
 		},
+		"manifests/03-gke-diy-agent-gateway.yaml": {
+			"kind: Gateway",
+			"aegis-ingress-gateway",
+			"kind: HTTPRoute",
+			"aegis-a2a-route",
+			"kind: GCPAgentGateway",
+			"aegis-client-to-agent-gateway",
+			"kind: GCPAuthzExtension",
+			"aegis-modelarmor-content-ext",
+			"aegis-iap-request-ext",
+			"kind: GCPAuthzPolicy",
+			"aegis-a2a-ingress-policy",
+		},
 		"manifests/agw-egress-config.yaml": {
+			"googleManaged:",
 			"AGENT_TO_ANYWHERE",
 			"logging.googleapis.com",
 			"container.googleapis.com",
 		},
 		"manifests/iap-policy.json": {
+			"aegis-egress-uap",
+			"iap.googleapis.com/resources.egressViaIAP",
+			"destination.agent_registry.mcp_server.tool.annotations.read_only_hint",
 			"roles/iap.egressor",
 			"iap.googleapis.com/mcp.tool.isReadOnly",
 			"iap.googleapis.com/mcp.toolName",
@@ -564,9 +585,16 @@ func TestRepositoryManifestsScriptsAndHygiene(t *testing.T) {
 			"container.clusters.get",
 		},
 		"manifests/model-armor-config.yaml": {
+			"aegis-prompt-screen",
 			"piAndJailbreakFilterSettings",
 			"maliciousUriFilterSettings",
 			"sdpSettings",
+		},
+		"manifests/ambient-egress/01-ambient-egress-policy.yaml": {
+			"kind: GCPBackend",
+			"aegis-swp-egress-backend",
+			"kind: GCPEgressPolicy",
+			"excludeCIDRRanges:",
 		},
 		"Dockerfile": {
 			"FROM",
@@ -581,8 +609,10 @@ func TestRepositoryManifestsScriptsAndHygiene(t *testing.T) {
 			"manifests/00-namespace-and-rbac.yaml",
 			"manifests/01-agent-substrate-v050.yaml",
 			"manifests/02-aegis-deployment.yaml",
+			"manifests/03-gke-diy-agent-gateway.yaml",
 		},
 		"hack/register-gemini-enterprise.sh": {
+			"aegis-ingress-gateway",
 			"/.well-known/agent-card.json",
 			"discoveryengine.googleapis.com",
 			"serverSideOauth2",
@@ -1333,8 +1363,8 @@ func TestPhase4_AboutArchitectureCatalogAndDriftEval(t *testing.T) {
 	if len(catalog.Sources) != 8 {
 		t.Errorf("len(catalog.Sources) = %d, want 8", len(catalog.Sources))
 	}
-	if len(catalog.ADRs) != 13 {
-		t.Errorf("len(catalog.ADRs) = %d, want 13 (0001..0013)", len(catalog.ADRs))
+	if len(catalog.ADRs) != 14 {
+		t.Errorf("len(catalog.ADRs) = %d, want 14 (0001..0014)", len(catalog.ADRs))
 	}
 	for _, sc := range catalog.Scenarios {
 		if len(sc.Blue.Pulses) == 0 || len(sc.Red.Pulses) == 0 {

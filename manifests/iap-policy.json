@@ -1,9 +1,32 @@
 {
+  "name": "projects/${PROJECT_ID}/locations/global/accessPolicies/aegis-egress-uap",
+  "accessPolicyId": "aegis-egress-uap",
+  "displayName": "AegisSRE AGENT_TO_ANYWHERE Unified Access Policy (UAP Policy V2)",
+  "rules": [
+    {
+      "description": "Allow AegisSRE Agent Identity SPIFFE principal to invoke registered read-only MCP tools while denying destructive mutations (Absolute DENY Precedence)",
+      "Effect": "ALLOW",
+      "principals": [
+        "principal://agents.global.org-${ORG_ID}.system.id.goog/resources/container/projects/${PROJECT_NUMBER}/locations/${CLUSTER_LOCATION}/clusters/${CLUSTER_NAME}/ns/aegis-system/sa/aegis-sre"
+      ],
+      "permissions": [
+        "iap.googleapis.com/resources.egressViaIAP"
+      ],
+      "conditions": {
+        "iap.googleapis.com": {
+          "title": "aegis-uap-v2-readonly-mcp-tools",
+          "description": "Require target MCP server to be registered in Agent Registry with read_only_hint == true and destructive_hint != true",
+          "expression": "destination.is_registered == true && destination.agent_registry.mcp_server.tool.annotations.read_only_hint == true && destination.agent_registry.mcp_server.tool.annotations.destructive_hint != true"
+        }
+      }
+    }
+  ],
   "version": 3,
   "bindings": [
     {
       "role": "roles/iap.egressor",
       "members": [
+        "principal://agents.global.org-${ORG_ID}.system.id.goog/resources/container/projects/${PROJECT_NUMBER}/locations/${CLUSTER_LOCATION}/clusters/${CLUSTER_NAME}/ns/aegis-system/sa/aegis-sre",
         "principal://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT_ID}.svc.id.goog/subject/ns/aegis-system/sa/aegis-sre"
       ],
       "condition": {
