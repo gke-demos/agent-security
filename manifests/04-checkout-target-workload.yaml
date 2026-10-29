@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout-service
+  namespace: aegis-system
+  labels:
+    app: checkout-service
+    app.kubernetes.io/name: checkout-service
+    version: v2.4.0
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: checkout-service
+  template:
+    metadata:
+      labels:
+        app: checkout-service
+        app.kubernetes.io/name: checkout-service
+        version: v2.4.0
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: checkout-service
+          image: alpine:3.20
+          command:
+            - /bin/sh
+            - -c
+            - |
+              while true; do
+                TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                printf '{"severity":"ERROR","time":"%s","component":"checkout-service","version":"v2.4.0","message":"HTTP 502 Bad Gateway: panic: runtime error: invalid memory address or nil pointer dereference in checkout RetryPolicy.NextBackoff (v2.4 rollout)","httpRequest":{"requestMethod":"POST","requestUrl":"/api/v1/checkout","status":502},"logging.googleapis.com/sourceLocation":{"file":"checkout_handler.go","line":"142","function":"(*Handler).ProcessCheckout"}}\n' "$TS"
+                sleep 15
+              done
+          resources:
+            requests:
+              cpu: "25m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

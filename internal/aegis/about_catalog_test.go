@@ -1866,5 +1866,226 @@ func TestPhase6_AutoResolvingHackScripts(t *testing.T) {
 	}
 }
 
+func TestPhase7_Manifests02And03And04AndDeployScript(t *testing.T) {
+	repoRoot := filepath.Clean("../..")
+
+	manifestChecks := map[string][]string{
+		"manifests/02-aegis-deployment.yaml": {
+			"app: aegis-sre",
+			"name: ext-proc-tls",
+			"containerPort: 8443",
+			"protocol: TCP",
+			"name: EXT_PROC_TLS_ADDR",
+			`value: ":8443"`,
+		},
+		"manifests/03-gke-diy-agent-gateway.yaml": {
+			"kind: Service",
+			"name: aegis-model-armor-ext-proc",
+			`cloud.google.com/neg: '{"ingress":true}'`,
+			"app: aegis-sre",
+			"name: grpc-ext-proc",
+			"port: 443",
+			"targetPort: 8443",
+			"appProtocol: HTTP2",
+			"kind: GCPAuthzExtension",
+			"authority: aegis-model-armor-ext-proc.aegis-system.svc.cluster.local",
+			"wireFormat: ExtProcGRPC",
+			"timeout: 2000ms",
+			"backendRef:",
+			"kind: GCPTrafficExtension",
+			"name: aegis-model-armor-body-ext",
+			"supportedEvents:",
+			"- RequestHeaders",
+			"- RequestBody",
+			"requestBodySendMode: FullDuplexStreamed",
+			"modelarmor.${REGION}.rep.googleapis.com",
+		},
+		"manifests/04-checkout-target-workload.yaml": {
+			"apiVersion: apps/v1",
+			"kind: Deployment",
+			"name: checkout-service",
+			"namespace: aegis-system",
+			"app: checkout-service",
+			"version: v2.4.0",
+			"image: alpine:3.20",
+			"502 Bad Gateway",
+			"RetryPolicy.NextBackoff",
+			"checkout_handler.go",
+			"142",
+			"sleep 15",
+		},
+		"hack/deploy-gke.sh": {
+			"manifests/04-checkout-target-workload.yaml",
+			"deployment/checkout-service",
+		},
+	}
+
+	for relPath, wantSubstrings := range manifestChecks {
+		fullPath := filepath.Join(repoRoot, relPath)
+		rawBytes, err := os.ReadFile(fullPath)
+		if err != nil {
+			t.Errorf("read %s: %v", relPath, err)
+			continue
+		}
+		content := string(rawBytes)
+		assertNoEmojiRunes(t, relPath, content)
+		lower := strings.ToLower(content)
+		for _, forbidden := range []string{"mofi" + "labs", "ate" + "-cluster", "gke-ate" + "-cluster", "vertex" + " ai", "fluid" + " compute"} {
+			if strings.Contains(lower, forbidden) {
+				t.Errorf("%s contains forbidden personal/retired string %q", relPath, forbidden)
+			}
+		}
+		for _, sub := range wantSubstrings {
+			if !strings.Contains(content, sub) {
+				t.Errorf("%s missing expected Phase 7 snippet %q", relPath, sub)
+			}
+		}
+	}
+}
+
+func TestPhase7_AboutCatalogExtProcAndCheckoutTelemetrySync(t *testing.T) {
+	rt := aegis.NewRuntime(aegis.RuntimeConfig{})
+	catalog, err := rt.BuildArchitectureTopologyCatalog(t.Context())
+	if err != nil {
+		t.Fatalf("BuildArchitectureTopologyCatalog: %v", err)
+	}
+
+	if len(catalog.ADRs) != 15 {
+		t.Fatalf("len(catalog.ADRs) = %d, want 15 (0001..0015)", len(catalog.ADRs))
+	}
+	adr0015 := catalog.ADRs[14]
+	if adr0015.Number != "0015" || adr0015.Slug != "in-cluster-ext-proc-callout-live-checkout-telemetry-and-stage-runbook" {
+		t.Errorf("catalog.ADRs[14] = (%s, %s), want (0015, in-cluster-ext-proc-callout-live-checkout-telemetry-and-stage-runbook)", adr0015.Number, adr0015.Slug)
+	}
+
+	byBoundary := map[aegis.BoundaryID]aegis.BoundaryCatalogNode{}
+	for _, b := range catalog.Boundaries {
+		byBoundary[b.ID] = b
+	}
+
+	b1Joined := byBoundary[aegis.BoundaryGenerativeUI].ComponentName + " " + byBoundary[aegis.BoundaryGenerativeUI].BlueDefenseMechanism
+	for _, term := range []string{":8443", "ExtProcGRPC", "Authz Extension Callout", "X-Aegis-Authz-Extension"} {
+		if !strings.Contains(b1Joined, term) {
+			t.Errorf("B1 (BoundaryGenerativeUI) must reference %q, got %q", term, b1Joined)
+		}
+	}
+
+	b2Joined := byBoundary[aegis.BoundaryReasoningGuard].ComponentName + " " + byBoundary[aegis.BoundaryReasoningGuard].BlueDefenseMechanism
+	for _, term := range []string{":8443", "ExtProcGRPC", "Authz Extension Callout", "Service/aegis-model-armor-ext-proc", "GCPAuthzExtension", "GCPTrafficExtension"} {
+		if !strings.Contains(b2Joined, term) {
+			t.Errorf("B2 (BoundaryReasoningGuard) must reference %q, got %q", term, b2Joined)
+		}
+	}
+
+	b4Joined := byBoundary[aegis.BoundaryPlatformGovernance].ComponentName + " " + byBoundary[aegis.BoundaryPlatformGovernance].BlueDefenseMechanism
+	for _, term := range []string{":8443", "ExtProcGRPC", "Service/aegis-model-armor-ext-proc", "GCPAuthzExtension", "GCPTrafficExtension", "Deployment/checkout-service", "502"} {
+		if !strings.Contains(b4Joined, term) {
+			t.Errorf("B4 (BoundaryPlatformGovernance) must reference %q, got %q", term, b4Joined)
+		}
+	}
+
+	if err := aegis.VerifyArchitectureCatalogDrift(catalog, rt, filepath.Clean("../../docs/adr")); err != nil {
+		t.Fatalf("VerifyArchitectureCatalogDrift: %v", err)
+	}
+}
+
+func TestPhase7_READMEAndStageRunbookSyncAndHygiene(t *testing.T) {
+	repoRoot := filepath.Clean("../..")
+
+	docChecks := map[string][]string{
+		"README.md": {
+			"ADR-0014",
+			"ADR-0015",
+			"0015",
+			"ADR Index (15)",
+			":8443",
+			"ExtProcGRPC",
+			"Service/aegis-model-armor-ext-proc",
+			"GCPAuthzExtension",
+			"GCPTrafficExtension",
+			"AGENT_TO_ANYWHERE",
+			"iap.googleapis.com/resources.egressViaIAP",
+			"/var/run/secrets/workload-spiffe-credentials/",
+			"manifests/03-gke-diy-agent-gateway.yaml",
+			"manifests/04-checkout-target-workload.yaml",
+			"docs/stage-runbook.md",
+		},
+		"docs/stage-runbook.md": {
+			"Deployment/aegis-sre",
+			"Deployment/checkout-service",
+			"WorkerPool/aegis-remediator-pool",
+			"Actor/remediator-1",
+			"Gateway/aegis-ingress-gateway",
+			"Projector Light Mode",
+			"/about",
+			"Security Topology",
+			"Run in Arena",
+			"ADK Plugin Flow",
+			"System Reference",
+			"15",
+			"SCENARIO-01",
+			"IsSdpOnlyBlock",
+			"SCENARIO-02",
+			"Alice",
+			"Bob",
+			"15m",
+			"S256",
+			"Token Broker",
+			"SCENARIO-03",
+			"container.clusters.delete",
+			"adk_request_confirmation",
+			"SCENARIO-04",
+			"svc/atenet-router",
+			"SNAPSHOT_FIDELITY_MEMORY",
+			"SCENARIO-05",
+			":8443",
+			"ExtProcGRPC",
+			"X-Aegis-Edge-Enforce: true",
+			"blocked_by_gcp_authz_extension",
+			"curl",
+		},
+	}
+
+	forbiddenCliches := []string{
+		"not just ",
+		"not merely ",
+		"delve",
+		"tapestry",
+		"stands as a testament",
+		"let's dive in",
+		"without further ado",
+	}
+
+	for relPath, wantSubstrings := range docChecks {
+		fullPath := filepath.Join(repoRoot, relPath)
+		rawBytes, err := os.ReadFile(fullPath)
+		if err != nil {
+			t.Errorf("read %s: %v", relPath, err)
+			continue
+		}
+		content := string(rawBytes)
+		assertNoEmojiRunes(t, relPath, content)
+		lower := strings.ToLower(content)
+		for _, forbidden := range []string{"mofi" + "labs", "ate" + "-cluster", "gke-ate" + "-cluster", "vertex" + " ai", "fluid" + " compute"} {
+			if strings.Contains(lower, forbidden) {
+				t.Errorf("%s contains forbidden personal/retired string %q", relPath, forbidden)
+			}
+		}
+		for _, cliche := range forbiddenCliches {
+			if strings.Contains(lower, cliche) {
+				t.Errorf("%s contains forbidden AI cliche %q", relPath, cliche)
+			}
+		}
+		for _, sub := range wantSubstrings {
+			if !strings.Contains(content, sub) {
+				t.Errorf("%s missing expected Phase 7 snippet %q", relPath, sub)
+			}
+		}
+	}
+}
+
+
+
+
 
 

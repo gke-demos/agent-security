@@ -17,6 +17,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: aegis-sre
+        app: aegis-sre
         registry.gke.io/functional-type: "AGENT"
       annotations:
         iam.gke.io/spiffe-identity-type: "agent-identity"
@@ -38,9 +39,14 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+            - name: ext-proc-tls
+              containerPort: 8443
+              protocol: TCP
           env:
             - name: PORT
               value: "8080"
+            - name: EXT_PROC_TLS_ADDR
+              value: ":8443"
             - name: GOOGLE_CLOUD_PROJECT
               value: "${PROJECT_ID}"
             - name: GOOGLE_CLOUD_LOCATION

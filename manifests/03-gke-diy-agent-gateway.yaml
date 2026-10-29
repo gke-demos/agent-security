@@ -69,6 +69,75 @@ spec:
       kind: Gateway
       name: aegis-ingress-gateway
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aegis-model-armor-ext-proc
+  namespace: aegis-system
+  labels:
+    app.kubernetes.io/name: aegis-sre
+  annotations:
+    cloud.google.com/neg: '{"ingress":true}'
+spec:
+  selector:
+    app: aegis-sre
+  ports:
+    - name: grpc-ext-proc
+      port: 443
+      targetPort: 8443
+      protocol: TCP
+      appProtocol: HTTP2
+---
+apiVersion: networking.gke.io/v1
+kind: GCPAuthzExtension
+metadata:
+  name: aegis-model-armor-ext-proc
+  namespace: aegis-system
+  labels:
+    app.kubernetes.io/name: aegis-sre
+spec:
+  # In-cluster ExtProcGRPC callout invoking regional Model Armor (modelarmor.${GCP_LOCATION}.rep.googleapis.com / modelarmor.${REGION}.rep.googleapis.com:443)
+  authority: aegis-model-armor-ext-proc.aegis-system.svc.cluster.local
+  timeout: 2000ms
+  failOpen: false
+  wireFormat: ExtProcGRPC
+  backendRef:
+    group: ""
+    kind: Service
+    name: aegis-model-armor-ext-proc
+    port: 443
+---
+apiVersion: networking.gke.io/v1
+kind: GCPTrafficExtension
+metadata:
+  name: aegis-model-armor-body-ext
+  namespace: aegis-system
+  labels:
+    app.kubernetes.io/name: aegis-sre
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: aegis-ingress-gateway
+  extensionChains:
+    - name: model-armor-body-chain
+      matchCondition:
+        celExpression: "request.method == 'POST' && (request.path == '/a2a' || request.path.startsWith('/api/sessions/'))"
+      extensions:
+        - name: model-armor-ext-proc
+          authority: aegis-model-armor-ext-proc.aegis-system.svc.cluster.local
+          timeout: 2000ms
+          failOpen: false
+          supportedEvents:
+            - RequestHeaders
+            - RequestBody
+          requestBodySendMode: FullDuplexStreamed
+          backendRef:
+            group: ""
+            kind: Service
+            name: aegis-model-armor-ext-proc
+            port: 443
+---
 apiVersion: networking.gke.io/v1
 kind: GCPAuthzExtension
 metadata:
