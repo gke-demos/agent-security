@@ -139,7 +139,43 @@ func ConfigFromEnvWithLookup(getenv func(string) string, ghTokenFn func() string
 		}
 	}
 
+	if shouldAutoEnableLiveSaaSTargets(getenv) {
+		port := firstNonEmpty(strings.TrimSpace(getenv("PORT")), "8080")
+		baseLoopback := fmt.Sprintf("http://127.0.0.1:%s", port)
+		if cfg.GmailAPIURL == "" {
+			cfg.GmailAPIURL = baseLoopback + "/api/targets/gmail/v1"
+		}
+		if cfg.JiraBaseURL == "" {
+			cfg.JiraBaseURL = baseLoopback + "/api/targets/jira"
+		}
+		if cfg.AliceGmailToken == "" {
+			cfg.AliceGmailToken = "gmail_tok_aegis_live_alice_3lo"
+		}
+		if cfg.BobGmailToken == "" {
+			cfg.BobGmailToken = "gmail_tok_aegis_live_bob_3lo"
+		}
+		if cfg.AliceJiraToken == "" {
+			cfg.AliceJiraToken = "atatt3x_aegis_live_alice_jira_3lo"
+		}
+		if cfg.BobJiraToken == "" {
+			cfg.BobJiraToken = "atatt3x_aegis_live_bob_jira_3lo"
+		}
+	}
+
 	return cfg
+}
+
+func shouldAutoEnableLiveSaaSTargets(getenv func(string) string) bool {
+	if parseBoolEnv(getenv("LIVE_SAAS")) {
+		return true
+	}
+	if strings.TrimSpace(getenv("GOOGLE_CLOUD_PROJECT")) == "" {
+		return false
+	}
+	if flag.Lookup("test.v") != nil && !parseBoolEnv(getenv("AEGIS_LIVE_EVALS")) && !parseBoolEnv(os.Getenv("AEGIS_LIVE_EVALS")) {
+		return false
+	}
+	return true
 }
 
 func parseBoolEnv(val string) bool {

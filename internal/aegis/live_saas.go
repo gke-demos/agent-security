@@ -18,6 +18,156 @@ import (
 
 const lastGmailFetchExtPrefix = "last_gmail_fetch:"
 
+func init() {
+	RegisterHTTPRoutes(registerTargetSaaSHTTPRoutes)
+}
+
+// TODO(security): Target SaaS endpoints (/api/targets/gmail/v1 and /api/targets/jira) enforce
+// mandatory Bearer token authentication (401 Unauthorized when missing) and persona-scoped RBAC
+// (403 Forbidden for contractor Bob on restricted issue SEC-101), with 1 MiB io.LimitReader bounds
+// on request bodies; SQL parameterization, multipart file-upload scanning, and cookie-based CSRF
+// tokens are N/A (zero SQL DB, zero file uploads, zero auth cookies).
+func registerTargetSaaSHTTPRoutes(mux *http.ServeMux, rt *Runtime) {
+	mux.HandleFunc("GET /api/targets/gmail/v1/users/me/messages", func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := extractTargetBearerToken(r); !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing bearer token"})
+			return
+		}
+		if isCleanGmailRequest(r) {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"messages": []map[string]string{
+					{"id": "msg-p0-clean-pii", "threadId": "thr-p0-clean-pii"},
+				},
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"messages": []map[string]string{
+				{"id": "msg-p0-escalation", "threadId": "thr-p0-escalation"},
+			},
+		})
+	})
+
+	mux.HandleFunc("GET /api/targets/gmail/v1/users/me/messages/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := extractTargetBearerToken(r); !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing bearer token"})
+			return
+		}
+		msgID := strings.TrimSpace(r.PathValue("id"))
+		if msgID == "" {
+			msgID = "msg-p0-escalation"
+		}
+		rawBody := fixtureGmailAdversarialBody
+		if msgID == "msg-p0-clean-pii" || isCleanGmailRequest(r) {
+			rawBody = fixtureGmailCleanPIIBody
+		}
+		encoded := base64.RawURLEncoding.EncodeToString([]byte(rawBody))
+		writeJSON(w, http.StatusOK, map[string]any{
+			"id":      msgID,
+			"snippet": rawBody,
+			"payload": map[string]any{
+				"headers": []map[string]string{
+					{"name": "From", "value": "vip-customer@acme.example.com"},
+					{"name": "Subject", "value": "[P0] Checkout 502 Escalation"},
+				},
+				"body": map[string]string{
+					"data": encoded,
+				},
+			},
+		})
+	})
+
+	mux.HandleFunc("GET /api/targets/jira/rest/api/3/issue/{key}", func(w http.ResponseWriter, r *http.Request) {
+		key, ok := authorizeTargetJiraIssue(w, r, rt)
+		if !ok {
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"id":  "10001",
+			"key": key,
+			"fields": map[string]any{
+				"summary": "Restricted SecOps OAuth Token & Checkout 502 Investigation",
+				"status": map[string]string{
+					"name": "In Progress",
+				},
+			},
+		})
+	})
+
+	mux.HandleFunc("POST /api/targets/jira/rest/api/3/issue/{key}/comment", func(w http.ResponseWriter, r *http.Request) {
+		key, ok := authorizeTargetJiraIssue(w, r, rt)
+		if !ok {
+			return
+		}
+		_, _ = io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		writeJSON(w, http.StatusCreated, map[string]any{
+			"id":   "20001",
+			"self": "https://jira.aegis.internal/rest/api/3/issue/" + key + "/comment/20001",
+		})
+	})
+}
+
+func authorizeTargetJiraIssue(w http.ResponseWriter, r *http.Request, rt *Runtime) (string, bool) {
+	token, ok := extractTargetBearerToken(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing bearer token"})
+		return "", false
+	}
+	key := firstNonEmpty(strings.TrimSpace(r.PathValue("key")), "SEC-101")
+	if strings.EqualFold(key, "SEC-101") && isBobTargetToken(rt, token) {
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"errorMessages": []string{"Issue SEC-101 is restricted to SecOps Persona (Alice); contractor token denied."},
+		})
+		return "", false
+	}
+	return key, true
+}
+
+func extractTargetBearerToken(r *http.Request) (string, bool) {
+	authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
+	if len(authHeader) < len("Bearer ") || !strings.EqualFold(authHeader[:len("Bearer ")], "Bearer ") {
+		return "", false
+	}
+	token := strings.TrimSpace(authHeader[len("Bearer "):])
+	if token == "" {
+		return "", false
+	}
+	return token, true
+}
+
+func isCleanGmailRequest(r *http.Request) bool {
+	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("clean")), "true") {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Aegis-Gmail-Mode")), "clean") {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Aegis-Gmail-Clean-PII")), "true") {
+		return true
+	}
+	return false
+}
+
+func isBobTargetToken(rt *Runtime, token string) bool {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return false
+	}
+	if strings.Contains(strings.ToLower(token), "bob") {
+		return true
+	}
+	if rt != nil {
+		cfg := rt.Config()
+		if bobJira := strings.TrimSpace(cfg.BobJiraToken); bobJira != "" && token == bobJira {
+			return true
+		}
+		if bobGmail := strings.TrimSpace(cfg.BobGmailToken); bobGmail != "" && token == bobGmail {
+			return true
+		}
+	}
+	return false
+}
+
 type liveGmailFetchResult struct {
 	RawEmail    string
 	WireRecords []OutboundWireRecord
@@ -245,10 +395,16 @@ func fetchLiveGmailEscalation(ctx context.Context, rt *Runtime, req TurnRequest)
 		RequireCold3LOConsent: req.RequireCold3LOConsent,
 	})
 
+	cleanPII := req.CleanPIIOnly || (req.ScenarioID == Scenario05FullChainZeroTrust && (req.Posture.PromptScreenEnabled || req.Posture.PIIRedactorEnabled))
+
 	listURL := baseURL + "/users/me/messages"
 	listReq, err := http.NewRequestWithContext(gmailCtx, http.MethodGet, listURL, nil)
 	if err != nil {
 		return nil, err
+	}
+	if cleanPII {
+		listReq.Header.Set("X-Aegis-Gmail-Mode", "clean")
+		listReq.Header.Set("X-Aegis-Gmail-Clean-PII", "true")
 	}
 	listResp, err := client.Do(listReq)
 	if err != nil {
@@ -285,6 +441,10 @@ func fetchLiveGmailEscalation(ctx context.Context, rt *Runtime, req TurnRequest)
 	if err != nil {
 		return nil, err
 	}
+	if cleanPII {
+		getReq.Header.Set("X-Aegis-Gmail-Mode", "clean")
+		getReq.Header.Set("X-Aegis-Gmail-Clean-PII", "true")
+	}
 	getResp, err := client.Do(getReq)
 	if err != nil {
 		if strings.TrimSpace(cfg.GmailAPIURL) == "" {
@@ -297,7 +457,7 @@ func fetchLiveGmailEscalation(ctx context.Context, rt *Runtime, req TurnRequest)
 
 	extractedBody := extractGmailMessageText(msgBytes)
 	if strings.TrimSpace(extractedBody) == "" {
-		if req.CleanPIIOnly {
+		if cleanPII {
 			extractedBody = fixtureGmailCleanPIIBody
 		} else {
 			extractedBody = fixtureGmailAdversarialBody

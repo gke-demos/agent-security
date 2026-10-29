@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -755,3 +756,124 @@ func TestInspectAgentIdentitySPIFFE_AndStageSafeSourceStatusEnrichment(t *testin
 		t.Errorf("sanitizeStageSafeText(unslashed project number) = %q, want %q", gotUnslashedNum, wantUnslashedNum)
 	}
 }
+
+func TestConfigFromEnv_LiveSaaS8Of8Provenance(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. LIVE_SAAS=true auto-defaults GmailAPIURL, JiraBaseURL, and Alice/Bob 3LO persona tokens
+	envLiveSaaS := map[string]string{
+		"GOOGLE_CLOUD_PROJECT":    "aegis-8of8-proj",
+		"GKE_CLUSTER_NAME":        "aegis-8of8-cluster",
+		"AGENT_PLATFORM_LIVE_LLM": "true",
+		"LIVE_GITHUB":             "true",
+		"LIVE_SUBSTRATE":          "true",
+		"SUBSTRATE_GATEWAY_URL":   "http://127.0.0.1:8088",
+		"LIVE_SAAS":               "true",
+	}
+	cfg := ConfigFromEnvWithLookup(
+		func(k string) string { return envLiveSaaS[k] },
+		func() string { return "gho_live_cli_token_8of8" },
+	)
+
+	if cfg.GmailAPIURL != "http://127.0.0.1:8080/api/targets/gmail/v1" {
+		t.Fatalf("cfg.GmailAPIURL = %q, want %q", cfg.GmailAPIURL, "http://127.0.0.1:8080/api/targets/gmail/v1")
+	}
+	if cfg.JiraBaseURL != "http://127.0.0.1:8080/api/targets/jira" {
+		t.Fatalf("cfg.JiraBaseURL = %q, want %q", cfg.JiraBaseURL, "http://127.0.0.1:8080/api/targets/jira")
+	}
+	if cfg.AliceGmailToken != "gmail_tok_aegis_live_alice_3lo" || cfg.BobGmailToken != "gmail_tok_aegis_live_bob_3lo" {
+		t.Fatalf("Gmail tokens = (%q, %q), want auto-defaulted live tokens", cfg.AliceGmailToken, cfg.BobGmailToken)
+	}
+	if cfg.AliceJiraToken != "atatt3x_aegis_live_alice_jira_3lo" || cfg.BobJiraToken != "atatt3x_aegis_live_bob_jira_3lo" {
+		t.Fatalf("Jira tokens = (%q, %q), want auto-defaulted live tokens", cfg.AliceJiraToken, cfg.BobJiraToken)
+	}
+
+	rt := NewRuntime(cfg)
+	statuses, err := rt.GetSourcesStatus(ctx)
+	if err != nil {
+		t.Fatalf("GetSourcesStatus: %v", err)
+	}
+	if len(statuses) != 8 {
+		t.Fatalf("len(statuses) = %d, want 8", len(statuses))
+	}
+	for i, st := range statuses {
+		if st.Provenance != ProvenanceLive {
+			t.Errorf("statuses[%d] (%s).Provenance = %q, want %q (8/8 LIVE)", i, st.ID, st.Provenance, ProvenanceLive)
+		}
+	}
+
+	// 2. Custom PORT and explicit GMAIL_API_URL / JIRA_BASE_URL overrides are respected
+	envOverride := map[string]string{
+		"LIVE_SAAS":     "true",
+		"PORT":          "9090",
+		"GMAIL_API_URL": "https://gmail.googleapis.com/gmail/v1",
+	}
+	cfgOverride := ConfigFromEnvWithLookup(func(k string) string { return envOverride[k] }, nil)
+	if cfgOverride.GmailAPIURL != "https://gmail.googleapis.com/gmail/v1" {
+		t.Errorf("cfgOverride.GmailAPIURL = %q, want explicit override preserved", cfgOverride.GmailAPIURL)
+	}
+	if cfgOverride.JiraBaseURL != "http://127.0.0.1:9090/api/targets/jira" {
+		t.Errorf("cfgOverride.JiraBaseURL = %q, want http://127.0.0.1:9090/api/targets/jira", cfgOverride.JiraBaseURL)
+	}
+}
+
+func TestPhase8_DeploymentManifestREADMEAndStageRunbook8Of8Sync(t *testing.T) {
+	repoRoot := filepath.Clean("../..")
+
+	requiredSnippets := map[string][]string{
+		"manifests/02-aegis-deployment.yaml": {
+			`name: LIVE_SAAS`,
+			`value: "true"`,
+			`name: GMAIL_API_URL`,
+			`http://127.0.0.1:8080/api/targets/gmail/v1`,
+			`name: JIRA_BASE_URL`,
+			`http://127.0.0.1:8080/api/targets/jira`,
+		},
+		"README.md": {
+			"ADR-0016",
+			"0016",
+			"ADR Index (16)",
+			"FullDuplexStreamed",
+			"StreamedBodyResponse",
+			"8/8 LIVE",
+			"/api/targets/gmail/v1",
+			"/api/targets/jira",
+		},
+		"docs/stage-runbook.md": {
+			"ADR-0016",
+			"16",
+			"FullDuplexStreamed",
+			"StreamedBodyResponse",
+			"8/8 LIVE",
+		},
+	}
+
+	forbiddenStrings := []string{
+		"mofi" + "labs",
+		"ate" + "-cluster",
+		"gke-ate" + "-cluster",
+		"vertex" + " ai",
+		"fluid" + " compute",
+	}
+
+	for relPath, snippets := range requiredSnippets {
+		rawBytes, err := os.ReadFile(filepath.Join(repoRoot, relPath))
+		if err != nil {
+			t.Fatalf("ReadFile(%s): %v", relPath, err)
+		}
+		content := string(rawBytes)
+		lower := strings.ToLower(content)
+		for _, forbidden := range forbiddenStrings {
+			if strings.Contains(lower, forbidden) {
+				t.Errorf("%s contains forbidden personal/retired term %q", relPath, forbidden)
+			}
+		}
+		for _, snip := range snippets {
+			if !strings.Contains(content, snip) {
+				t.Errorf("%s missing expected Phase 8 snippet %q", relPath, snip)
+			}
+		}
+	}
+}
+
+

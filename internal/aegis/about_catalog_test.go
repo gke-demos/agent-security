@@ -1950,12 +1950,16 @@ func TestPhase7_AboutCatalogExtProcAndCheckoutTelemetrySync(t *testing.T) {
 		t.Fatalf("BuildArchitectureTopologyCatalog: %v", err)
 	}
 
-	if len(catalog.ADRs) != 15 {
-		t.Fatalf("len(catalog.ADRs) = %d, want 15 (0001..0015)", len(catalog.ADRs))
+	if len(catalog.ADRs) != 16 {
+		t.Fatalf("len(catalog.ADRs) = %d, want 16 (0001..0016)", len(catalog.ADRs))
 	}
 	adr0015 := catalog.ADRs[14]
 	if adr0015.Number != "0015" || adr0015.Slug != "in-cluster-ext-proc-callout-live-checkout-telemetry-and-stage-runbook" {
 		t.Errorf("catalog.ADRs[14] = (%s, %s), want (0015, in-cluster-ext-proc-callout-live-checkout-telemetry-and-stage-runbook)", adr0015.Number, adr0015.Slug)
+	}
+	adr0016 := catalog.ADRs[15]
+	if adr0016.Number != "0016" || adr0016.Slug != "full-duplex-streamed-ext-proc-body-echo-and-8-of-8-live-sources" {
+		t.Errorf("catalog.ADRs[15] = (%s, %s), want (0016, full-duplex-streamed-ext-proc-body-echo-and-8-of-8-live-sources)", adr0016.Number, adr0016.Slug)
 	}
 
 	byBoundary := map[aegis.BoundaryID]aegis.BoundaryCatalogNode{}
@@ -1996,8 +2000,10 @@ func TestPhase7_READMEAndStageRunbookSyncAndHygiene(t *testing.T) {
 		"README.md": {
 			"ADR-0014",
 			"ADR-0015",
+			"ADR-0016",
 			"0015",
-			"ADR Index (15)",
+			"0016",
+			"ADR Index (16)",
 			":8443",
 			"ExtProcGRPC",
 			"Service/aegis-model-armor-ext-proc",

@@ -45,7 +45,7 @@ Start on `/about` to show how the six security boundaries fit together before ru
    - Click through the six `AegisSecurityPlugin` callbacks (`BeforeRun`, `BeforeModel`, `BeforeTool`, `AfterTool`, `AfterModel`, `OnEvent`) around `adk_request_confirmation / tool.Run`.
    - Expand **Inspect Sample SSE Frame** on `BeforeTool` or `AfterTool` to show the typed `TurnStreamEvent` JSON frames streamed over `text/event-stream`.
 3. **`System Reference` tab**:
-   - Flip through `Governed Tools (8)`, `External Sources (8)`, and `ADR Index (15)`. Point out that `LIVE` source endpoints scrub project and cluster names automatically for stage projection.
+   - Flip through `Governed Tools (8)`, `External Sources (8)` (`8/8 LIVE`), and `ADR Index (16)` (`ADR-0001` through `ADR-0016`, including `ADR-0015` and `ADR-0016`). Point out that `LIVE` source endpoints scrub project and cluster names automatically for stage projection.
    - Return to `Security Topology`, select `S1 · Prompt & PII` in **Blue** posture, and click **Run in Arena** to jump to `/` with the prompt pre-filled in the composer.
 
 ## 3. Act 2: Red-vs-Blue live Arena walkthrough on `/` and `⌘K` (6 minutes)
@@ -85,7 +85,7 @@ Start on `/about` to show how the six security boundaries fit together before ru
 
 ## 4. Act 3: Wire-level `Gateway/aegis-ingress-gateway` and `:8443` `ExtProcGRPC` CLI verification (2 minutes)
 
-Finish in the terminal to prove that `Gateway/aegis-ingress-gateway` (`CLIENT_TO_AGENT`) and the co-hosted `:8443` HTTP/2 TLS `ExtProcGRPC` callout (`Service/aegis-model-armor-ext-proc`) enforce policy on the wire:
+Finish in the terminal to prove that `Gateway/aegis-ingress-gateway` (`CLIENT_TO_AGENT`) and the co-hosted `:8443` HTTP/2 TLS `ExtProcGRPC` callout (`Service/aegis-model-armor-ext-proc` with `FullDuplexStreamed` `StreamedBodyResponse` body echo, `ADR-0016`) enforce policy on the wire:
 
 ```bash
 # 1. Blue-Governed A2A request through Gateway/aegis-ingress-gateway (ALLOWED with verified callout headers)
