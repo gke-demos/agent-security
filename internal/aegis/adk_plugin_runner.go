@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
 	"maps"
 	"net/http"
@@ -140,9 +141,27 @@ func (tc *adkActiveTurnContext) appendExecutedTool(name string) {
 	tc.executedTools = append(tc.executedTools, name)
 }
 
+func clientToAgentGatewayPostureDetail(rt *Runtime) string {
+	const base = "CLIENT_TO_AGENT Gateway/aegis-ingress-gateway, GCPAgentGateway/aegis-client-to-agent-gateway, GCPAuthzPolicy/aegis-a2a-ingress-policy"
+	if rt != nil && strings.TrimSpace(rt.cfg.AgentGatewayIngressURL) != "" {
+		return fmt.Sprintf("%s (%s)", base, sanitizeStageSafeText(strings.TrimSpace(rt.cfg.AgentGatewayIngressURL), rt.cfg))
+	}
+	return base
+}
+
 func (tc *adkActiveTurnContext) addStep(ev BoundaryTraceEvent) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
+	if ev.Boundary == BoundaryReasoningGuard && ev.Verdict != VerdictBypassedRed && tc.req.Posture.PromptScreenEnabled {
+		if !strings.Contains(ev.Detail, "GCPAgentGateway/aegis-client-to-agent-gateway") {
+			ev.Detail = fmt.Sprintf("%s · %s", ev.Detail, clientToAgentGatewayPostureDetail(tc.rt))
+		}
+	}
+	if ev.Boundary == BoundaryCrossAgentA2A && ev.Verdict != VerdictBypassedRed && (tc.req.Posture.SandboxEgressMITMEnabled || tc.req.Posture.PromptScreenEnabled) {
+		if !strings.Contains(ev.Detail, "GCPAgentGateway/aegis-client-to-agent-gateway") {
+			ev.Detail = fmt.Sprintf("%s · %s", ev.Detail, clientToAgentGatewayPostureDetail(tc.rt))
+		}
+	}
 	ev.Order = len(tc.trace) + 1
 	if ev.Timestamp.IsZero() {
 		ev.Timestamp = time.Now().UTC()
@@ -170,22 +189,42 @@ const (
 func (tc *adkActiveTurnContext) addWire(records ...OutboundWireRecord) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
+	wantIngress := tc.req.Posture.PromptScreenEnabled
+	wantEgress := tc.req.Posture.StepUpAndA2UICatalogEnabled
+	wantSpiffe := tc.req.Posture.TokenBrokerEnabled || tc.req.Posture.StepUpAndA2UICatalogEnabled
 	for _, rec := range records {
 		if rec.Provenance == "" {
 			rec.Provenance = ProvenanceFixture
 		}
-		if tc.req.Posture.StepUpAndA2UICatalogEnabled || tc.req.Posture.PromptScreenEnabled {
+		if wantIngress || wantEgress || wantSpiffe {
 			copiedHeaders := make(map[string]string, len(rec.Headers)+3)
 			for k, v := range rec.Headers {
 				copiedHeaders[k] = v
 			}
-			if copiedHeaders["X-Agent-Gateway-Ingress"] == "" {
-				copiedHeaders["X-Agent-Gateway-Ingress"] = dualPathGatewayIngressHeader
+			if wantIngress && copiedHeaders["X-Agent-Gateway-Ingress"] == "" {
+				ingressHdr := dualPathGatewayIngressHeader
+				if tc.rt != nil && strings.TrimSpace(tc.rt.cfg.AgentGatewayIngressURL) != "" {
+					ingressHdr = fmt.Sprintf("%s (endpoint=%s)", dualPathGatewayIngressHeader, sanitizeStageSafeText(strings.TrimSpace(tc.rt.cfg.AgentGatewayIngressURL), tc.rt.cfg))
+				}
+				copiedHeaders["X-Agent-Gateway-Ingress"] = ingressHdr
 			}
-			if copiedHeaders["X-Agent-Gateway-Egress"] == "" {
-				copiedHeaders["X-Agent-Gateway-Egress"] = dualPathGatewayEgressHeader
+			if wantEgress && copiedHeaders["X-Agent-Gateway-Egress"] == "" {
+				egressHdr := dualPathGatewayEgressHeader
+				if tc.rt != nil {
+					var extras []string
+					if proxyURL := strings.TrimSpace(tc.rt.cfg.AgentGatewayEgressProxyURL); proxyURL != "" {
+						extras = append(extras, "proxy="+sanitizeStageSafeText(proxyURL, tc.rt.cfg))
+					}
+					if caPath := strings.TrimSpace(tc.rt.cfg.AgentGatewayRootCAPath); caPath != "" {
+						extras = append(extras, "rootCA="+sanitizeStageSafeText(caPath, tc.rt.cfg))
+					}
+					if len(extras) > 0 {
+						egressHdr = fmt.Sprintf("%s (%s)", dualPathGatewayEgressHeader, strings.Join(extras, ", "))
+					}
+				}
+				copiedHeaders["X-Agent-Gateway-Egress"] = egressHdr
 			}
-			if copiedHeaders["X-Agent-Identity-Spiffe"] == "" {
+			if wantSpiffe && copiedHeaders["X-Agent-Identity-Spiffe"] == "" {
 				spiffeURI := canonicalAgentIdentitySPIFFE
 				if tc.rt != nil {
 					if _, san, ok := tc.rt.InspectAgentIdentitySPIFFE(); ok && san != "" {
@@ -1115,6 +1154,39 @@ func executeGovernedSandboxDelegationTool(ctx context.Context, r *Runtime, tc *a
 				sandboxConfig = liveResp.SandboxConfig
 			}
 			tc.addWire(liveWire...)
+		}
+
+		if r != nil {
+			if ingressBase := strings.TrimSpace(r.Config().AgentGatewayIngressURL); ingressBase != "" {
+				probeURL := strings.TrimRight(ingressBase, "/") + "/.well-known/agent-card.json"
+				probeStatus := http.StatusOK
+				probeProv := ProvenanceFixture
+				httpClient := r.Config().HTTPClient
+				if httpClient == nil {
+					httpClient = &http.Client{Timeout: 2 * time.Second}
+				}
+				if req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil); err == nil {
+					if resp, err := httpClient.Do(req); err == nil {
+						probeStatus = resp.StatusCode
+						probeProv = ProvenanceLive
+						_, _ = io.Copy(io.Discard, resp.Body)
+						_ = resp.Body.Close()
+					}
+				}
+				tc.addWire(OutboundWireRecord{
+					Provider:          ProviderGitHub,
+					ToolName:          "agent_gateway.client_to_agent_probe",
+					Method:            http.MethodGet,
+					URL:               sanitizeStageSafeText(probeURL, r.Config()),
+					AuthHeaderPresent: true,
+					AuthPrincipal:     "spiffe-workload-identity:aegis-sre",
+					StatusCode:        probeStatus,
+					Provenance:        probeProv,
+					Headers: map[string]string{
+						"X-Agent-Gateway-Direction": "CLIENT_TO_AGENT",
+					},
+				})
+			}
 		}
 
 		tc.addStep(BoundaryTraceEvent{

@@ -2,13 +2,20 @@ package aegis
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
 	"flag"
 	"fmt"
+	"math/big"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -96,6 +103,7 @@ func ConfigFromEnvWithLookup(getenv func(string) string, ghTokenFn func() string
 		GCPAuthProviderID:          strings.TrimSpace(getenv("GCP_AUTH_PROVIDER_ID")),
 		AgentGatewayIngressURL:     strings.TrimSpace(getenv("AGENT_GATEWAY_INGRESS_URL")),
 		AgentGatewayEgressProxyURL: strings.TrimSpace(getenv("AGENT_GATEWAY_EGRESS_PROXY_URL")),
+		AgentGatewayRootCAPath:     strings.TrimSpace(getenv("AGENT_GATEWAY_ROOT_CA_PATH")),
 	}
 
 	if cfg.GCPProjectID != "" {
@@ -289,12 +297,48 @@ func (r *Runtime) GetSourcesStatus(_ context.Context) ([]SourceStatus, error) {
 }
 
 var (
-	stageSafeOrgIDRe              = regexp.MustCompile(`org-[0-9]+`)
-	stageSafeNumericProjectSegRe  = regexp.MustCompile(`(^|/)projects/[0-9]+(/|$)`)
-	stageSafeProjectsSegmentRe    = regexp.MustCompile(`/projects/[^/\s:$)]+`)
-	spiffeLocationsSegmentRe      = regexp.MustCompile(`/locations/[^/]+/`)
-	spiffeClustersSegmentRe       = regexp.MustCompile(`/clusters/[^/]+/`)
+	stageSafeOrgIDRe             = regexp.MustCompile(`org-[0-9]+`)
+	stageSafeNumericProjectSegRe = regexp.MustCompile(`(^|/)projects/[0-9]+(/|$)`)
+	stageSafeProjectsSegmentRe   = regexp.MustCompile(`(^|[\s"'=(/])projects/[^/\s:$)]+`)
+	spiffeLocationsSegmentRe     = regexp.MustCompile(`/locations/[^/]+/`)
+	spiffeClustersSegmentRe      = regexp.MustCompile(`/clusters/[^/]+/`)
 )
+
+// WriteSyntheticSPIFFECredentialBundle generates an ECDSA P-256 X.509 SVID credential bundle PEM
+// containing rawSPIFFEURI in its URI SANs and writes it to dir/x509.credential-bundle.private-key.pem.
+func WriteSyntheticSPIFFECredentialBundle(dir, rawSPIFFEURI string) (string, error) {
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return "", err
+	}
+	spiffeURL, err := url.Parse(rawSPIFFEURI)
+	if err != nil {
+		return "", err
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(42),
+		Subject:      pkix.Name{CommonName: "aegis-sre"},
+		NotBefore:    time.Now().Add(-1 * time.Hour),
+		NotAfter:     time.Now().Add(23 * time.Hour),
+		URIs:         []*url.URL{spiffeURL},
+	}
+	derBytes, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &privKey.PublicKey, privKey)
+	if err != nil {
+		return "", err
+	}
+	keyDER, err := x509.MarshalECPrivateKey(privKey)
+	if err != nil {
+		return "", err
+	}
+	bundlePath := filepath.Join(dir, "x509.credential-bundle.private-key.pem")
+	var pemBuf strings.Builder
+	_ = pem.Encode(&pemBuf, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	_ = pem.Encode(&pemBuf, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+	if err := os.WriteFile(bundlePath, []byte(pemBuf.String()), 0o600); err != nil {
+		return "", err
+	}
+	return bundlePath, nil
+}
 
 // InspectAgentIdentitySPIFFE inspects the mounted GKE Agent Identity X.509 SVID
 // credential bundle at r.cfg.SPIFFECredentialBundlePath when present, parses all
@@ -327,9 +371,7 @@ func (r *Runtime) InspectAgentIdentitySPIFFE() (rawURI string, sanitizedURI stri
 		for _, u := range cert.URIs {
 			if u != nil && strings.EqualFold(u.Scheme, "spiffe") {
 				rawURI = u.String()
-				sanitized := stageSafeOrgIDRe.ReplaceAllString(rawURI, "org-$${ORG_ID}")
-				sanitized = stageSafeNumericProjectSegRe.ReplaceAllString(sanitized, "${1}projects/$${PROJECT_NUMBER}${2}")
-				sanitized = spiffeLocationsSegmentRe.ReplaceAllString(sanitized, "/locations/$${CLUSTER_LOCATION}/")
+				sanitized := spiffeLocationsSegmentRe.ReplaceAllString(rawURI, "/locations/$${CLUSTER_LOCATION}/")
 				sanitized = spiffeClustersSegmentRe.ReplaceAllString(sanitized, "/clusters/$${CLUSTER_NAME}/")
 				sanitized = sanitizeStageSafeText(sanitized, cfg)
 				return rawURI, sanitized, true
@@ -406,7 +448,7 @@ func sanitizeStageSafeText(text string, cfg RuntimeConfig) string {
 	}
 	out := stageSafeOrgIDRe.ReplaceAllString(text, "org-$${ORG_ID}")
 	out = stageSafeNumericProjectSegRe.ReplaceAllString(out, "${1}projects/$${PROJECT_NUMBER}${2}")
-	out = stageSafeProjectsSegmentRe.ReplaceAllString(out, "/projects/active-gcp-project")
+	out = stageSafeProjectsSegmentRe.ReplaceAllString(out, "${1}projects/$${PROJECT_ID}")
 	if proj := strings.TrimSpace(cfg.GCPProjectID); proj != "" {
 		out = replaceCaseInsensitiveLiteral(out, proj, "active-gcp-project")
 	}

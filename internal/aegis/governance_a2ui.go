@@ -92,7 +92,7 @@ type UAPDecision struct {
 	Reason        string          `json:"reason"`
 }
 
-const agentGatewayUAPCELExpression = `destination.is_registered == true && destination.agent_registry.mcp_server.tool.annotations.read_only_hint == true && destination.agent_registry.mcp_server.mcp.tool.annotations.destructive_hint != true && request.auth.claims["iap.googleapis.com/mcp.tool.isReadOnly"] == true && request.auth.claims["iap.googleapis.com/mcp.toolName"] in ["logging.entries.list", "container.clusters.get"]`
+const agentGatewayUAPCELExpression = `destination.is_registered == true && destination.agent_registry.mcp_server.tool.annotations.read_only_hint == true && destination.agent_registry.mcp_server.tool.annotations.destructive_hint != true && request.auth.claims["iap.googleapis.com/mcp.tool.isReadOnly"] == true && request.auth.claims["iap.googleapis.com/mcp.toolName"] in ["logging.entries.list", "container.clusters.get"]`
 
 var allowedA2UICardTypes = map[A2UICardType]bool{
 	CardIncidentSummary:    true,
@@ -313,12 +313,6 @@ func EvaluateAgentGatewayUAP(toolName string, isReadOnly bool, posture SecurityP
 	decision.Verdict = VerdictBlocked
 	decision.Reason = fmt.Sprintf("Denied by Agent Gateway AGENT_TO_ANYWHERE UAP Policy V2 (aegis-egress-uap / roles/iap.egressor): tool %q violates CEL rule (%s)", toolName, agentGatewayUAPCELExpression)
 	return decision
-}
-
-// EvaluateUAPToolCall is an alias for EvaluateAgentGatewayUAP that evaluates UAP Policy V2
-// CEL rules on an outbound MCP tool call.
-func EvaluateUAPToolCall(toolName string, isReadOnly bool, posture SecurityPosture) UAPDecision {
-	return EvaluateAgentGatewayUAP(toolName, isReadOnly, posture)
 }
 
 // ValidateAndSanitizeA2UICard enforces the A2UI v0.9 6-Component Catalog schema and strips

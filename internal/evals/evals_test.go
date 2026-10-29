@@ -3,19 +3,12 @@ package evals_test
 import (
 	"bytes"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/sha256"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"io"
 	"io/fs"
-	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1925,6 +1918,9 @@ func TestPhase6_GKENativeAgentPlatformGovernanceAndInClusterRolloutEval(t *testi
 		if uapDestructive.PolicyVersion != "UAP_V2" || uapDestructive.AccessPolicy != "aegis-egress-uap" || uapDestructive.Permission != "iap.googleapis.com/resources.egressViaIAP" {
 			t.Errorf("uapDestructive UAP V2 metadata mismatch: %+v", uapDestructive)
 		}
+		if !strings.Contains(uapDestructive.CELExpression, "destination.agent_registry.mcp_server.tool.annotations.destructive_hint != true") {
+			t.Errorf("uapDestructive.CELExpression = %q, want canonical destination.agent_registry.mcp_server.tool.annotations.destructive_hint != true", uapDestructive.CELExpression)
+		}
 
 		uapRedBypass := aegis.EvaluateAgentGatewayUAP("container.clusters.delete", false, aegis.AllRedPosture())
 		if !uapRedBypass.Allowed || uapRedBypass.Verdict != aegis.VerdictBypassedRed {
@@ -1979,36 +1975,10 @@ func TestPhase6_GKENativeAgentPlatformGovernanceAndInClusterRolloutEval(t *testi
 
 	// 2. Offline: Pod Agent Identity SPIFFE X.509 SVID inspection with stage-safe sanitization
 	t.Run("Offline_InspectAgentIdentitySPIFFEAndStageSafeSanitization", func(t *testing.T) {
-		privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-		if err != nil {
-			t.Fatalf("ecdsa.GenerateKey: %v", err)
-		}
 		rawSPIFFE := "spiffe://agents.global.org-888777666555.system.id.goog/resources/container/projects/112233445566/locations/us-central1-a/clusters/sensitive-cluster-name/ns/aegis-system/sa/aegis-sre"
-		spiffeURI, err := url.Parse(rawSPIFFE)
+		bundleFile, err := aegis.WriteSyntheticSPIFFECredentialBundle(t.TempDir(), rawSPIFFE)
 		if err != nil {
-			t.Fatalf("url.Parse: %v", err)
-		}
-		tmpl := &x509.Certificate{
-			SerialNumber: big.NewInt(101),
-			Subject:      pkix.Name{CommonName: "aegis-sre"},
-			NotBefore:    time.Now().Add(-1 * time.Hour),
-			NotAfter:     time.Now().Add(23 * time.Hour),
-			URIs:         []*url.URL{spiffeURI},
-		}
-		derBytes, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &privKey.PublicKey, privKey)
-		if err != nil {
-			t.Fatalf("x509.CreateCertificate: %v", err)
-		}
-		keyDER, err := x509.MarshalECPrivateKey(privKey)
-		if err != nil {
-			t.Fatalf("x509.MarshalECPrivateKey: %v", err)
-		}
-		bundleFile := filepath.Join(t.TempDir(), "x509.credential-bundle.private-key.pem")
-		var pemBuf strings.Builder
-		_ = pem.Encode(&pemBuf, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-		_ = pem.Encode(&pemBuf, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
-		if err := os.WriteFile(bundleFile, []byte(pemBuf.String()), 0o600); err != nil {
-			t.Fatalf("os.WriteFile: %v", err)
+			t.Fatalf("WriteSyntheticSPIFFECredentialBundle: %v", err)
 		}
 
 		rt := aegis.NewRuntime(aegis.RuntimeConfig{
