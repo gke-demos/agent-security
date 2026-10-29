@@ -45,7 +45,11 @@ render_manifest() {
 echo "==> Deploying AegisSRE Zero-Trust Agent Security Stack to context: ${KUBE_CONTEXT} (project: ${PROJECT_ID}, cluster: ${CLUSTER_NAME}, location: ${CLUSTER_LOCATION}, region: ${REGION})"
 
 render_manifest manifests/00-namespace-and-rbac.yaml | kubectl --context "${KUBE_CONTEXT}" apply -f -
-render_manifest manifests/01-agent-substrate-v050.yaml | kubectl --context "${KUBE_CONTEXT}" apply -f -
+if kubectl --context "${KUBE_CONTEXT}" api-resources --api-group=ate.dev -o wide 2>/dev/null | grep -q "ate.dev/v1alpha1.*ActorTemplate"; then
+  render_manifest manifests/01-agent-substrate-v050.yaml | kubectl --context "${KUBE_CONTEXT}" apply -f -
+else
+  echo "==> Agent Substrate (ate.dev/v1alpha1) managed via kubectl-ate control plane; skipping raw kubectl CRD apply for manifests/01-agent-substrate-v050.yaml."
+fi
 render_manifest manifests/02-aegis-deployment.yaml | kubectl --context "${KUBE_CONTEXT}" apply -f -
 render_manifest manifests/03-gke-diy-agent-gateway.yaml | kubectl --context "${KUBE_CONTEXT}" apply -f -
 
