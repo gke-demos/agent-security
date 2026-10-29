@@ -16,6 +16,10 @@ _Avoid_: Mock user, role account, test user
 An isolated conversation history key scoped to both a session identifier and the active Persona (`SessionID:Persona`) when the Token Broker shield is enabled, preventing cross-persona context leakage of prior tool outputs across multi-turn follow-ups.
 _Avoid_: Shared transcript, global chat memory
 
+**Agent Identity**:
+A cryptographic workload identity issued to an agent pod that authenticates the agent itself to upstream gateways, registries, and policies independently of the invoking Operator Persona.
+_Avoid_: Service account key, shared bot token, pod user
+
 **Triage Orchestrator**:
 The primary reasoning agent that coordinates incident analysis across mail, issue trackers, and observability tools on behalf of the invoking Operator.
 _Avoid_: Main agent, root bot, controller
@@ -53,6 +57,10 @@ _Avoid_: Input validator, regex filter
 **PII Redactor**:
 An in-flight data protection transform that masks sensitive personal or secret identifiers before text reaches a reasoning model or an external ticket comment, allowing execution to continue when sensitive data is the sole policy match.
 _Avoid_: Log scrubber, string sanitizer
+
+**Agent Gateway**:
+A governed ingress and egress data plane that mediates traffic into agents and from agents to external MCP tools, enforcing identity verification, content guardrails, and per-tool authorization rules on the wire.
+_Avoid_: API proxy, reverse proxy, load balancer
 
 **Unified Access Policy**:
 A principal-and-tool access rule evaluated at the Agent Gateway boundary that permits or denies individual MCP tool invocations based on workload identity and tool metadata.
