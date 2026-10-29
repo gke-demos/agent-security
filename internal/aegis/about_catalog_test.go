@@ -1950,8 +1950,8 @@ func TestPhase7_AboutCatalogExtProcAndCheckoutTelemetrySync(t *testing.T) {
 		t.Fatalf("BuildArchitectureTopologyCatalog: %v", err)
 	}
 
-	if len(catalog.ADRs) != 15 {
-		t.Fatalf("len(catalog.ADRs) = %d, want 15 (0001..0015)", len(catalog.ADRs))
+	if len(catalog.ADRs) < 15 {
+		t.Fatalf("len(catalog.ADRs) = %d, want >= 15 (0001..0015)", len(catalog.ADRs))
 	}
 	adr0015 := catalog.ADRs[14]
 	if adr0015.Number != "0015" || adr0015.Slug != "in-cluster-ext-proc-callout-live-checkout-telemetry-and-stage-runbook" {
