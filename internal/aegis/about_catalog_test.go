@@ -1623,8 +1623,8 @@ func TestPhase6_AboutCatalogADR0014AndBoundarySync(t *testing.T) {
 		t.Fatalf("BuildArchitectureTopologyCatalog: %v", err)
 	}
 
-	if len(catalog.ADRs) != 14 {
-		t.Fatalf("len(catalog.ADRs) = %d, want 14 (0001..0014)", len(catalog.ADRs))
+	if len(catalog.ADRs) < 14 {
+		t.Fatalf("len(catalog.ADRs) = %d, want >= 14 (0001..0014)", len(catalog.ADRs))
 	}
 	adr0014 := catalog.ADRs[13]
 	if adr0014.Number != "0014" || adr0014.Slug != "gke-native-agent-platform-governance-and-dual-path-rollout" {

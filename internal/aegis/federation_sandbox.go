@@ -245,12 +245,14 @@ func registerA2ARoutes(mux *http.ServeMux, rt *Runtime) {
 
 		dedupedPrompt := deduplicateA2ATextParts(rpcReq.Params.Message.Parts)
 		turnReq := TurnRequest{
-			SessionID:            sessionID,
-			Persona:              persona,
-			ScenarioID:           scenarioID,
-			Posture:              posture,
-			Prompt:               dedupedPrompt,
-			ForwardedBearerToken: forwardedToken,
+			SessionID:             sessionID,
+			Persona:               persona,
+			ScenarioID:            scenarioID,
+			Posture:               posture,
+			Prompt:                dedupedPrompt,
+			IngressAuthzExtension: strings.TrimSpace(r.Header.Get("X-Aegis-Authz-Extension")),
+			IngressExtProcVerdict: strings.TrimSpace(r.Header.Get("X-Aegis-Ext-Proc-Verdict")),
+			ForwardedBearerToken:  forwardedToken,
 		}
 
 		res, err := rt.ExecuteTurn(r.Context(), turnReq)

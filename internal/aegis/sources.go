@@ -104,6 +104,7 @@ func ConfigFromEnvWithLookup(getenv func(string) string, ghTokenFn func() string
 		AgentGatewayIngressURL:     strings.TrimSpace(getenv("AGENT_GATEWAY_INGRESS_URL")),
 		AgentGatewayEgressProxyURL: strings.TrimSpace(getenv("AGENT_GATEWAY_EGRESS_PROXY_URL")),
 		AgentGatewayRootCAPath:     strings.TrimSpace(getenv("AGENT_GATEWAY_ROOT_CA_PATH")),
+		ExtProcTLSAddr:             firstNonEmpty(strings.TrimSpace(getenv("EXT_PROC_TLS_ADDR")), ":8443"),
 	}
 
 	if cfg.GCPProjectID != "" {

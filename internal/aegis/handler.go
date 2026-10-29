@@ -59,6 +59,12 @@ func NewHandler(rt *Runtime) http.Handler {
 			return
 		}
 		req.SessionID = sessionID
+		if strings.TrimSpace(req.IngressAuthzExtension) == "" {
+			req.IngressAuthzExtension = strings.TrimSpace(r.Header.Get("X-Aegis-Authz-Extension"))
+		}
+		if strings.TrimSpace(req.IngressExtProcVerdict) == "" {
+			req.IngressExtProcVerdict = strings.TrimSpace(r.Header.Get("X-Aegis-Ext-Proc-Verdict"))
+		}
 		res, err := rt.ExecuteTurn(r.Context(), req)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -75,6 +81,12 @@ func NewHandler(rt *Runtime) http.Handler {
 			return
 		}
 		req.SessionID = sessionID
+		if strings.TrimSpace(req.IngressAuthzExtension) == "" {
+			req.IngressAuthzExtension = strings.TrimSpace(r.Header.Get("X-Aegis-Authz-Extension"))
+		}
+		if strings.TrimSpace(req.IngressExtProcVerdict) == "" {
+			req.IngressExtProcVerdict = strings.TrimSpace(r.Header.Get("X-Aegis-Ext-Proc-Verdict"))
+		}
 		sink := initSSESink(w)
 		if _, err := rt.ExecuteTurnStream(r.Context(), req, sink); err != nil {
 			writeSSEError(w, err)

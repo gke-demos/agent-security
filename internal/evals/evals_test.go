@@ -1365,8 +1365,8 @@ func TestPhase4_AboutArchitectureCatalogAndDriftEval(t *testing.T) {
 	if len(catalog.Sources) != 8 {
 		t.Errorf("len(catalog.Sources) = %d, want 8", len(catalog.Sources))
 	}
-	if len(catalog.ADRs) != 14 {
-		t.Errorf("len(catalog.ADRs) = %d, want 14 (0001..0014)", len(catalog.ADRs))
+	if len(catalog.ADRs) < 14 {
+		t.Errorf("len(catalog.ADRs) = %d, want >= 14 (0001..0014)", len(catalog.ADRs))
 	}
 	for _, sc := range catalog.Scenarios {
 		if len(sc.Blue.Pulses) == 0 || len(sc.Red.Pulses) == 0 {

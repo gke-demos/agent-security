@@ -224,6 +224,8 @@ type TurnRequest struct {
 	Prompt                string          `json:"prompt"`
 	CleanPIIOnly          bool            `json:"cleanPiiOnly,omitempty"`
 	RequireCold3LOConsent bool            `json:"requireCold3loConsent,omitempty"`
+	IngressAuthzExtension string          `json:"ingressAuthzExtension,omitempty"`
+	IngressExtProcVerdict string          `json:"ingressExtProcVerdict,omitempty"`
 	ForwardedBearerToken  string          `json:"-"`
 }
 
@@ -383,6 +385,7 @@ type RuntimeConfig struct {
 	AgentGatewayIngressURL     string
 	AgentGatewayEgressProxyURL string
 	AgentGatewayRootCAPath     string
+	ExtProcTLSAddr             string `json:"extProcTlsAddr,omitempty"`
 	HTTPClient                 *http.Client
 }
 
