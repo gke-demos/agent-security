@@ -362,6 +362,17 @@ func (r *Runtime) TokenBroker() *TokenBroker {
 	return tb
 }
 
+// GCPAuthProviderID returns the configured Agent Identity Auth Manager v1 AuthProvider
+// resource name (e.g., projects/${PROJECT_NUMBER}/locations/global/authProviders/aegis-github-provider)
+// from RuntimeConfig.GCPAuthProviderID. Per-persona 15-minute S256 Ephemeral PKCE Grants
+// (Alice vs. Bob) and seeded persona tokens remain first priority in Credential resolution.
+func (b *TokenBroker) GCPAuthProviderID() string {
+	if b == nil || b.rt == nil {
+		return ""
+	}
+	return strings.TrimSpace(b.rt.Config().GCPAuthProviderID)
+}
+
 // SetGCPClient configures the optional adk/v2/auth/gcp Client for IAM Connector / Agent Identity lookups.
 func (b *TokenBroker) SetGCPClient(client *gcp.Client) {
 	b.mu.Lock()
