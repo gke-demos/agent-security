@@ -2990,6 +2990,10 @@ func TestPhase8_FullDuplexStreamedExtProcGatewayBodyEchoAnd8Of8LiveSourcesEval(t
 		if err != nil {
 			t.Fatalf("GET /api/sources/status: %v", err)
 		}
+		if srcResp.StatusCode != http.StatusOK {
+			_ = srcResp.Body.Close()
+			t.Fatalf("GET /api/sources/status status = %d, want 200", srcResp.StatusCode)
+		}
 		var srcPayload struct {
 			Sources []aegis.SourceStatus `json:"sources"`
 		}
@@ -3229,6 +3233,32 @@ func TestPhase8_FullDuplexStreamedExtProcGatewayBodyEchoAnd8Of8LiveSourcesEval(t
 			}
 		}
 
+		localHTTPSrv := newLoopbackHTTPServer(t, aegis.NewHTTPHandler(localRT))
+		defer localHTTPSrv.Close()
+		localHTTPResp, err := localHTTPSrv.Client().Get(localHTTPSrv.URL + "/api/sources/status")
+		if err != nil {
+			t.Fatalf("GET %s/api/sources/status: %v", localHTTPSrv.URL, err)
+		}
+		localHTTPBytes, _ := io.ReadAll(localHTTPResp.Body)
+		_ = localHTTPResp.Body.Close()
+		if localHTTPResp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s/api/sources/status status = %d, want 200; body=%s", localHTTPSrv.URL, localHTTPResp.StatusCode, string(localHTTPBytes))
+		}
+		var localHTTPSources struct {
+			Sources []aegis.SourceStatus `json:"sources"`
+		}
+		if err := json.Unmarshal(localHTTPBytes, &localHTTPSources); err != nil {
+			t.Fatalf("Unmarshal local HTTP /api/sources/status: %v", err)
+		}
+		if len(localHTTPSources.Sources) != 8 {
+			t.Fatalf("local HTTP /api/sources/status len = %d, want 8", len(localHTTPSources.Sources))
+		}
+		for _, s := range localHTTPSources.Sources {
+			if s.Provenance != aegis.ProvenanceLive {
+				t.Errorf("local HTTP /api/sources/status source %s provenance = %q, want LIVE (8/8 LIVE)", s.ID, s.Provenance)
+			}
+		}
+
 		srcResp, err := gwClient.Get(baseURL + "/api/sources/status")
 		if err != nil {
 			t.Fatalf("GET %s/api/sources/status: %v", baseURL, err)
@@ -3321,23 +3351,24 @@ func TestPhase8_FullDuplexStreamedExtProcGatewayBodyEchoAnd8Of8LiveSourcesEval(t
 				sawCleanBodyAllow, sawAdvBodyBlocked, evPayload.Events)
 		}
 
-		// 2d. POST /api/sessions/eval-phase8-sse/turns/stream through Gateway/aegis-ingress-gateway returns HTTP 200 (text/event-stream) with all 6 SSE event types
+		// 2d. POST /api/sessions/{sessionId}/turns/stream through Gateway/aegis-ingress-gateway returns HTTP 200 (text/event-stream) with all 6 SSE event types
+		sseSessionID := fmt.Sprintf("eval-phase8-sse-%d", time.Now().UTC().UnixNano())
 		sseReqBody, _ := json.Marshal(aegis.TurnRequest{
-			SessionID:    "eval-phase8-sse",
+			SessionID:    sseSessionID,
 			Persona:      aegis.PersonaAlice,
 			ScenarioID:   aegis.Scenario01PromptInjectionAndPII,
 			Posture:      aegis.AllBluePosture(),
 			Prompt:       "Triage customer P0 checkout 502 escalation.",
 			CleanPIIOnly: true,
 		})
-		sseResp, err := gwClient.Post(baseURL+"/api/sessions/eval-phase8-sse/turns/stream", "application/json", bytes.NewReader(sseReqBody))
+		sseResp, err := gwClient.Post(baseURL+"/api/sessions/"+sseSessionID+"/turns/stream", "application/json", bytes.NewReader(sseReqBody))
 		if err != nil {
-			t.Fatalf("POST %s/api/sessions/eval-phase8-sse/turns/stream: %v", baseURL, err)
+			t.Fatalf("POST %s/api/sessions/%s/turns/stream: %v", baseURL, sseSessionID, err)
 		}
 		sseBytes, _ := io.ReadAll(sseResp.Body)
 		_ = sseResp.Body.Close()
 		if sseResp.StatusCode != http.StatusOK {
-			t.Fatalf("POST /api/sessions/eval-phase8-sse/turns/stream status = %d, want 200; body=%s", sseResp.StatusCode, string(sseBytes))
+			t.Fatalf("POST /api/sessions/%s/turns/stream status = %d, want 200; body=%s", sseSessionID, sseResp.StatusCode, string(sseBytes))
 		}
 		if ct := sseResp.Header.Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
 			t.Errorf("SSE Content-Type = %q, want text/event-stream", ct)

@@ -558,6 +558,49 @@ func TestExtProc_TLSHealthCheckAndGRPCStream(t *testing.T) {
 		if fn < 0 || fNum != 6 || fTyp != protowire.BytesType {
 			t.Fatalf("ProcessingResponse.response_trailers tag = (%d, %v), want (6, BytesType)", fNum, fTyp)
 		}
+
+		// 6. Verify standalone ProcessingRequest{protocol_config: ...} (tag 11) does not emit an unsolicited
+		// ProcessingResponse and cleanly processes subsequent request_headers (tag 2) and request_body (tag 4) frames.
+		stProtoCfg := openStream(t)
+		var protoCfg []byte
+		protoCfg = protowire.AppendTag(protoCfg, 1, protowire.VarintType)
+		protoCfg = protowire.AppendVarint(protoCfg, 3) // FULL_DUPLEX_STREAMED
+		var protoCfgReq []byte
+		protoCfgReq = protowire.AppendTag(protoCfgReq, 11, protowire.BytesType)
+		protoCfgReq = protowire.AppendBytes(protoCfgReq, protoCfg)
+		if err := stProtoCfg.SendMsg(&protoCfgReq); err != nil {
+			t.Fatalf("SendMsg(protocol_config) error = %v", err)
+		}
+		if err := stProtoCfg.SendMsg(&hdrCleanA2A); err != nil {
+			t.Fatalf("SendMsg(request_headers after protocol_config) error = %v", err)
+		}
+		if err := stProtoCfg.SendMsg(&encodedReqBody); err != nil {
+			t.Fatalf("SendMsg(request_body after protocol_config) error = %v", err)
+		}
+		_ = stProtoCfg.CloseSend()
+
+		var firstAfterProtoCfg []byte
+		if err := stProtoCfg.RecvMsg(&firstAfterProtoCfg); err != nil {
+			t.Fatalf("RecvMsg(1 after protocol_config) error = %v", err)
+		}
+		decFirst, err := aegis.DecodeExtProcResponse(firstAfterProtoCfg)
+		if err != nil || !decFirst.IsHeadersResponse || decFirst.Headers["x-aegis-ext-proc-verdict"] != "ALLOW" {
+			t.Fatalf("first response after protocol_config = %+v (err=%v), want IsHeadersResponse=true with ALLOW", decFirst, err)
+		}
+
+		var secondAfterProtoCfg []byte
+		if err := stProtoCfg.RecvMsg(&secondAfterProtoCfg); err != nil {
+			t.Fatalf("RecvMsg(2 after protocol_config) error = %v", err)
+		}
+		decSecond, err := aegis.DecodeExtProcResponse(secondAfterProtoCfg)
+		if err != nil || !decSecond.IsBodyResponse || !bytes.Equal(decSecond.StreamedBody, samplePayload) || !decSecond.StreamedEndOfStream {
+			t.Fatalf("second response after protocol_config = %+v (err=%v), want IsBodyResponse=true echoing samplePayload", decSecond, err)
+		}
+
+		var unexpectedThird []byte
+		if err := stProtoCfg.RecvMsg(&unexpectedThird); err != io.EOF {
+			t.Fatalf("RecvMsg(3 after CloseSend) err = %v, want io.EOF (no unsolicited response for protocol_config)", err)
+		}
 	})
 }
 

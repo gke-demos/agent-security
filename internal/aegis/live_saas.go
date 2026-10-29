@@ -78,16 +78,8 @@ func registerTargetSaaSHTTPRoutes(mux *http.ServeMux, rt *Runtime) {
 	})
 
 	mux.HandleFunc("GET /api/targets/jira/rest/api/3/issue/{key}", func(w http.ResponseWriter, r *http.Request) {
-		token, ok := extractTargetBearerToken(r)
+		key, ok := authorizeTargetJiraIssue(w, r, rt)
 		if !ok {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing bearer token"})
-			return
-		}
-		key := firstNonEmpty(strings.TrimSpace(r.PathValue("key")), "SEC-101")
-		if strings.EqualFold(key, "SEC-101") && isBobTargetToken(rt, token) {
-			writeJSON(w, http.StatusForbidden, map[string]any{
-				"errorMessages": []string{"Issue SEC-101 is restricted to SecOps Persona (Alice); contractor token denied."},
-			})
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -103,16 +95,8 @@ func registerTargetSaaSHTTPRoutes(mux *http.ServeMux, rt *Runtime) {
 	})
 
 	mux.HandleFunc("POST /api/targets/jira/rest/api/3/issue/{key}/comment", func(w http.ResponseWriter, r *http.Request) {
-		token, ok := extractTargetBearerToken(r)
+		key, ok := authorizeTargetJiraIssue(w, r, rt)
 		if !ok {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing bearer token"})
-			return
-		}
-		key := firstNonEmpty(strings.TrimSpace(r.PathValue("key")), "SEC-101")
-		if strings.EqualFold(key, "SEC-101") && isBobTargetToken(rt, token) {
-			writeJSON(w, http.StatusForbidden, map[string]any{
-				"errorMessages": []string{"Issue SEC-101 is restricted to SecOps Persona (Alice); contractor token denied."},
-			})
 			return
 		}
 		_, _ = io.ReadAll(io.LimitReader(r.Body, 1<<20))
@@ -121,6 +105,22 @@ func registerTargetSaaSHTTPRoutes(mux *http.ServeMux, rt *Runtime) {
 			"self": "https://jira.aegis.internal/rest/api/3/issue/" + key + "/comment/20001",
 		})
 	})
+}
+
+func authorizeTargetJiraIssue(w http.ResponseWriter, r *http.Request, rt *Runtime) (string, bool) {
+	token, ok := extractTargetBearerToken(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing bearer token"})
+		return "", false
+	}
+	key := firstNonEmpty(strings.TrimSpace(r.PathValue("key")), "SEC-101")
+	if strings.EqualFold(key, "SEC-101") && isBobTargetToken(rt, token) {
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"errorMessages": []string{"Issue SEC-101 is restricted to SecOps Persona (Alice); contractor token denied."},
+		})
+		return "", false
+	}
+	return key, true
 }
 
 func extractTargetBearerToken(r *http.Request) (string, bool) {

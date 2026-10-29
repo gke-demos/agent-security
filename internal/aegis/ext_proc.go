@@ -268,6 +268,15 @@ func (s *extProcServer) handleProcessStream(_ any, stream grpc.ServerStream) err
 		}
 
 		parsedReq := decodeExtProcProcessingRequest(rawReq)
+		if parsedReq.hasProtocolConfig &&
+			!parsedReq.hasRequestHeaders &&
+			!parsedReq.hasRequestBody &&
+			!parsedReq.hasResponseHeaders &&
+			!parsedReq.hasResponseBody &&
+			!parsedReq.hasRequestTrailers &&
+			!parsedReq.hasResponseTrailers {
+			continue
+		}
 		var respBytes []byte
 
 		switch {
@@ -336,13 +345,7 @@ func evaluateExtProcPhase(
 	promptScreenHeader := strings.TrimSpace(streamHeaders["x-aegis-prompt-screen"])
 	if strings.EqualFold(promptScreenHeader, "false") {
 		recordExtProcCalloutEvent(phaseName, path, "BYPASSED_RED", http.StatusOK)
-		if !isHeadersPhase {
-			return encodeExtProcStreamedBodyResponse(responseFieldNum, rawBody, endOfStream)
-		}
-		return encodeExtProcContinueResponse(responseFieldNum, map[string]string{
-			"x-aegis-authz-extension":  "verified",
-			"x-aegis-ext-proc-verdict": "BYPASSED_RED",
-		})
+		return encodeExtProcPhasePassResponse(responseFieldNum, isHeadersPhase, "BYPASSED_RED", rawBody, endOfStream)
 	}
 
 	screenRes := guard.InspectAndSanitize(ctx, candidateText, SecurityPosture{
@@ -360,13 +363,7 @@ func evaluateExtProcPhase(
 			return encodeExtProcImmediate403(reason)
 		}
 		recordExtProcCalloutEvent(phaseName, path, "MATCH_FOUND", http.StatusOK)
-		if !isHeadersPhase {
-			return encodeExtProcStreamedBodyResponse(responseFieldNum, rawBody, endOfStream)
-		}
-		return encodeExtProcContinueResponse(responseFieldNum, map[string]string{
-			"x-aegis-authz-extension":  "verified",
-			"x-aegis-ext-proc-verdict": "MATCH_FOUND",
-		})
+		return encodeExtProcPhasePassResponse(responseFieldNum, isHeadersPhase, "MATCH_FOUND", rawBody, endOfStream)
 	}
 
 	verdict := "ALLOW"
@@ -374,6 +371,16 @@ func evaluateExtProcPhase(
 		verdict = "MATCH_FOUND"
 	}
 	recordExtProcCalloutEvent(phaseName, path, verdict, http.StatusOK)
+	return encodeExtProcPhasePassResponse(responseFieldNum, isHeadersPhase, verdict, rawBody, endOfStream)
+}
+
+func encodeExtProcPhasePassResponse(
+	responseFieldNum protowire.Number,
+	isHeadersPhase bool,
+	verdict string,
+	rawBody []byte,
+	endOfStream bool,
+) []byte {
 	if !isHeadersPhase {
 		return encodeExtProcStreamedBodyResponse(responseFieldNum, rawBody, endOfStream)
 	}
@@ -401,6 +408,7 @@ type decodedProcessingRequest struct {
 	hasResponseBody     bool
 	hasRequestTrailers  bool
 	hasResponseTrailers bool
+	hasProtocolConfig   bool
 	headers             map[string]string
 	body                []byte
 	endOfStream         bool
@@ -489,6 +497,16 @@ func decodeExtProcProcessingRequest(b []byte) decodedProcessingRequest {
 				}
 				b = b[m:]
 				res.hasResponseTrailers = true
+				continue
+			}
+		case 11: // protocol_config (ProtocolConfiguration)
+			if typ == protowire.BytesType {
+				_, m := protowire.ConsumeBytes(b)
+				if m < 0 {
+					return res
+				}
+				b = b[m:]
+				res.hasProtocolConfig = true
 				continue
 			}
 		}
@@ -683,16 +701,21 @@ func encodeExtProcContinueResponse(responseFieldNum protowire.Number, setHeaders
 	return procResp
 }
 
-func encodeExtProcStreamedBodyResponse(responseFieldNum protowire.Number, body []byte, endOfStream bool) []byte {
-	var streamedBody []byte
+func encodeExtProcBodyAndEOS(body []byte, endOfStream bool) []byte {
+	var b []byte
 	if len(body) > 0 {
-		streamedBody = protowire.AppendTag(streamedBody, 1, protowire.BytesType)
-		streamedBody = protowire.AppendBytes(streamedBody, body)
+		b = protowire.AppendTag(b, 1, protowire.BytesType)
+		b = protowire.AppendBytes(b, body)
 	}
 	if endOfStream {
-		streamedBody = protowire.AppendTag(streamedBody, 2, protowire.VarintType)
-		streamedBody = protowire.AppendVarint(streamedBody, 1)
+		b = protowire.AppendTag(b, 2, protowire.VarintType)
+		b = protowire.AppendVarint(b, 1)
 	}
+	return b
+}
+
+func encodeExtProcStreamedBodyResponse(responseFieldNum protowire.Number, body []byte, endOfStream bool) []byte {
+	streamedBody := encodeExtProcBodyAndEOS(body, endOfStream)
 
 	// BodyMutation { streamed_response (field 3) = StreamedBodyResponse }
 	var bodyMutation []byte
@@ -784,15 +807,7 @@ func EncodeExtProcRequestHeaders(headers map[string]string, useRawValue bool) []
 
 // EncodeExtProcRequestBody encodes a ProcessingRequest{request_body: ...} frame for testing.
 func EncodeExtProcRequestBody(body []byte, endOfStream bool) []byte {
-	var httpBody []byte
-	if len(body) > 0 {
-		httpBody = protowire.AppendTag(httpBody, 1, protowire.BytesType)
-		httpBody = protowire.AppendBytes(httpBody, body)
-	}
-	if endOfStream {
-		httpBody = protowire.AppendTag(httpBody, 2, protowire.VarintType)
-		httpBody = protowire.AppendVarint(httpBody, 1)
-	}
+	httpBody := encodeExtProcBodyAndEOS(body, endOfStream)
 
 	var req []byte
 	req = protowire.AppendTag(req, 4, protowire.BytesType)
@@ -883,36 +898,7 @@ func decodeExtProcBodyMutation(b []byte, out *ExtProcDecodedResponse) {
 }
 
 func decodeExtProcStreamedBodyResponse(b []byte, out *ExtProcDecodedResponse) {
-	for len(b) > 0 {
-		num, typ, n := protowire.ConsumeTag(b)
-		if n < 0 {
-			break
-		}
-		b = b[n:]
-		switch {
-		case num == 1 && typ == protowire.BytesType:
-			val, m := protowire.ConsumeBytes(b)
-			if m < 0 {
-				return
-			}
-			b = b[m:]
-			out.StreamedBody = val
-			continue
-		case num == 2 && typ == protowire.VarintType:
-			val, m := protowire.ConsumeVarint(b)
-			if m < 0 {
-				return
-			}
-			b = b[m:]
-			out.StreamedEndOfStream = val != 0
-			continue
-		}
-		m := protowire.ConsumeFieldValue(num, typ, b)
-		if m < 0 {
-			break
-		}
-		b = b[m:]
-	}
+	out.StreamedBody, out.StreamedEndOfStream = parseExtProcHttpBody(b)
 }
 
 func decodeExtProcHeaderMutation(b []byte, headers map[string]string) {
