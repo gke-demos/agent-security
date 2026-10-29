@@ -1535,6 +1535,19 @@ func canonicalADRCatalogEntries() []ADRCatalogEntry {
 				BoundaryCrossAgentA2A,
 			},
 		},
+		{
+			Number:   "0014",
+			Slug:     "gke-native-agent-platform-governance-and-dual-path-rollout",
+			FileName: "0014-gke-native-agent-platform-governance-and-dual-path-rollout.md",
+			Title:    "GKE-Native Gemini Enterprise Agent Platform Governance and Dual-Path In-Cluster Rollout",
+			Summary:  "Upgrades AegisSRE to live GKE 1.37 GCPAgentGateway + GCPAuthzPolicy, Cloud AGENT_TO_ANYWHERE UAP Policy V2, Pod Agent Identity SPIFFE SVIDs, and Dual-Path Blue-Governed vs. Red-Bypass in-cluster rollout.",
+			PrimaryBoundaries: []BoundaryID{
+				BoundaryPlatformGovernance,
+				BoundaryIdentity3LO,
+				BoundaryReasoningGuard,
+				BoundaryCrossAgentA2A,
+			},
+		},
 	}
 	for i := range entries {
 		if entries[i].Status == "" {
