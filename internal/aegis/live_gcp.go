@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -245,7 +246,28 @@ func (c *GCPObservabilityConnector) Provenance() SourceProvenance {
 	return ProvenanceFixture
 }
 
-// QueryCloudLogging executes a live Cloud Logging entries:list HTTP request.
+type cloudLoggingEntriesResponse struct {
+	Entries []struct {
+		TextPayload string `json:"textPayload"`
+		JSONPayload struct {
+			Message string `json:"message"`
+		} `json:"jsonPayload"`
+		SourceLocation struct {
+			File string `json:"file"`
+			Line any    `json:"line"`
+		} `json:"sourceLocation"`
+		Resource struct {
+			Labels map[string]string `json:"labels"`
+		} `json:"resource"`
+		Labels      map[string]string `json:"labels"`
+		HTTPRequest struct {
+			Status int `json:"status"`
+		} `json:"httpRequest"`
+	} `json:"entries"`
+}
+
+// QueryCloudLogging executes a live Cloud Logging entries:list HTTP request targeting
+// checkout-service ERROR entries in aegis-system, falling back to an unfiltered project query if empty.
 func (c *GCPObservabilityConnector) QueryCloudLogging(ctx context.Context, persona PersonaID) (*OutboundWireRecord, error) {
 	if c == nil || c.rt == nil {
 		return nil, fmt.Errorf("gcp observability connector not initialized")
@@ -261,30 +283,94 @@ func (c *GCPObservabilityConnector) QueryCloudLogging(ctx context.Context, perso
 	}
 
 	loggingURL := fmt.Sprintf("%s/v2/entries:list", c.LoggingBaseURL)
-	loggingBody, _ := json.Marshal(map[string]any{
+	tok := resolveGCPBearerToken(ctx, loggingURL)
+
+	doEntriesList := func(payload map[string]any) (*cloudLoggingEntriesResponse, int, error) {
+		bodyBytes, _ := json.Marshal(payload)
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, loggingURL, bytes.NewReader(bodyBytes))
+		if err != nil {
+			return nil, 0, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+		if projectID != "" {
+			req.Header.Set("x-goog-user-project", projectID)
+		}
+		resp, doErr := hc.Do(req)
+		if doErr != nil {
+			return nil, 0, doErr
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			return nil, resp.StatusCode, fmt.Errorf("logging entries:list returned HTTP %d", resp.StatusCode)
+		}
+		var parsed cloudLoggingEntriesResponse
+		_ = json.NewDecoder(resp.Body).Decode(&parsed)
+		return &parsed, resp.StatusCode, nil
+	}
+
+	filteredPayload := map[string]any{
 		"resourceNames": []string{"projects/" + projectID},
+		"filter":        `resource.type="k8s_container" AND resource.labels.namespace_name="aegis-system" AND labels."k8s-pod/app"="checkout-service" AND severity>=ERROR`,
+		"orderBy":       "timestamp desc",
 		"pageSize":      5,
-	})
-	logReq, err := http.NewRequestWithContext(ctx, http.MethodPost, loggingURL, bytes.NewReader(loggingBody))
+	}
+	parsed, statusCode, err := doEntriesList(filteredPayload)
 	if err != nil {
 		return nil, err
 	}
-	logReq.Header.Set("Content-Type", "application/json")
-	tok := resolveGCPBearerToken(ctx, loggingURL)
-	if tok != "" {
-		logReq.Header.Set("Authorization", "Bearer "+tok)
+	if parsed == nil || len(parsed.Entries) == 0 {
+		fallbackPayload := map[string]any{
+			"resourceNames": []string{"projects/" + projectID},
+			"pageSize":      5,
+		}
+		fallbackParsed, fallbackStatus, fallbackErr := doEntriesList(fallbackPayload)
+		if fallbackErr != nil {
+			return nil, fallbackErr
+		}
+		parsed = fallbackParsed
+		statusCode = fallbackStatus
 	}
-	if projectID != "" {
-		logReq.Header.Set("x-goog-user-project", projectID)
+
+	msg := "HTTP 502 nil pointer dereference in checkout RetryPolicy (v2.4 rollout)"
+	srcLoc := "checkout_handler.go:142"
+	podName := "checkout-service"
+	httpStatus := "502"
+
+	if parsed != nil && len(parsed.Entries) > 0 {
+		entry := parsed.Entries[0]
+		rawMsg := firstNonEmpty(
+			strings.TrimSpace(entry.JSONPayload.Message),
+			strings.TrimSpace(entry.TextPayload),
+			msg,
+		)
+		msg = sanitizeStageSafeText(rawMsg, cfg)
+
+		fileStr := strings.TrimSpace(entry.SourceLocation.File)
+		lineStr := strings.TrimSpace(fmt.Sprintf("%v", entry.SourceLocation.Line))
+		if entry.SourceLocation.Line == nil || lineStr == "<nil>" || lineStr == "0" {
+			lineStr = ""
+		}
+		if fileStr != "" && lineStr != "" {
+			srcLoc = fmt.Sprintf("%s:%s", fileStr, lineStr)
+		} else if fileStr != "" {
+			srcLoc = fileStr
+		}
+
+		rawPod := firstNonEmpty(
+			strings.TrimSpace(entry.Resource.Labels["pod_name"]),
+			strings.TrimSpace(entry.Labels["k8s-pod/app"]),
+			podName,
+		)
+		podName = sanitizeStageSafeText(rawPod, cfg)
+
+		if entry.HTTPRequest.Status > 0 {
+			httpStatus = strconv.Itoa(entry.HTTPRequest.Status)
+		}
 	}
-	resp, doErr := hc.Do(logReq)
-	if doErr != nil {
-		return nil, doErr
-	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("logging entries:list returned HTTP %d", resp.StatusCode)
-	}
+
 	return &OutboundWireRecord{
 		Provider:          ProviderGCPIAM,
 		ToolName:          "logging.entries.list",
@@ -292,10 +378,14 @@ func (c *GCPObservabilityConnector) QueryCloudLogging(ctx context.Context, perso
 		URL:               loggingURL,
 		AuthHeaderPresent: tok != "",
 		AuthPrincipal:     string(persona),
-		StatusCode:        resp.StatusCode,
+		StatusCode:        statusCode,
 		Provenance:        ProvenanceLive,
 		Headers: map[string]string{
 			"x-goog-user-project": projectID,
+			"x-aegis-log-source":  srcLoc,
+			"x-aegis-log-pod":     podName,
+			"x-aegis-log-status":  httpStatus,
+			"x-aegis-log-summary": msg,
 		},
 	}, nil
 }

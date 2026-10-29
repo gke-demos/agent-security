@@ -52,7 +52,9 @@ else
 fi
 render_manifest manifests/02-aegis-deployment.yaml | kubectl --context "${KUBE_CONTEXT}" apply -f -
 render_manifest manifests/03-gke-diy-agent-gateway.yaml | kubectl --context "${KUBE_CONTEXT}" apply -f -
+render_manifest manifests/04-checkout-target-workload.yaml | kubectl --context "${KUBE_CONTEXT}" apply -f -
 
-echo "==> Waiting for deployment/aegis-sre in namespace aegis-system..."
+echo "==> Waiting for deployment/aegis-sre and deployment/checkout-service in namespace aegis-system..."
 kubectl --context "${KUBE_CONTEXT}" -n aegis-system rollout status deployment/aegis-sre --timeout=120s
+kubectl --context "${KUBE_CONTEXT}" -n aegis-system rollout status deployment/checkout-service --timeout=120s
 echo "==> AegisSRE deployed cleanly."

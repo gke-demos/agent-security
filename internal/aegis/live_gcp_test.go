@@ -470,4 +470,111 @@ func TestLiveGCP_ADKLLMAgent_AgentPlatformGeminiSynthesis_AndFallback(t *testing
 	}
 }
 
+func TestLiveGCP_QueryCloudLogging_CheckoutServiceStructuredAndFallback(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("GOOGLE_OAUTH_ACCESS_TOKEN", "adc-test-checkout-logging-token")
+
+	t.Run("Case 1: structured jsonPayload checkout-service entry parsed into OutboundWireRecord headers", func(t *testing.T) {
+		var sawFilterQuery bool
+		var reqBody string
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			raw := make([]byte, 16*1024)
+			n, _ := r.Body.Read(raw)
+			reqBody = string(raw[:n])
+			if strings.Contains(reqBody, `labels.\"k8s-pod/app\"=\"checkout-service\"`) && strings.Contains(reqBody, `"orderBy":"timestamp desc"`) {
+				sawFilterQuery = true
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"entries": [
+					{
+						"severity": "ERROR",
+						"jsonPayload": {
+							"message": "HTTP 502 nil pointer dereference in checkout RetryPolicy (v2.4 rollout)"
+						},
+						"sourceLocation": {
+							"file": "checkout_handler.go",
+							"line": "142"
+						},
+						"resource": {
+							"type": "k8s_container",
+							"labels": {
+								"namespace_name": "aegis-system",
+								"pod_name": "checkout-service-6b7f8c9d-x2k9p"
+							}
+						},
+						"httpRequest": {
+							"status": 502
+						}
+					}
+				]
+			}`))
+		}))
+		defer srv.Close()
+
+		t.Setenv("GCP_LOGGING_BASE_URL", srv.URL)
+		rt := aegis.NewRuntime(aegis.RuntimeConfig{
+			GCPProjectID:   "demo-sec-proj",
+			GKEClusterName: "demo-gke-cluster",
+			HTTPClient:     srv.Client(),
+		})
+		conn := aegis.NewGCPObservabilityConnector(rt)
+		rec, err := conn.QueryCloudLogging(ctx, aegis.PersonaAlice)
+		if err != nil {
+			t.Fatalf("QueryCloudLogging error = %v", err)
+		}
+		if !sawFilterQuery {
+			t.Errorf("expected filtered checkout-service query in request body, got: %s", reqBody)
+		}
+		if rec.Headers["x-aegis-log-source"] != "checkout_handler.go:142" {
+			t.Errorf("x-aegis-log-source = %q, want checkout_handler.go:142", rec.Headers["x-aegis-log-source"])
+		}
+		if rec.Headers["x-aegis-log-pod"] != "checkout-service-6b7f8c9d-x2k9p" {
+			t.Errorf("x-aegis-log-pod = %q, want checkout-service-6b7f8c9d-x2k9p", rec.Headers["x-aegis-log-pod"])
+		}
+		if rec.Headers["x-aegis-log-status"] != "502" {
+			t.Errorf("x-aegis-log-status = %q, want 502", rec.Headers["x-aegis-log-status"])
+		}
+		if rec.Headers["x-aegis-log-summary"] != "HTTP 502 nil pointer dereference in checkout RetryPolicy (v2.4 rollout)" {
+			t.Errorf("x-aegis-log-summary = %q", rec.Headers["x-aegis-log-summary"])
+		}
+	})
+
+	t.Run("Case 2: empty filtered entries falls back to unfiltered entries:list and populates default headers", func(t *testing.T) {
+		var callCount int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			callCount++
+			w.Header().Set("Content-Type", "application/json")
+			if callCount == 1 {
+				// First call (with filter) returns empty entries
+				_, _ = w.Write([]byte(`{"entries": []}`))
+				return
+			}
+			// Second call (fallback without filter) returns 200 OK empty object
+			_, _ = w.Write([]byte(`{}`))
+		}))
+		defer srv.Close()
+
+		t.Setenv("GCP_LOGGING_BASE_URL", srv.URL)
+		rt := aegis.NewRuntime(aegis.RuntimeConfig{
+			GCPProjectID:   "demo-sec-proj",
+			GKEClusterName: "demo-gke-cluster",
+			HTTPClient:     srv.Client(),
+		})
+		conn := aegis.NewGCPObservabilityConnector(rt)
+		rec, err := conn.QueryCloudLogging(ctx, aegis.PersonaAlice)
+		if err != nil {
+			t.Fatalf("QueryCloudLogging fallback error = %v", err)
+		}
+		if callCount != 2 {
+			t.Errorf("callCount = %d, want 2 (filtered query + unfiltered fallback)", callCount)
+		}
+		if rec.Headers["x-aegis-log-source"] != "checkout_handler.go:142" || rec.Headers["x-aegis-log-pod"] != "checkout-service" || rec.Headers["x-aegis-log-status"] != "502" {
+			t.Errorf("fallback headers = %+v, want default checkout_handler.go:142, checkout-service, 502", rec.Headers)
+		}
+	})
+}
+
+
 

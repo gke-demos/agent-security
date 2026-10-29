@@ -69,6 +69,77 @@ spec:
       kind: Gateway
       name: aegis-ingress-gateway
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aegis-model-armor-ext-proc
+  namespace: aegis-system
+  labels:
+    app.kubernetes.io/name: aegis-sre
+  annotations:
+    cloud.google.com/neg: '{"ingress":true}'
+spec:
+  selector:
+    app: aegis-sre
+  ports:
+    - name: grpc-ext-proc
+      port: 443
+      targetPort: 8443
+      protocol: TCP
+      appProtocol: HTTP2
+---
+apiVersion: networking.gke.io/v1
+kind: GCPAuthzExtension
+metadata:
+  name: aegis-model-armor-ext-proc
+  namespace: aegis-system
+  labels:
+    app.kubernetes.io/name: aegis-sre
+spec:
+  # In-cluster ExtProcGRPC callout invoking regional Model Armor (modelarmor.${GCP_LOCATION}.rep.googleapis.com / modelarmor.${REGION}.rep.googleapis.com:443)
+  authority: aegis-model-armor-ext-proc.aegis-system.svc.cluster.local
+  timeout: 2000ms
+  failOpen: false
+  wireFormat: ExtProcGRPC
+  backendRef:
+    group: ""
+    kind: Service
+    name: aegis-model-armor-ext-proc
+    port: 443
+---
+apiVersion: networking.gke.io/v1
+kind: GCPTrafficExtension
+metadata:
+  name: aegis-model-armor-body-ext
+  namespace: aegis-system
+  labels:
+    app.kubernetes.io/name: aegis-sre
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: aegis-ingress-gateway
+  extensionChains:
+    - name: model-armor-body-chain
+      matchCondition:
+        celExpressions:
+          - celMatcher: "request.method == 'POST' && (request.path == '/a2a' || request.path.startsWith('/api/sessions/'))"
+      extensions:
+        - name: model-armor-ext-proc
+          authority: aegis-model-armor-ext-proc.aegis-system.svc.cluster.local
+          timeout: 2000ms
+          failOpen: false
+          supportedEvents:
+            - RequestHeaders
+            - RequestBody
+            - RequestTrailers
+          requestBodySendMode: FullDuplexStreamed
+          backendRef:
+            group: ""
+            kind: Service
+            name: aegis-model-armor-ext-proc
+            port: 443
+---
 apiVersion: networking.gke.io/v1
 kind: GCPAuthzExtension
 metadata:
@@ -136,6 +207,16 @@ spec:
                 value: /mcp
               - type: Exact
                 value: /healthz
+# REQUEST_AUTHZ custom provider binding invoking the in-cluster :8443 ExtProcGRPC
+# GCPAuthzExtension/aegis-model-armor-ext-proc callout on POST /a2a and /api/sessions/*:
+#   enforcementLevel: L7
+#   policyProfile: REQUEST_AUTHZ
+#   action: CUSTOM
+#   customProviders:
+#     extensionRefs:
+#       - group: networking.gke.io
+#         kind: GCPAuthzExtension
+#         name: aegis-model-armor-ext-proc
 # Optional GKE 1.37+ Agent Policy profile when the hosted GKE Gateway controller
 # has `enable_gcp_agent_gateway_policy` enabled:
 #   policyProfile: CONTENT_AUTHZ

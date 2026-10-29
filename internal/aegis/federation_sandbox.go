@@ -252,6 +252,7 @@ func registerA2ARoutes(mux *http.ServeMux, rt *Runtime) {
 			Prompt:               dedupedPrompt,
 			ForwardedBearerToken: forwardedToken,
 		}
+		applyIngressExtProcHeaders(&turnReq, r.Header)
 
 		res, err := rt.ExecuteTurn(r.Context(), turnReq)
 		if err != nil {

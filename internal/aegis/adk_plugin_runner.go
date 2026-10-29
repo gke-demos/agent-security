@@ -157,6 +157,27 @@ func (tc *adkActiveTurnContext) addStep(ev BoundaryTraceEvent) {
 			ev.Detail = fmt.Sprintf("%s · %s", ev.Detail, clientToAgentGatewayPostureDetail(tc.rt))
 		}
 	}
+	if ev.Boundary == BoundaryReasoningGuard || ev.Boundary == BoundaryGenerativeUI {
+		hasIngressHeader := strings.TrimSpace(tc.req.IngressAuthzExtension) != "" || strings.TrimSpace(tc.req.IngressExtProcVerdict) != ""
+		hasGatewayIngress := tc.req.Posture.PromptScreenEnabled && tc.rt != nil && strings.TrimSpace(tc.rt.cfg.AgentGatewayIngressURL) != ""
+		if hasIngressHeader || hasGatewayIngress {
+			if ev.Metadata == nil {
+				ev.Metadata = make(map[string]string)
+			}
+			defaultVerdict := "ALLOW"
+			if ev.Verdict == VerdictBlocked {
+				defaultVerdict = "MATCH_FOUND"
+			} else if ev.Verdict == VerdictBypassedRed || !tc.req.Posture.PromptScreenEnabled {
+				defaultVerdict = "BYPASSED_RED"
+			}
+			if ev.Metadata["authzExtension"] == "" {
+				ev.Metadata["authzExtension"] = firstNonEmpty(strings.TrimSpace(tc.req.IngressAuthzExtension), "aegis-model-armor-ext-proc")
+			}
+			if ev.Metadata["extProcVerdict"] == "" {
+				ev.Metadata["extProcVerdict"] = firstNonEmpty(strings.TrimSpace(tc.req.IngressExtProcVerdict), defaultVerdict)
+			}
+		}
+	}
 	if ev.Boundary == BoundaryCrossAgentA2A && ev.Verdict != VerdictBypassedRed && (tc.req.Posture.SandboxEgressMITMEnabled || tc.req.Posture.PromptScreenEnabled) {
 		if !strings.Contains(ev.Detail, "GCPAgentGateway/aegis-client-to-agent-gateway") {
 			ev.Detail = fmt.Sprintf("%s · %s", ev.Detail, clientToAgentGatewayPostureDetail(tc.rt))
@@ -569,10 +590,12 @@ func buildUnifiedGovernedADKTools(r *Runtime) ([]tool.Tool, []string, error) {
 						tc.addWire(*rec)
 						tc.markGovernanceLive()
 						return map[string]any{
-							"status":     "OK",
-							"tool":       "logging.entries.list",
-							"provenance": string(ProvenanceLive),
-							"summary":    "HTTP 502 nil pointer dereference in checkout RetryPolicy (v2.4 rollout)",
+							"status":         "OK",
+							"tool":           "logging.entries.list",
+							"provenance":     string(ProvenanceLive),
+							"summary":        firstNonEmpty(rec.Headers["x-aegis-log-summary"], "HTTP 502 nil pointer dereference in checkout RetryPolicy (v2.4 rollout)"),
+							"sourceLocation": firstNonEmpty(rec.Headers["x-aegis-log-source"], "checkout_handler.go:142"),
+							"pod":            firstNonEmpty(rec.Headers["x-aegis-log-pod"], "checkout-service"),
 						}, nil
 					}
 				}

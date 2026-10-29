@@ -71,6 +71,17 @@ func NewContentGuard(cfg RuntimeConfig) *ContentGuard {
 	}
 }
 
+// ScreenPrompt screens text with explicit PromptScreenEnabled and PIIRedactorEnabled flags.
+func (g *ContentGuard) ScreenPrompt(text string, promptScreenEnabled, piiRedactorEnabled bool) GuardInspectionResult {
+	if g == nil {
+		return GuardInspectionResult{OriginalText: text, SanitizedText: text, Provenance: ProvenanceFixture}
+	}
+	return g.InspectAndSanitize(context.Background(), text, SecurityPosture{
+		PromptScreenEnabled: promptScreenEnabled,
+		PIIRedactorEnabled:  piiRedactorEnabled,
+	})
+}
+
 // InspectAndSanitize screens text according to the session's SecurityPosture (ADR-0005):
 // - If PromptScreenEnabled is true and Prompt Injection / Jailbreak or Malicious URI matches,
 //   it hard-blocks immediately.
