@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -1614,3 +1615,256 @@ func TestPortal_AboutInterZoneCalloutClearanceAndLightModeZeroShift(t *testing.T
 		}
 	}
 }
+
+func TestPhase6_AboutCatalogADR0014AndBoundarySync(t *testing.T) {
+	rt := aegis.NewRuntime(aegis.RuntimeConfig{})
+	catalog, err := rt.BuildArchitectureTopologyCatalog(t.Context())
+	if err != nil {
+		t.Fatalf("BuildArchitectureTopologyCatalog: %v", err)
+	}
+
+	if len(catalog.ADRs) != 14 {
+		t.Fatalf("len(catalog.ADRs) = %d, want 14 (0001..0014)", len(catalog.ADRs))
+	}
+	adr0014 := catalog.ADRs[13]
+	if adr0014.Number != "0014" || adr0014.Slug != "gke-native-agent-platform-governance-and-dual-path-rollout" {
+		t.Errorf("catalog.ADRs[13] = (%s, %s), want (0014, gke-native-agent-platform-governance-and-dual-path-rollout)", adr0014.Number, adr0014.Slug)
+	}
+
+	byBoundary := map[aegis.BoundaryID]aegis.BoundaryCatalogNode{}
+	for _, b := range catalog.Boundaries {
+		byBoundary[b.ID] = b
+		if len(b.BlueSummary) > 140 {
+			t.Errorf("Boundary %s BlueSummary length = %d, want <= 140 (%q)", b.ID, len(b.BlueSummary), b.BlueSummary)
+		}
+		if len(b.RedSummary) > 140 {
+			t.Errorf("Boundary %s RedSummary length = %d, want <= 140 (%q)", b.ID, len(b.RedSummary), b.RedSummary)
+		}
+	}
+
+	containsADR := func(nums []string, want string) bool {
+		for _, n := range nums {
+			if n == want {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, wantB := range []aegis.BoundaryID{
+		aegis.BoundaryReasoningGuard,
+		aegis.BoundaryIdentity3LO,
+		aegis.BoundaryPlatformGovernance,
+		aegis.BoundaryCrossAgentA2A,
+	} {
+		node := byBoundary[wantB]
+		if !containsADR(node.ADRNumbers, "0014") {
+			t.Errorf("Boundary %s ADRNumbers = %v, want 0014 included", wantB, node.ADRNumbers)
+		}
+	}
+
+	b3 := byBoundary[aegis.BoundaryIdentity3LO]
+	b3Joined := b3.ComponentName + " " + b3.BlueDefenseMechanism
+	for _, term := range []string{"Agent Identity", "SPIFFE", "S256", "PKCE", "15m", "TokenBroker"} {
+		if !strings.Contains(b3Joined, term) {
+			t.Errorf("BoundaryIdentity3LO must reference %q, got %q", term, b3Joined)
+		}
+	}
+
+	b4 := byBoundary[aegis.BoundaryPlatformGovernance]
+	b4Joined := b4.ComponentName + " " + b4.BlueDefenseMechanism
+	for _, term := range []string{"GCPAgentGateway", "GCPAuthzPolicy", "UAP Policy V2", "Agent Registry", "roles/iap.egressor"} {
+		if !strings.Contains(b4Joined, term) {
+			t.Errorf("BoundaryPlatformGovernance must reference %q, got %q", term, b4Joined)
+		}
+	}
+}
+
+func TestPhase6_ParameterizedManifestsAndAmbientEgressOverlay(t *testing.T) {
+	repoRoot := filepath.Clean("../..")
+
+	manifestChecks := map[string][]string{
+		"manifests/02-aegis-deployment.yaml": {
+			"kind: Deployment",
+			"name: aegis-sre",
+			"namespace: aegis-system",
+			`registry.gke.io/functional-type: "AGENT"`,
+			`a2a-protocol.org/agent-card: '{"protocolVersion":"0.3.0","card":{"uriPath":"/.well-known/agent-card.json","port":8080,"protocol":"HTTP"}}'`,
+			`iam.gke.io/spiffe-identity-type: "agent-identity"`,
+			`iam.gke.io/identity: "spiffe://agents.global.org-${ORG_ID}.system.id.goog/*"`,
+			`iam.gke.io/inject-podcertificates: "true"`,
+			"image: us-central1-docker.pkg.dev/${PROJECT_ID}/aegis/aegis-server:latest",
+			"GOOGLE_CLOUD_PROJECT",
+			"${PROJECT_ID}",
+			"GOOGLE_CLOUD_LOCATION",
+			"${REGION}",
+			"GKE_CLUSTER_NAME",
+			"${CLUSTER_NAME}",
+			"GOOGLE_API_ENABLE_RUNTIME_BOUND_TOKEN",
+			"AGENT_PLATFORM_LIVE_LLM",
+			"LIVE_SUBSTRATE",
+			"SUBSTRATE_GATEWAY_URL",
+			"http://atenet-router.ate-system.svc.cluster.local/sandbox/execute",
+			"SUBSTRATE_TARGET_ACTOR",
+			"aegis-system/remediator-1",
+			"SPIFFE_CREDENTIAL_BUNDLE_PATH",
+			"/var/run/secrets/workload-spiffe-credentials/x509.credential-bundle.private-key.pem",
+			"kind: Service",
+			"name: a2a-http",
+			"port: 80",
+			"port: 8080",
+		},
+		"manifests/03-gke-diy-agent-gateway.yaml": {
+			"apiVersion: gateway.networking.k8s.io/v1",
+			"kind: Gateway",
+			"name: aegis-ingress-gateway",
+			"gatewayClassName: gke-l7-regional-external-managed",
+			"kind: HTTPRoute",
+			"name: aegis-a2a-route",
+			"/.well-known/agent-card.json",
+			"/a2a",
+			"/mcp",
+			"/about",
+			"/healthz",
+			"apiVersion: networking.gke.io/v1",
+			"kind: GCPAgentGateway",
+			"name: aegis-client-to-agent-gateway",
+			"//agentregistry.googleapis.com/projects/${PROJECT_ID}/locations/global",
+			"//agentregistry.googleapis.com/projects/${PROJECT_ID}/locations/${REGION}",
+			"kind: GCPAuthzExtension",
+			"name: aegis-modelarmor-content-ext",
+			"modelarmor.${REGION}.rep.googleapis.com:443",
+			"X-Goog-User-Project",
+			"model_armor_settings",
+			"projects/${PROJECT_ID}/locations/${REGION}/templates/aegis-prompt-screen",
+			"name: aegis-iap-request-ext",
+			"iap.googleapis.com:443",
+			"kind: GCPAuthzPolicy",
+			"name: aegis-a2a-ingress-policy",
+			"enforcementLevel: L7",
+			"action: ALLOW",
+			"CONTENT_AUTHZ",
+			"MATCH_BASE_PROTOCOL_METHODS",
+			"enable_gcp_agent_gateway_policy",
+		},
+		"manifests/agw-egress-config.yaml": {
+			"googleManaged:",
+			"governedAccessPath: AGENT_TO_ANYWHERE",
+			"protocols:",
+			"- MCP",
+			"registries:",
+			"//agentregistry.googleapis.com/projects/${PROJECT_ID}/locations/global",
+			"//agentregistry.googleapis.com/projects/${PROJECT_ID}/locations/${REGION}",
+			"https://logging.googleapis.com/mcp",
+			"https://container.googleapis.com/mcp",
+			"https://api.github.com/mcp",
+			"https://api.atlassian.com/mcp",
+		},
+		"manifests/iap-policy.json": {
+			"aegis-egress-uap",
+			"iap.googleapis.com/resources.egressViaIAP",
+			"principal://agents.global.org-${ORG_ID}.system.id.goog/resources/container/projects/${PROJECT_NUMBER}/locations/${CLUSTER_LOCATION}/clusters/${CLUSTER_NAME}/ns/aegis-system/sa/aegis-sre",
+			"destination.is_registered == true && destination.agent_registry.mcp_server.tool.annotations.read_only_hint == true && destination.agent_registry.mcp_server.tool.annotations.destructive_hint != true",
+			"roles/iap.egressor",
+			"iap.googleapis.com/mcp.tool.isReadOnly",
+			"iap.googleapis.com/mcp.toolName",
+			"logging.entries.list",
+			"container.clusters.get",
+		},
+		"manifests/model-armor-config.yaml": {
+			"apiVersion: modelarmor.googleapis.com/v1",
+			"aegis-prompt-screen",
+			"filterConfig:",
+			"piAndJailbreakFilterSettings:",
+			"maliciousUriFilterSettings:",
+			"raiSettings:",
+			"sdpSettings:",
+		},
+		"manifests/ambient-egress/01-ambient-egress-policy.yaml": {
+			"apiVersion: networking.gke.io/v1",
+			"kind: GCPBackend",
+			"name: aegis-swp-egress-backend",
+			"serviceUris:",
+			"kind: GCPEgressPolicy",
+			"name: default",
+			"excludeCIDRRanges:",
+			"10.0.0.0/8",
+			"172.16.0.0/12",
+			"192.168.0.0/16",
+		},
+	}
+
+	for relPath, wantSubstrings := range manifestChecks {
+		fullPath := filepath.Join(repoRoot, relPath)
+		rawBytes, err := os.ReadFile(fullPath)
+		if err != nil {
+			t.Errorf("read %s: %v", relPath, err)
+			continue
+		}
+		content := string(rawBytes)
+		assertNoEmojiRunes(t, relPath, content)
+		for _, sub := range wantSubstrings {
+			if !strings.Contains(content, sub) {
+				t.Errorf("%s missing expected snippet %q", relPath, sub)
+			}
+		}
+		if strings.HasSuffix(relPath, ".json") {
+			var parsed map[string]any
+			if err := json.Unmarshal(rawBytes, &parsed); err != nil {
+				t.Errorf("%s is not valid JSON: %v", relPath, err)
+			}
+		}
+	}
+}
+
+func TestPhase6_AutoResolvingHackScripts(t *testing.T) {
+	repoRoot := filepath.Clean("../..")
+
+	scriptChecks := map[string][]string{
+		"hack/deploy-gke.sh": {
+			"kubectl config current-context",
+			"PROJECT_ID",
+			"PROJECT_NUMBER",
+			"ORG_ID",
+			"CLUSTER_NAME",
+			"CLUSTER_LOCATION",
+			"REGION",
+			"sed",
+			"manifests/00-namespace-and-rbac.yaml",
+			"manifests/01-agent-substrate-v050.yaml",
+			"manifests/02-aegis-deployment.yaml",
+			"manifests/03-gke-diy-agent-gateway.yaml",
+			"deployment/aegis-sre",
+		},
+		"hack/register-gemini-enterprise.sh": {
+			"kubectl",
+			"aegis-ingress-gateway",
+			"{.status.addresses[0].value}",
+			"https://aegis.example.com",
+			"/.well-known/agent-card.json",
+			"discoveryengine.googleapis.com",
+			"serverSideOauth2",
+		},
+	}
+
+	for relPath, wantSubstrings := range scriptChecks {
+		fullPath := filepath.Join(repoRoot, relPath)
+		rawBytes, err := os.ReadFile(fullPath)
+		if err != nil {
+			t.Fatalf("read %s: %v", relPath, err)
+		}
+		content := string(rawBytes)
+		assertNoEmojiRunes(t, relPath, content)
+		for _, sub := range wantSubstrings {
+			if !strings.Contains(content, sub) {
+				t.Errorf("%s missing expected snippet %q", relPath, sub)
+			}
+		}
+		if out, err := exec.Command("bash", "-n", fullPath).CombinedOutput(); err != nil {
+			t.Errorf("bash -n %s failed: %v (%s)", relPath, err, string(out))
+		}
+	}
+}
+
+
+

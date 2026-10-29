@@ -166,6 +166,95 @@ func TestScenario04_AttenuatedA2AFederationAndSubstrateSandbox_RedVsBlue(t *test
 			t.Errorf("BoundaryTrace = %+v, expected BoundaryReasoningGuard VerdictBypassedRed when PromptScreenEnabled=false", res.BoundaryTrace)
 		}
 	})
+
+	t.Run("BlueMode BoundaryReasoningGuard and BoundaryCrossAgentA2A include CLIENT_TO_AGENT gateway posture and probe AGENT_GATEWAY_INGRESS_URL while RedMode bypasses", func(t *testing.T) {
+		probeHits := 0
+		ingressSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			probeHits++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"name":"aegis-sre","protocolVersion":"0.2.1"}`))
+		}))
+		defer ingressSrv.Close()
+
+		ingressRT := aegis.NewRuntime(aegis.RuntimeConfig{
+			AgentGatewayIngressURL: ingressSrv.URL,
+		})
+
+		blueRes, err := ingressRT.ExecuteTurn(ctx, aegis.TurnRequest{
+			SessionID:  "sess-s4-ingress-probe-blue",
+			Persona:    aegis.PersonaAlice,
+			ScenarioID: aegis.Scenario04AttenuatedA2ASandbox,
+			Posture:    aegis.AllBluePosture(),
+			Prompt:     "Delegate checkout v2.4 repository go test verification to Sandbox Remediator.",
+		})
+		if err != nil {
+			t.Fatalf("ExecuteTurn(blue) error = %v", err)
+		}
+		if probeHits == 0 {
+			t.Errorf("expected AGENT_GATEWAY_INGRESS_URL (%s) to be probed in Blue Mode, got 0 hits", ingressSrv.URL)
+		}
+
+		sawB2GatewayPosture := false
+		sawB6GatewayPosture := false
+		for _, ev := range blueRes.BoundaryTrace {
+			if ev.Boundary == aegis.BoundaryReasoningGuard && ev.Verdict != aegis.VerdictBypassedRed {
+				if strings.Contains(ev.Detail, "Gateway/aegis-ingress-gateway") &&
+					strings.Contains(ev.Detail, "GCPAgentGateway/aegis-client-to-agent-gateway") &&
+					strings.Contains(ev.Detail, "GCPAuthzPolicy/aegis-a2a-ingress-policy") &&
+					strings.Contains(ev.Detail, ingressSrv.URL) {
+					sawB2GatewayPosture = true
+				}
+			}
+			if ev.Boundary == aegis.BoundaryCrossAgentA2A && ev.Verdict == aegis.VerdictAllowed {
+				if strings.Contains(ev.Detail, "Gateway/aegis-ingress-gateway") &&
+					strings.Contains(ev.Detail, "GCPAgentGateway/aegis-client-to-agent-gateway") &&
+					strings.Contains(ev.Detail, "GCPAuthzPolicy/aegis-a2a-ingress-policy") &&
+					strings.Contains(ev.Detail, ingressSrv.URL) {
+					sawB6GatewayPosture = true
+				}
+			}
+		}
+		if !sawB2GatewayPosture {
+			t.Errorf("BoundaryReasoningGuard trace missing CLIENT_TO_AGENT gateway posture & ingress URL: %+v", blueRes.BoundaryTrace)
+		}
+		if !sawB6GatewayPosture {
+			t.Errorf("BoundaryCrossAgentA2A trace missing CLIENT_TO_AGENT gateway posture & ingress URL: %+v", blueRes.BoundaryTrace)
+		}
+
+		sawIngressProbeWire := false
+		for _, wr := range blueRes.WireRecords {
+			if strings.Contains(wr.URL, ingressSrv.URL) {
+				sawIngressProbeWire = true
+			}
+			if !strings.Contains(wr.Headers["X-Agent-Gateway-Ingress"], ingressSrv.URL) {
+				t.Errorf("WireRecord(%s) X-Agent-Gateway-Ingress = %q, want it to include %q", wr.ToolName, wr.Headers["X-Agent-Gateway-Ingress"], ingressSrv.URL)
+			}
+		}
+		if !sawIngressProbeWire {
+			t.Errorf("WireRecords missing probe to AGENT_GATEWAY_INGRESS_URL (%s): %+v", ingressSrv.URL, blueRes.WireRecords)
+		}
+
+		// Red Mode must bypass the ingress probe and gateway posture
+		probeHits = 0
+		redRes, err := ingressRT.ExecuteTurn(ctx, aegis.TurnRequest{
+			SessionID:  "sess-s4-ingress-probe-red",
+			Persona:    aegis.PersonaAlice,
+			ScenarioID: aegis.Scenario04AttenuatedA2ASandbox,
+			Posture:    aegis.AllRedPosture(),
+			Prompt:     "Delegate checkout v2.4 repository go test verification to Sandbox Remediator.",
+		})
+		if err != nil {
+			t.Fatalf("ExecuteTurn(red) error = %v", err)
+		}
+		if probeHits != 0 {
+			t.Errorf("expected AGENT_GATEWAY_INGRESS_URL probe to be bypassed in Red Mode, got %d hits", probeHits)
+		}
+		for _, ev := range redRes.BoundaryTrace {
+			if ev.Boundary == aegis.BoundaryCrossAgentA2A && strings.Contains(ev.Detail, "GCPAgentGateway/aegis-client-to-agent-gateway") {
+				t.Errorf("RedMode BoundaryCrossAgentA2A unexpectedly included CLIENT_TO_AGENT gateway posture: %+v", ev)
+			}
+		}
+	})
 }
 
 func TestGeminiEnterpriseA2AWireCompatibility(t *testing.T) {

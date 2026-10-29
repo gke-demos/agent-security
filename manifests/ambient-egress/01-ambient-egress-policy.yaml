@@ -1,0 +1,32 @@
+# Optional GKE Ambient Networking Egress Overlay (requires --enable-ambient-networking --gateway-api=standard)
+# Redirects pod egress traffic to Secure Web Proxy (SWP) bound to the AGENT_TO_ANYWHERE Agent Gateway
+# while excluding RFC1918 cluster/service CIDRs.
+# Note: GCPBackend referenced by GCPEgressPolicy must specify ONLY spec.serviceUris with a single entry,
+# and GCPEgressPolicy is a singleton per namespace.
+apiVersion: networking.gke.io/v1
+kind: GCPBackend
+metadata:
+  name: aegis-swp-egress-backend
+  namespace: aegis-system
+  labels:
+    app.kubernetes.io/name: aegis-sre
+spec:
+  serviceUris:
+    - https://networkservices.googleapis.com/v1/projects/${PROJECT_ID}/locations/${REGION}/gateways/aegis-swp-egress-gateway
+---
+apiVersion: networking.gke.io/v1
+kind: GCPEgressPolicy
+metadata:
+  name: default
+  namespace: aegis-system
+  labels:
+    app.kubernetes.io/name: aegis-sre
+spec:
+  targetRefs:
+    - group: networking.gke.io
+      kind: GCPBackend
+      name: aegis-swp-egress-backend
+  excludeCIDRRanges:
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16

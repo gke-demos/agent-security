@@ -2,15 +2,26 @@ package aegis
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"flag"
 	"fmt"
+	"math/big"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 )
+
+const defaultSPIFFECredentialBundlePath = "/var/run/secrets/workload-spiffe-credentials/x509.credential-bundle.private-key.pem"
 
 var defaultGitHubCLITokenResolver = resolveGitHubCLIToken
 
@@ -88,6 +99,11 @@ func ConfigFromEnvWithLookup(getenv func(string) string, ghTokenFn func() string
 		JiraOAuthClientID:          strings.TrimSpace(getenv("JIRA_OAUTH_CLIENT_ID")),
 		JiraOAuthClientSecret:      strings.TrimSpace(getenv("JIRA_OAUTH_CLIENT_SECRET")),
 		OAuthTokenEndpointOverride: strings.TrimSpace(getenv("OAUTH_TOKEN_ENDPOINT_OVERRIDE")),
+		SPIFFECredentialBundlePath: firstNonEmpty(strings.TrimSpace(getenv("SPIFFE_CREDENTIAL_BUNDLE_PATH")), defaultSPIFFECredentialBundlePath),
+		GCPAuthProviderID:          strings.TrimSpace(getenv("GCP_AUTH_PROVIDER_ID")),
+		AgentGatewayIngressURL:     strings.TrimSpace(getenv("AGENT_GATEWAY_INGRESS_URL")),
+		AgentGatewayEgressProxyURL: strings.TrimSpace(getenv("AGENT_GATEWAY_EGRESS_PROXY_URL")),
+		AgentGatewayRootCAPath:     strings.TrimSpace(getenv("AGENT_GATEWAY_ROOT_CA_PATH")),
 	}
 
 	if cfg.GCPProjectID != "" {
@@ -265,12 +281,105 @@ func (r *Runtime) GetSourcesStatus(_ context.Context) ([]SourceStatus, error) {
 	}
 
 	for i := range statuses {
+		switch statuses[i].ID {
+		case SourceGCPObservability, SourceAgentRegistry:
+			if _, spiffeSanitized, spiffeVerified := r.InspectAgentIdentitySPIFFE(); spiffeVerified {
+				statuses[i].Detail += " · SVID " + spiffeSanitized
+			}
+		case SourceGitHub, SourceGoogleGmail, SourceAtlassianJira:
+			if providerID := strings.TrimSpace(cfg.GCPAuthProviderID); providerID != "" {
+				statuses[i].Detail += " · AuthProvider " + sanitizeStageSafeText(providerID, cfg)
+			}
+		}
 		statuses[i] = sanitizeStageSafeSourceStatus(statuses[i], cfg)
 	}
 	return statuses, nil
 }
 
-var stageSafeProjectsSegmentRe = regexp.MustCompile(`/projects/[^/\s:)]+`)
+var (
+	stageSafeOrgIDRe             = regexp.MustCompile(`org-[0-9]+`)
+	stageSafeNumericProjectSegRe = regexp.MustCompile(`(^|/)projects/[0-9]+(/|$)`)
+	stageSafeProjectsSegmentRe   = regexp.MustCompile(`(^|[\s"'=(/])projects/[^/\s:$)]+`)
+	spiffeLocationsSegmentRe     = regexp.MustCompile(`/locations/[^/]+/`)
+	spiffeClustersSegmentRe      = regexp.MustCompile(`/clusters/[^/]+/`)
+)
+
+// WriteSyntheticSPIFFECredentialBundle generates an ECDSA P-256 X.509 SVID credential bundle PEM
+// containing rawSPIFFEURI in its URI SANs and writes it to dir/x509.credential-bundle.private-key.pem.
+func WriteSyntheticSPIFFECredentialBundle(dir, rawSPIFFEURI string) (string, error) {
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return "", err
+	}
+	spiffeURL, err := url.Parse(rawSPIFFEURI)
+	if err != nil {
+		return "", err
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(42),
+		Subject:      pkix.Name{CommonName: "aegis-sre"},
+		NotBefore:    time.Now().Add(-1 * time.Hour),
+		NotAfter:     time.Now().Add(23 * time.Hour),
+		URIs:         []*url.URL{spiffeURL},
+	}
+	derBytes, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &privKey.PublicKey, privKey)
+	if err != nil {
+		return "", err
+	}
+	keyDER, err := x509.MarshalECPrivateKey(privKey)
+	if err != nil {
+		return "", err
+	}
+	bundlePath := filepath.Join(dir, "x509.credential-bundle.private-key.pem")
+	var pemBuf strings.Builder
+	_ = pem.Encode(&pemBuf, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	_ = pem.Encode(&pemBuf, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+	if err := os.WriteFile(bundlePath, []byte(pemBuf.String()), 0o600); err != nil {
+		return "", err
+	}
+	return bundlePath, nil
+}
+
+// InspectAgentIdentitySPIFFE inspects the mounted GKE Agent Identity X.509 SVID
+// credential bundle at r.cfg.SPIFFECredentialBundlePath when present, parses all
+// PEM CERTIFICATE blocks, extracts the first spiffe:// URI SAN, and returns the
+// raw URI, a stage-safe sanitized URI, and verified=true.
+func (r *Runtime) InspectAgentIdentitySPIFFE() (rawURI string, sanitizedURI string, verified bool) {
+	if r == nil {
+		return "", "", false
+	}
+	cfg := r.Config()
+	bundlePath := firstNonEmpty(strings.TrimSpace(cfg.SPIFFECredentialBundlePath), defaultSPIFFECredentialBundlePath)
+	rawBytes, err := os.ReadFile(bundlePath)
+	if err != nil || len(rawBytes) == 0 {
+		return "", "", false
+	}
+	rest := rawBytes
+	for len(rest) > 0 {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			continue
+		}
+		for _, u := range cert.URIs {
+			if u != nil && strings.EqualFold(u.Scheme, "spiffe") {
+				rawURI = u.String()
+				sanitized := spiffeLocationsSegmentRe.ReplaceAllString(rawURI, "/locations/$${CLUSTER_LOCATION}/")
+				sanitized = spiffeClustersSegmentRe.ReplaceAllString(sanitized, "/clusters/$${CLUSTER_NAME}/")
+				sanitized = sanitizeStageSafeText(sanitized, cfg)
+				return rawURI, sanitized, true
+			}
+		}
+	}
+	return "", "", false
+}
 
 func formatStageSafeGeminiEndpoint(cfg RuntimeConfig) string {
 	raw := firstNonEmpty(cfg.GeminiEndpoint, "https://aiplatform.googleapis.com/v1 (gemini-2.5-flash)")
@@ -337,7 +446,9 @@ func sanitizeStageSafeText(text string, cfg RuntimeConfig) string {
 	if text == "" {
 		return text
 	}
-	out := stageSafeProjectsSegmentRe.ReplaceAllString(text, "/projects/active-gcp-project")
+	out := stageSafeOrgIDRe.ReplaceAllString(text, "org-$${ORG_ID}")
+	out = stageSafeNumericProjectSegRe.ReplaceAllString(out, "${1}projects/$${PROJECT_NUMBER}${2}")
+	out = stageSafeProjectsSegmentRe.ReplaceAllString(out, "${1}projects/$${PROJECT_ID}")
 	if proj := strings.TrimSpace(cfg.GCPProjectID); proj != "" {
 		out = replaceCaseInsensitiveLiteral(out, proj, "active-gcp-project")
 	}

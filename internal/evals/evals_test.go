@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -547,16 +549,37 @@ func TestRepositoryManifestsScriptsAndHygiene(t *testing.T) {
 			"kind: Deployment",
 			"kind: Service",
 			"aegis-sre",
+			`registry.gke.io/functional-type: "AGENT"`,
+			`a2a-protocol.org/agent-card`,
+			`iam.gke.io/spiffe-identity-type: "agent-identity"`,
+			"GOOGLE_API_ENABLE_RUNTIME_BOUND_TOKEN",
 			"SUBSTRATE_TARGET_ACTOR",
 			"aegis-system/remediator-1",
 			"http://atenet-router.ate-system.svc.cluster.local/sandbox/execute",
 		},
+		"manifests/03-gke-diy-agent-gateway.yaml": {
+			"kind: Gateway",
+			"aegis-ingress-gateway",
+			"kind: HTTPRoute",
+			"aegis-a2a-route",
+			"kind: GCPAgentGateway",
+			"aegis-client-to-agent-gateway",
+			"kind: GCPAuthzExtension",
+			"aegis-modelarmor-content-ext",
+			"aegis-iap-request-ext",
+			"kind: GCPAuthzPolicy",
+			"aegis-a2a-ingress-policy",
+		},
 		"manifests/agw-egress-config.yaml": {
+			"googleManaged:",
 			"AGENT_TO_ANYWHERE",
 			"logging.googleapis.com",
 			"container.googleapis.com",
 		},
 		"manifests/iap-policy.json": {
+			"aegis-egress-uap",
+			"iap.googleapis.com/resources.egressViaIAP",
+			"destination.agent_registry.mcp_server.tool.annotations.read_only_hint",
 			"roles/iap.egressor",
 			"iap.googleapis.com/mcp.tool.isReadOnly",
 			"iap.googleapis.com/mcp.toolName",
@@ -564,9 +587,16 @@ func TestRepositoryManifestsScriptsAndHygiene(t *testing.T) {
 			"container.clusters.get",
 		},
 		"manifests/model-armor-config.yaml": {
+			"aegis-prompt-screen",
 			"piAndJailbreakFilterSettings",
 			"maliciousUriFilterSettings",
 			"sdpSettings",
+		},
+		"manifests/ambient-egress/01-ambient-egress-policy.yaml": {
+			"kind: GCPBackend",
+			"aegis-swp-egress-backend",
+			"kind: GCPEgressPolicy",
+			"excludeCIDRRanges:",
 		},
 		"Dockerfile": {
 			"FROM",
@@ -581,8 +611,10 @@ func TestRepositoryManifestsScriptsAndHygiene(t *testing.T) {
 			"manifests/00-namespace-and-rbac.yaml",
 			"manifests/01-agent-substrate-v050.yaml",
 			"manifests/02-aegis-deployment.yaml",
+			"manifests/03-gke-diy-agent-gateway.yaml",
 		},
 		"hack/register-gemini-enterprise.sh": {
+			"aegis-ingress-gateway",
 			"/.well-known/agent-card.json",
 			"discoveryengine.googleapis.com",
 			"serverSideOauth2",
@@ -1333,8 +1365,8 @@ func TestPhase4_AboutArchitectureCatalogAndDriftEval(t *testing.T) {
 	if len(catalog.Sources) != 8 {
 		t.Errorf("len(catalog.Sources) = %d, want 8", len(catalog.Sources))
 	}
-	if len(catalog.ADRs) != 13 {
-		t.Errorf("len(catalog.ADRs) = %d, want 13 (0001..0013)", len(catalog.ADRs))
+	if len(catalog.ADRs) != 14 {
+		t.Errorf("len(catalog.ADRs) = %d, want 14 (0001..0014)", len(catalog.ADRs))
 	}
 	for _, sc := range catalog.Scenarios {
 		if len(sc.Blue.Pulses) == 0 || len(sc.Red.Pulses) == 0 {
@@ -1864,6 +1896,379 @@ func TestPhase5_AboutProgressiveDisclosureAndStageSafeSourcesEval(t *testing.T) 
 		}
 	}
 }
+
+func TestPhase6_GKENativeAgentPlatformGovernanceAndInClusterRolloutEval(t *testing.T) {
+	ctx := context.Background()
+	repoRoot := filepath.Clean("../..")
+
+	// 1. Offline: Dual-Path Blue-Governed vs. Red-Bypass UAP Policy V2 & Wire Headers
+	t.Run("Offline_DualPathBlueGovernedVsRedBypassUAPAndHeaders", func(t *testing.T) {
+		uapRead := aegis.EvaluateAgentGatewayUAP("logging.entries.list", true, aegis.AllBluePosture())
+		if !uapRead.Allowed || uapRead.Verdict != aegis.VerdictAllowed {
+			t.Fatalf("uapRead = %+v, want Allowed=true and VerdictAllowed", uapRead)
+		}
+		if uapRead.PolicyVersion != "UAP_V2" || uapRead.AccessPolicy != "aegis-egress-uap" || uapRead.Permission != "iap.googleapis.com/resources.egressViaIAP" {
+			t.Errorf("uapRead UAP V2 metadata mismatch: %+v", uapRead)
+		}
+
+		uapDestructive := aegis.EvaluateAgentGatewayUAP("container.clusters.delete", false, aegis.AllBluePosture())
+		if uapDestructive.Allowed || uapDestructive.Verdict != aegis.VerdictBlocked {
+			t.Fatalf("uapDestructive = %+v, want Allowed=false and VerdictBlocked", uapDestructive)
+		}
+		if uapDestructive.PolicyVersion != "UAP_V2" || uapDestructive.AccessPolicy != "aegis-egress-uap" || uapDestructive.Permission != "iap.googleapis.com/resources.egressViaIAP" {
+			t.Errorf("uapDestructive UAP V2 metadata mismatch: %+v", uapDestructive)
+		}
+		if !strings.Contains(uapDestructive.CELExpression, "destination.agent_registry.mcp_server.tool.annotations.destructive_hint != true") {
+			t.Errorf("uapDestructive.CELExpression = %q, want canonical destination.agent_registry.mcp_server.tool.annotations.destructive_hint != true", uapDestructive.CELExpression)
+		}
+
+		uapRedBypass := aegis.EvaluateAgentGatewayUAP("container.clusters.delete", false, aegis.AllRedPosture())
+		if !uapRedBypass.Allowed || uapRedBypass.Verdict != aegis.VerdictBypassedRed {
+			t.Fatalf("uapRedBypass = %+v, want Allowed=true and VerdictBypassedRed", uapRedBypass)
+		}
+
+		rt := aegis.NewRuntime(aegis.RuntimeConfig{})
+		blueTurn, err := rt.ExecuteTurn(ctx, aegis.TurnRequest{
+			SessionID:  "eval-p6-blue-headers",
+			Persona:    aegis.PersonaAlice,
+			ScenarioID: aegis.Scenario03AgentGatewayAndStepUp,
+			Posture:    aegis.AllBluePosture(),
+			Prompt:     "Inspect GKE and Cloud Logging via Agent Gateway.",
+		})
+		if err != nil {
+			t.Fatalf("ExecuteTurn (Blue): %v", err)
+		}
+		if len(blueTurn.WireRecords) == 0 {
+			t.Fatalf("expected non-empty WireRecords in Blue Mode SCENARIO-03")
+		}
+		for _, wr := range blueTurn.WireRecords {
+			if !strings.Contains(wr.Headers["X-Agent-Gateway-Ingress"], "GCPAgentGateway/aegis-client-to-agent-gateway") {
+				t.Errorf("Blue WireRecord(%s) missing X-Agent-Gateway-Ingress: %+v", wr.ToolName, wr.Headers)
+			}
+			if !strings.Contains(wr.Headers["X-Agent-Gateway-Egress"], "gemini-enterprise-agent-gateway (UAP Policy V2: aegis-egress-uap)") {
+				t.Errorf("Blue WireRecord(%s) missing X-Agent-Gateway-Egress: %+v", wr.ToolName, wr.Headers)
+			}
+			if !strings.HasPrefix(wr.Headers["X-Agent-Identity-Spiffe"], "spiffe://agents.global.org-") {
+				t.Errorf("Blue WireRecord(%s) missing X-Agent-Identity-Spiffe: %+v", wr.ToolName, wr.Headers)
+			}
+		}
+
+		redTurn, err := rt.ExecuteTurn(ctx, aegis.TurnRequest{
+			SessionID:  "eval-p6-red-headers",
+			Persona:    aegis.PersonaAlice,
+			ScenarioID: aegis.Scenario03AgentGatewayAndStepUp,
+			Posture:    aegis.AllRedPosture(),
+			Prompt:     "Run GKE diagnostics and delete cluster in Red Mode.",
+		})
+		if err != nil {
+			t.Fatalf("ExecuteTurn (Red): %v", err)
+		}
+		if redTurn.Outcome != aegis.OutcomeExploitedRed {
+			t.Fatalf("Red Outcome = %q, want %q", redTurn.Outcome, aegis.OutcomeExploitedRed)
+		}
+		for _, wr := range redTurn.WireRecords {
+			if wr.Headers["X-Agent-Gateway-Ingress"] != "" || wr.Headers["X-Agent-Gateway-Egress"] != "" || wr.Headers["X-Agent-Identity-Spiffe"] != "" {
+				t.Errorf("Red WireRecord(%s) unexpectedly included Dual-Path gateway headers: %+v", wr.ToolName, wr.Headers)
+			}
+		}
+	})
+
+	// 2. Offline: Pod Agent Identity SPIFFE X.509 SVID inspection with stage-safe sanitization
+	t.Run("Offline_InspectAgentIdentitySPIFFEAndStageSafeSanitization", func(t *testing.T) {
+		rawSPIFFE := "spiffe://agents.global.org-888777666555.system.id.goog/resources/container/projects/112233445566/locations/us-central1-a/clusters/sensitive-cluster-name/ns/aegis-system/sa/aegis-sre"
+		bundleFile, err := aegis.WriteSyntheticSPIFFECredentialBundle(t.TempDir(), rawSPIFFE)
+		if err != nil {
+			t.Fatalf("WriteSyntheticSPIFFECredentialBundle: %v", err)
+		}
+
+		rt := aegis.NewRuntime(aegis.RuntimeConfig{
+			GCPProjectID:               "sensitive-proj-id",
+			GKEClusterName:             "sensitive-cluster-name",
+			SPIFFECredentialBundlePath: bundleFile,
+		})
+		gotRaw, gotSanitized, ok := rt.InspectAgentIdentitySPIFFE()
+		if !ok || gotRaw != rawSPIFFE {
+			t.Fatalf("InspectAgentIdentitySPIFFE() = (%q, %q, %v), want raw=%q ok=true", gotRaw, gotSanitized, ok, rawSPIFFE)
+		}
+		wantSanitized := "spiffe://agents.global.org-${ORG_ID}.system.id.goog/resources/container/projects/${PROJECT_NUMBER}/locations/${CLUSTER_LOCATION}/clusters/${CLUSTER_NAME}/ns/aegis-system/sa/aegis-sre"
+		if gotSanitized != wantSanitized {
+			t.Errorf("sanitized SPIFFE URI = %q, want %q", gotSanitized, wantSanitized)
+		}
+	})
+
+	// 3. Offline: Pure-JS RFC 7636 SHA-256 fallback in /static/app.js + Parameterized Manifests + ADR-0014 in /api/about/catalog
+	t.Run("Offline_PureJSSHA256FallbackParameterizedManifestsAndADR0014Catalog", func(t *testing.T) {
+		rt := aegis.NewRuntime(aegis.RuntimeConfig{})
+		srv := newLoopbackHTTPServer(t, aegis.NewHTTPHandler(rt))
+		defer srv.Close()
+
+		jsResp, err := srv.Client().Get(srv.URL + "/static/app.js")
+		if err != nil {
+			t.Fatalf("GET /static/app.js: %v", err)
+		}
+		jsBytes, _ := io.ReadAll(jsResp.Body)
+		jsResp.Body.Close()
+		js := string(jsBytes)
+		for _, snippet := range []string{
+			"function sha256Bytes(",
+			"0x6a09e667",
+			"window.crypto.subtle",
+			"digestBytes = sha256Bytes(encoded)",
+		} {
+			if !strings.Contains(js, snippet) {
+				t.Errorf("/static/app.js missing pure-JS SHA-256 fallback snippet %q", snippet)
+			}
+		}
+
+		catResp, err := srv.Client().Get(srv.URL + "/api/about/catalog")
+		if err != nil {
+			t.Fatalf("GET /api/about/catalog: %v", err)
+		}
+		var catalog aegis.ArchitectureTopologyCatalog
+		if err := json.NewDecoder(catResp.Body).Decode(&catalog); err != nil {
+			catResp.Body.Close()
+			t.Fatalf("Decode /api/about/catalog: %v", err)
+		}
+		catResp.Body.Close()
+		if err := aegis.VerifyArchitectureCatalogDrift(&catalog, rt, filepath.Join(repoRoot, "docs", "adr")); err != nil {
+			t.Fatalf("VerifyArchitectureCatalogDrift: %v", err)
+		}
+		var sawADR0014 bool
+		for _, adr := range catalog.ADRs {
+			if adr.Number == "0014" && adr.Slug == "gke-native-agent-platform-governance-and-dual-path-rollout" {
+				sawADR0014 = true
+				break
+			}
+		}
+		if !sawADR0014 {
+			t.Errorf("GET /api/about/catalog missing ADR-0014 in %+v", catalog.ADRs)
+		}
+
+		manifestRequired := map[string][]string{
+			"manifests/02-aegis-deployment.yaml": {
+				`registry.gke.io/functional-type: "AGENT"`,
+				`iam.gke.io/spiffe-identity-type: "agent-identity"`,
+				`iam.gke.io/inject-podcertificates: "true"`,
+				"fsGroup: 65532",
+				"SPIFFE_CREDENTIAL_BUNDLE_PATH",
+			},
+			"manifests/03-gke-diy-agent-gateway.yaml": {
+				"kind: Gateway",
+				"kind: HTTPRoute",
+				"kind: GCPAgentGateway",
+				"kind: GCPAuthzExtension",
+				"googleAPIServiceName: modelarmor.${REGION}.rep.googleapis.com",
+				"googleAPIServiceName: iap.googleapis.com",
+				"kind: GCPAuthzPolicy",
+				"rules:",
+			},
+			"manifests/agw-egress-config.yaml": {
+				"governedAccessPath: AGENT_TO_ANYWHERE",
+				"//agentregistry.googleapis.com/projects/${PROJECT_ID}/locations/global",
+			},
+			"manifests/iap-policy.json": {
+				"aegis-egress-uap",
+				"iap.googleapis.com/resources.egressViaIAP",
+			},
+			"manifests/model-armor-config.yaml": {
+				"aegis-prompt-screen",
+				"piAndJailbreakFilterSettings:",
+			},
+			"manifests/ambient-egress/01-ambient-egress-policy.yaml": {
+				"kind: GCPBackend",
+				"kind: GCPEgressPolicy",
+			},
+		}
+		for relPath, subs := range manifestRequired {
+			raw, err := os.ReadFile(filepath.Join(repoRoot, relPath))
+			if err != nil {
+				t.Errorf("ReadFile(%s): %v", relPath, err)
+				continue
+			}
+			txt := string(raw)
+			for _, sub := range subs {
+				if !strings.Contains(txt, sub) {
+					t.Errorf("%s missing expected Phase 6 snippet %q", relPath, sub)
+				}
+			}
+		}
+	})
+
+	// 4. Live In-Cluster GKE Rollout, Pod Agent Identity SVID Mount & Gateway Smoke Verification
+	t.Run("LiveInCluster_AegisSreDeploymentSpiffeMountAndGatewaySmoke", func(t *testing.T) {
+		if os.Getenv("AEGIS_LIVE_EVALS") != "true" {
+			t.Skip("Skipping live in-cluster GKE rollout verification: set AEGIS_LIVE_EVALS=true to run")
+		}
+
+		// 4a. Verify Deployment/aegis-sre has readyReplicas >= 1
+		deployJSON, err := exec.CommandContext(ctx, "kubectl", "-n", "aegis-system", "get", "deploy", "aegis-sre", "-o", "json").Output()
+		if err != nil {
+			t.Fatalf("kubectl -n aegis-system get deploy aegis-sre -o json: %v", err)
+		}
+		var deployObj struct {
+			Status struct {
+				ReadyReplicas int `json:"readyReplicas"`
+			} `json:"status"`
+		}
+		if err := json.Unmarshal(deployJSON, &deployObj); err != nil {
+			t.Fatalf("unmarshal deploy/aegis-sre JSON: %v", err)
+		}
+		if deployObj.Status.ReadyReplicas < 1 {
+			t.Fatalf("deploy/aegis-sre readyReplicas = %d, want >= 1", deployObj.Status.ReadyReplicas)
+		}
+
+		// 4b. Verify running pod has iam.gke.io/spiffe-identity-type: "agent-identity" and volume mount /var/run/secrets/workload-spiffe-credentials
+		podsJSON, err := exec.CommandContext(ctx, "kubectl", "-n", "aegis-system", "get", "pods", "-l", "app.kubernetes.io/name=aegis-sre", "-o", "json").Output()
+		if err != nil {
+			t.Fatalf("kubectl -n aegis-system get pods -l app.kubernetes.io/name=aegis-sre -o json: %v", err)
+		}
+		var podsList struct {
+			Items []struct {
+				Metadata struct {
+					Name        string            `json:"name"`
+					Annotations map[string]string `json:"annotations"`
+				} `json:"metadata"`
+				Spec struct {
+					Containers []struct {
+						Name         string `json:"name"`
+						VolumeMounts []struct {
+							MountPath string `json:"mountPath"`
+						} `json:"volumeMounts"`
+					} `json:"containers"`
+				} `json:"spec"`
+				Status struct {
+					Phase string `json:"phase"`
+				} `json:"status"`
+			} `json:"items"`
+		}
+		if err := json.Unmarshal(podsJSON, &podsList); err != nil {
+			t.Fatalf("unmarshal pods JSON: %v", err)
+		}
+		var verifiedRunningPod string
+		for _, pod := range podsList.Items {
+			if pod.Status.Phase != "Running" {
+				continue
+			}
+			if pod.Metadata.Annotations["iam.gke.io/spiffe-identity-type"] != "agent-identity" {
+				t.Errorf("pod %s annotation iam.gke.io/spiffe-identity-type = %q, want agent-identity", pod.Metadata.Name, pod.Metadata.Annotations["iam.gke.io/spiffe-identity-type"])
+			}
+			hasSpiffeMount := false
+			for _, c := range pod.Spec.Containers {
+				for _, vm := range c.VolumeMounts {
+					if strings.HasPrefix(vm.MountPath, "/var/run/secrets/workload-spiffe-credentials") {
+						hasSpiffeMount = true
+					}
+				}
+			}
+			if !hasSpiffeMount {
+				t.Errorf("pod %s missing /var/run/secrets/workload-spiffe-credentials volumeMount", pod.Metadata.Name)
+			} else {
+				verifiedRunningPod = pod.Metadata.Name
+			}
+		}
+		if verifiedRunningPod == "" {
+			t.Fatalf("no Running pod with /var/run/secrets/workload-spiffe-credentials found in aegis-system")
+		}
+
+		// 4c. Verify Gateway/aegis-ingress-gateway Programmed == "True" + External IP, and GCPAuthzPolicy/aegis-a2a-ingress-policy Attached == "True"
+		gwJSON, err := exec.CommandContext(ctx, "kubectl", "-n", "aegis-system", "get", "gateway", "aegis-ingress-gateway", "-o", "json").Output()
+		if err != nil {
+			t.Fatalf("kubectl -n aegis-system get gateway aegis-ingress-gateway -o json: %v", err)
+		}
+		var gwObj struct {
+			Status struct {
+				Addresses []struct {
+					Value string `json:"value"`
+				} `json:"addresses"`
+				Conditions []struct {
+					Type   string `json:"type"`
+					Status string `json:"status"`
+				} `json:"conditions"`
+			} `json:"status"`
+		}
+		if err := json.Unmarshal(gwJSON, &gwObj); err != nil {
+			t.Fatalf("unmarshal gateway JSON: %v", err)
+		}
+		var gwProgrammed bool
+		for _, cond := range gwObj.Status.Conditions {
+			if cond.Type == "Programmed" && cond.Status == "True" {
+				gwProgrammed = true
+			}
+		}
+		if !gwProgrammed || len(gwObj.Status.Addresses) == 0 || strings.TrimSpace(gwObj.Status.Addresses[0].Value) == "" {
+			t.Fatalf("Gateway/aegis-ingress-gateway programmed=%v addresses=%+v, want Programmed=True and non-empty IP", gwProgrammed, gwObj.Status.Addresses)
+		}
+		gatewayIP := strings.TrimSpace(gwObj.Status.Addresses[0].Value)
+
+		polJSON, err := exec.CommandContext(ctx, "kubectl", "-n", "aegis-system", "get", "gcpauthzpolicy", "aegis-a2a-ingress-policy", "-o", "json").Output()
+		if err != nil {
+			t.Fatalf("kubectl -n aegis-system get gcpauthzpolicy aegis-a2a-ingress-policy -o json: %v", err)
+		}
+		var polObj struct {
+			Status struct {
+				Ancestors []struct {
+					Conditions []struct {
+						Type   string `json:"type"`
+						Status string `json:"status"`
+					} `json:"conditions"`
+				} `json:"ancestors"`
+			} `json:"status"`
+		}
+		if err := json.Unmarshal(polJSON, &polObj); err != nil {
+			t.Fatalf("unmarshal gcpauthzpolicy JSON: %v", err)
+		}
+		var polAttached bool
+		for _, anc := range polObj.Status.Ancestors {
+			for _, cond := range anc.Conditions {
+				if cond.Type == "Attached" && cond.Status == "True" {
+					polAttached = true
+				}
+			}
+		}
+		if !polAttached {
+			t.Fatalf("GCPAuthzPolicy/aegis-a2a-ingress-policy Attached != True: %s", string(polJSON))
+		}
+
+		// 4d. Verify live HTTP requests to in-cluster Gateway / Service return 200 OK with spiffeId / GCPAgentGateway metadata and zero leaked personal strings
+		baseURL := fmt.Sprintf("http://%s", gatewayIP)
+		httpClient := &http.Client{Timeout: 10 * time.Second}
+
+		checkEndpoint := func(path string, wantSubstrings []string) {
+			resp, err := httpClient.Get(baseURL + path)
+			if err != nil {
+				t.Fatalf("GET %s%s: %v", baseURL, path, err)
+			}
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("GET %s%s status = %d, want 200 OK; body = %s", baseURL, path, resp.StatusCode, string(bodyBytes))
+			}
+			bodyStr := string(bodyBytes)
+			for _, want := range wantSubstrings {
+				if !strings.Contains(bodyStr, want) {
+					t.Errorf("GET %s%s body missing %q: %s", baseURL, path, want, bodyStr)
+				}
+			}
+			lower := strings.ToLower(bodyStr)
+			for _, forbidden := range []string{"ate" + "-cluster", "mofi" + "labs"} {
+				if strings.Contains(lower, forbidden) {
+					t.Errorf("GET %s%s leaked personal project/cluster identifier %q", baseURL, path, forbidden)
+				}
+			}
+			if regexp.MustCompile(`org-[0-9]{6,}|/projects/[0-9]{6,}`).MatchString(lower) {
+				t.Errorf("GET %s%s leaked raw numeric org/project identifier in %s", baseURL, path, bodyStr)
+			}
+		}
+
+		checkEndpoint("/healthz", []string{`"status":"ok"`, `"service":"aegis-sre"`})
+		checkEndpoint("/.well-known/agent-card.json", []string{`"spiffeId"`, `spiffe://agents.global.org-${ORG_ID}.system.id.goog/resources/container/projects/${PROJECT_NUMBER}/locations/${CLUSTER_LOCATION}/clusters/${CLUSTER_NAME}/ns/aegis-system/sa/aegis-sre`, "GCPAgentGateway"})
+		checkEndpoint("/api/about/catalog", []string{"GCPAgentGateway", "0014", "UAP Policy V2"})
+		checkEndpoint("/api/sources/status", []string{`SVID spiffe://agents.global.org-${ORG_ID}.system.id.goog/resources/container/projects/${PROJECT_NUMBER}/locations/${CLUSTER_LOCATION}/clusters/${CLUSTER_NAME}/ns/aegis-system/sa/aegis-sre`})
+
+		t.Logf("Verified live in-cluster Deployment/aegis-sre (pod %s) and Gateway/aegis-ingress-gateway (%s)", verifiedRunningPod, baseURL)
+	})
+}
+
 
 
 

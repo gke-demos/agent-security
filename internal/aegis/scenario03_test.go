@@ -167,6 +167,16 @@ func TestScenario03_AgentGatewayUAP_And_StepUpConfirmation_And_A2UICatalog(t *te
 		if !strings.Contains(deleteCluster.CELExpression, "iap.googleapis.com/mcp.tool.isReadOnly") || !strings.Contains(deleteCluster.CELExpression, "iap.googleapis.com/mcp.toolName") {
 			t.Errorf("CELExpression = %q, want iap.googleapis.com/mcp.tool.isReadOnly and toolName", deleteCluster.CELExpression)
 		}
+		const wantUAPV2CEL = "destination.is_registered == true && destination.agent_registry.mcp_server.tool.annotations.read_only_hint == true && destination.agent_registry.mcp_server.tool.annotations.destructive_hint != true"
+		if !strings.Contains(deleteCluster.CELExpression, wantUAPV2CEL) {
+			t.Errorf("CELExpression = %q, want UAP Policy V2 CEL %q", deleteCluster.CELExpression, wantUAPV2CEL)
+		}
+		if deleteCluster.PolicyVersion != "UAP_V2" || deleteCluster.AccessPolicy != "aegis-egress-uap" || deleteCluster.Permission != "iap.googleapis.com/resources.egressViaIAP" {
+			t.Errorf("UAPDecision metadata = %+v, want PolicyVersion=UAP_V2, AccessPolicy=aegis-egress-uap, Permission=iap.googleapis.com/resources.egressViaIAP", deleteCluster)
+		}
+		if !strings.Contains(deleteCluster.Reason, "read_only_hint") || !strings.Contains(deleteCluster.Reason, "destructive_hint") {
+			t.Errorf("deleteCluster.Reason = %q, want read_only_hint and destructive_hint", deleteCluster.Reason)
+		}
 	})
 
 	t.Run("A2UI v0.9 6-Component Catalog Validator enforces schema and strips XSS payloads in Blue Mode", func(t *testing.T) {
@@ -346,6 +356,105 @@ func TestScenario03_AgentGatewayUAP_And_StepUpConfirmation_And_A2UICatalog(t *te
 		}
 		if !sawBypassedUAP || !sawBypassedUI {
 			t.Errorf("RedMode BoundaryTrace expected VerdictBypassedRed on B4 and B1, got %+v", res.BoundaryTrace)
+		}
+		for _, wr := range res.WireRecords {
+			if wr.Headers["X-Agent-Gateway-Ingress"] != "" || wr.Headers["X-Agent-Gateway-Egress"] != "" || wr.Headers["X-Agent-Identity-Spiffe"] != "" {
+				t.Errorf("RedMode WireRecord %q unexpectedly attached Dual-Path gateway headers: %+v", wr.ToolName, wr.Headers)
+			}
+		}
+	})
+
+	t.Run("BlueMode attaches Dual-Path Agent Gateway Ingress/Egress and SPIFFE headers to OutboundWireRecords and TokenBroker exposes GCPAuthProviderID", func(t *testing.T) {
+		customRT := aegis.NewRuntime(aegis.RuntimeConfig{
+			GCPAuthProviderID: "projects/123456789/locations/global/authProviders/aegis-github-provider",
+		})
+		if got := customRT.TokenBroker().GCPAuthProviderID(); got != "projects/123456789/locations/global/authProviders/aegis-github-provider" {
+			t.Errorf("TokenBroker().GCPAuthProviderID() = %q, want projects/123456789/locations/global/authProviders/aegis-github-provider", got)
+		}
+
+		blueRes, err := customRT.ExecuteTurn(ctx, aegis.TurnRequest{
+			SessionID:  "sess-blue-dual-path-hdrs",
+			Persona:    aegis.PersonaAlice,
+			ScenarioID: aegis.Scenario03AgentGatewayAndStepUp,
+			Posture:    aegis.AllBluePosture(),
+			Prompt:     "Inspect GKE and Cloud Logging via MCP.",
+		})
+		if err != nil {
+			t.Fatalf("ExecuteTurn() error = %v", err)
+		}
+		if len(blueRes.WireRecords) == 0 {
+			t.Fatalf("expected non-empty WireRecords in BlueMode SCENARIO-03")
+		}
+		const (
+			wantIngress = "aegis-system/aegis-ingress-gateway (GCPAgentGateway/aegis-client-to-agent-gateway, GCPAuthzPolicy/aegis-a2a-ingress-policy)"
+			wantEgress  = "gemini-enterprise-agent-gateway (UAP Policy V2: aegis-egress-uap)"
+			wantSpiffe  = "spiffe://agents.global.org-${ORG_ID}.system.id.goog/resources/container/projects/${PROJECT_NUMBER}/locations/${CLUSTER_LOCATION}/clusters/${CLUSTER_NAME}/ns/aegis-system/sa/aegis-sre"
+		)
+		for _, wr := range blueRes.WireRecords {
+			if wr.Headers["X-Agent-Gateway-Ingress"] != wantIngress {
+				t.Errorf("WireRecord(%s) X-Agent-Gateway-Ingress = %q, want %q", wr.ToolName, wr.Headers["X-Agent-Gateway-Ingress"], wantIngress)
+			}
+			if wr.Headers["X-Agent-Gateway-Egress"] != wantEgress {
+				t.Errorf("WireRecord(%s) X-Agent-Gateway-Egress = %q, want %q", wr.ToolName, wr.Headers["X-Agent-Gateway-Egress"], wantEgress)
+			}
+			if wr.Headers["X-Agent-Identity-Spiffe"] != wantSpiffe {
+				t.Errorf("WireRecord(%s) X-Agent-Identity-Spiffe = %q, want %q", wr.ToolName, wr.Headers["X-Agent-Identity-Spiffe"], wantSpiffe)
+			}
+		}
+
+		// Verify independent 5-Shield gating and AGENT_GATEWAY_EGRESS_PROXY_URL + AGENT_GATEWAY_ROOT_CA_PATH wiring
+		ingressOnlyPosture := aegis.AllRedPosture()
+		ingressOnlyPosture.PromptScreenEnabled = true
+		ingressOnlyRes, err := customRT.ExecuteTurn(ctx, aegis.TurnRequest{
+			SessionID:  "sess-ingress-only-hdrs",
+			Persona:    aegis.PersonaAlice,
+			ScenarioID: aegis.Scenario03AgentGatewayAndStepUp,
+			Posture:    ingressOnlyPosture,
+			Prompt:     "Inspect GKE with only PromptScreenEnabled.",
+		})
+		if err != nil {
+			t.Fatalf("ExecuteTurn(ingressOnly) error = %v", err)
+		}
+		for _, wr := range ingressOnlyRes.WireRecords {
+			if wr.Headers["X-Agent-Gateway-Ingress"] != wantIngress {
+				t.Errorf("ingressOnly WireRecord(%s) X-Agent-Gateway-Ingress = %q, want %q", wr.ToolName, wr.Headers["X-Agent-Gateway-Ingress"], wantIngress)
+			}
+			if wr.Headers["X-Agent-Gateway-Egress"] != "" {
+				t.Errorf("ingressOnly WireRecord(%s) X-Agent-Gateway-Egress = %q, want empty when StepUpAndA2UICatalogEnabled=false", wr.ToolName, wr.Headers["X-Agent-Gateway-Egress"])
+			}
+			if wr.Headers["X-Agent-Identity-Spiffe"] != "" {
+				t.Errorf("ingressOnly WireRecord(%s) X-Agent-Identity-Spiffe = %q, want empty when TokenBrokerEnabled=false and StepUpAndA2UICatalogEnabled=false", wr.ToolName, wr.Headers["X-Agent-Identity-Spiffe"])
+			}
+		}
+
+		egressProxyRT := aegis.NewRuntime(aegis.RuntimeConfig{
+			AgentGatewayEgressProxyURL: "http://10.128.0.50:443",
+			AgentGatewayRootCAPath:     "/etc/ssl/certs/agent-gateway-ca.pem",
+		})
+		egressOnlyPosture := aegis.AllRedPosture()
+		egressOnlyPosture.StepUpAndA2UICatalogEnabled = true
+		egressOnlyRes, err := egressProxyRT.ExecuteTurn(ctx, aegis.TurnRequest{
+			SessionID:  "sess-egress-only-hdrs",
+			Persona:    aegis.PersonaAlice,
+			ScenarioID: aegis.Scenario03AgentGatewayAndStepUp,
+			Posture:    egressOnlyPosture,
+			Prompt:     "Inspect GKE with only StepUpAndA2UICatalogEnabled.",
+		})
+		if err != nil {
+			t.Fatalf("ExecuteTurn(egressOnly) error = %v", err)
+		}
+		for _, wr := range egressOnlyRes.WireRecords {
+			if wr.Headers["X-Agent-Gateway-Ingress"] != "" {
+				t.Errorf("egressOnly WireRecord(%s) X-Agent-Gateway-Ingress = %q, want empty when PromptScreenEnabled=false", wr.ToolName, wr.Headers["X-Agent-Gateway-Ingress"])
+			}
+			if !strings.Contains(wr.Headers["X-Agent-Gateway-Egress"], wantEgress) ||
+				!strings.Contains(wr.Headers["X-Agent-Gateway-Egress"], "http://10.128.0.50:443") ||
+				!strings.Contains(wr.Headers["X-Agent-Gateway-Egress"], "/etc/ssl/certs/agent-gateway-ca.pem") {
+				t.Errorf("egressOnly WireRecord(%s) X-Agent-Gateway-Egress = %q, want %q + proxy + rootCA", wr.ToolName, wr.Headers["X-Agent-Gateway-Egress"], wantEgress)
+			}
+			if wr.Headers["X-Agent-Identity-Spiffe"] != wantSpiffe {
+				t.Errorf("egressOnly WireRecord(%s) X-Agent-Identity-Spiffe = %q, want %q", wr.ToolName, wr.Headers["X-Agent-Identity-Spiffe"], wantSpiffe)
+			}
 		}
 	})
 }

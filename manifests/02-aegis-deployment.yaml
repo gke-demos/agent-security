@@ -5,8 +5,11 @@ metadata:
   namespace: aegis-system
   labels:
     app.kubernetes.io/name: aegis-sre
+    registry.gke.io/functional-type: "AGENT"
+  annotations:
+    a2a-protocol.org/agent-card: '{"protocolVersion":"0.3.0","card":{"uriPath":"/.well-known/agent-card.json","port":8080,"protocol":"HTTP"}}'
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: aegis-sre
@@ -14,29 +17,48 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: aegis-sre
+        registry.gke.io/functional-type: "AGENT"
+      annotations:
+        iam.gke.io/spiffe-identity-type: "agent-identity"
+        iam.gke.io/identity: "spiffe://agents.global.org-${ORG_ID}.system.id.goog/*"
+        iam.gke.io/inject-podcertificates: "true"
     spec:
       serviceAccountName: aegis-sre
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
+        fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: aegis-server
-          image: us-central1-docker.pkg.dev/PROJECT_ID/aegis/aegis-server:latest
+          # Image template: us-central1-docker.pkg.dev/PROJECT_ID/aegis/aegis-server:latest
+          image: us-central1-docker.pkg.dev/${PROJECT_ID}/aegis/aegis-server:latest
           ports:
             - name: http
               containerPort: 8080
           env:
             - name: PORT
               value: "8080"
+            - name: GOOGLE_CLOUD_PROJECT
+              value: "${PROJECT_ID}"
+            - name: GOOGLE_CLOUD_LOCATION
+              value: "${REGION}"
+            - name: GKE_CLUSTER_NAME
+              value: "${CLUSTER_NAME}"
+            - name: GOOGLE_API_ENABLE_RUNTIME_BOUND_TOKEN
+              value: "false"
+            - name: AGENT_PLATFORM_LIVE_LLM
+              value: "true"
             - name: LIVE_SUBSTRATE
               value: "true"
             - name: SUBSTRATE_GATEWAY_URL
               value: "http://atenet-router.ate-system.svc.cluster.local/sandbox/execute"
             - name: SUBSTRATE_TARGET_ACTOR
               value: "aegis-system/remediator-1"
+            - name: SPIFFE_CREDENTIAL_BUNDLE_PATH
+              value: "/var/run/secrets/workload-spiffe-credentials/x509.credential-bundle.private-key.pem"
           readinessProbe:
             httpGet:
               path: /healthz
@@ -76,4 +98,7 @@ spec:
   ports:
     - name: http
       port: 80
+      targetPort: http
+    - name: a2a-http
+      port: 8080
       targetPort: http

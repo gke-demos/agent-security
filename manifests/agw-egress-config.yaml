@@ -1,26 +1,20 @@
-apiVersion: networkservices.googleapis.com/v1alpha1
-kind: AgentGateway
-metadata:
-  name: aegis-agent-to-anywhere-gateway
-  namespace: aegis-system
-spec:
-  deploymentMode: AGENT_TO_ANYWHERE
-  workloadSelector:
-    serviceAccount: aegis-sre
-  governedTargets:
-    - name: gcp-cloud-logging-mcp
-      url: https://logging.googleapis.com/mcp
-      protocol: MCP_JSONRPC
-      uapPolicyRef: aegis-agent-to-anywhere-uap
-    - name: gke-container-mcp
-      url: https://container.googleapis.com/mcp
-      protocol: MCP_JSONRPC
-      uapPolicyRef: aegis-agent-to-anywhere-uap
-    - name: github-mcp
-      url: https://api.github.com/mcp
-      protocol: MCP_JSONRPC
-      uapPolicyRef: aegis-agent-to-anywhere-uap
-    - name: atlassian-jira-mcp
-      url: https://api.atlassian.com/mcp
-      protocol: MCP_JSONRPC
-      uapPolicyRef: aegis-agent-to-anywhere-uap
+# Provisioned via:
+# gcloud alpha network-services agent-gateways import gemini-enterprise-agent-gateway \
+#   --location=${REGION} --source=manifests/agw-egress-config.yaml
+name: projects/${PROJECT_ID}/locations/${REGION}/agentGateways/gemini-enterprise-agent-gateway
+description: "AegisSRE Cloud-Managed AGENT_TO_ANYWHERE Egress Agent Gateway"
+googleManaged:
+  governedAccessPath: AGENT_TO_ANYWHERE
+protocols:
+  - MCP
+registries:
+  - //agentregistry.googleapis.com/projects/${PROJECT_ID}/locations/global
+  - //agentregistry.googleapis.com/projects/${PROJECT_ID}/locations/${REGION}
+labels:
+  app: aegis-sre
+  boundary: b4-platform-governance
+# Governed MCP Server Targets discovered via Agent Registry & enforced by UAP Policy V2 (aegis-egress-uap):
+# - gcp-cloud-logging-mcp: https://logging.googleapis.com/mcp (readOnlyHint=true: logging.entries.list)
+# - gke-container-mcp: https://container.googleapis.com/mcp (readOnlyHint=true: container.clusters.get; destructiveHint=true denied: container.clusters.delete)
+# - github-mcp: https://api.github.com/mcp
+# - atlassian-jira-mcp: https://api.atlassian.com/mcp
