@@ -6,7 +6,7 @@ metadata:
     app.kubernetes.io/name: aegis-sre
     ate.dev/api-access: "true"
 ---
-apiVersion: ate.dev/v1alpha1
+apiVersion: ate.dev/v1
 kind: WorkerPool
 metadata:
   name: aegis-remediator-pool

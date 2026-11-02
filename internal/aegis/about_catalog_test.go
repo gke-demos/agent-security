@@ -1704,7 +1704,7 @@ func TestPhase6_ParameterizedManifestsAndAmbientEgressOverlay(t *testing.T) {
 			"AGENT_PLATFORM_LIVE_LLM",
 			"LIVE_SUBSTRATE",
 			"SUBSTRATE_GATEWAY_URL",
-			"http://atenet-router.ate-system.svc.cluster.local/sandbox/execute",
+			"https://atenet-router.ate-system.svc.cluster.local/sandbox/execute",
 			"SUBSTRATE_TARGET_ACTOR",
 			"aegis-system/remediator-1",
 			"SPIFFE_CREDENTIAL_BUNDLE_PATH",

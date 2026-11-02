@@ -51,7 +51,7 @@ func TestLiveSubstrateGateway_AttenuatedA2ADispatchAndProvenance(t *testing.T) {
 			SandboxConfig:     "gvisor-default",
 			AllowedEgress:     "api.github.com",
 			BlockedEgress:     "https://evil.example.com/exfil",
-			TestOutput:        "PASS: TestCheckoutHotfix (0.03s) in live Agent Substrate v0.5.0 gVisor Actor",
+			TestOutput:        "PASS: TestCheckoutHotfix (0.03s) in live Agent Substrate v1.0.0-rc.1 gVisor Actor",
 			Provenance:        aegis.ProvenanceLive,
 		}
 		_ = json.NewEncoder(w).Encode(resp)
@@ -70,7 +70,7 @@ func TestLiveSubstrateGateway_AttenuatedA2ADispatchAndProvenance(t *testing.T) {
 		Persona:              aegis.PersonaAlice,
 		ScenarioID:           aegis.Scenario04AttenuatedA2ASandbox,
 		Posture:              aegis.AllBluePosture(),
-		Prompt:               "Verify checkout v2.4 patch in live Agent Substrate v0.5.0 gVisor sandbox.",
+		Prompt:               "Verify checkout v2.4 patch in live Agent Substrate v1.0.0-rc.1 gVisor sandbox.",
 		ForwardedBearerToken: upstreamSecret,
 	})
 	if err != nil {
@@ -212,7 +212,7 @@ func TestLiveSubstrateInCluster_KubernetesServiceHostAutoRoutesToAtenetRouter(t 
 		t.Fatalf("Outcome = %q, want %q", res.Outcome, aegis.OutcomeDefendedSuccess)
 	}
 
-	const wantInClusterURL = "http://atenet-router.ate-system.svc.cluster.local/sandbox/execute"
+	const wantInClusterURL = "https://atenet-router.ate-system.svc.cluster.local/sandbox/execute"
 	if capturedURL != wantInClusterURL {
 		t.Errorf("in-cluster auto-dispatch URL = %q, want %q", capturedURL, wantInClusterURL)
 	}
@@ -324,7 +324,7 @@ func TestLiveSubstrateKubectlBridge_InspectsClusterCRDsAndMarksProvenanceLive(t 
 			return []byte(`{
 				"apiVersion": "v1",
 				"items": [{
-					"apiVersion": "ate.dev/v1alpha1",
+					"apiVersion": "ate.dev/v1",
 					"kind": "WorkerPool",
 					"metadata": {"name": "aegis-remediator-pool", "namespace": "aegis-system"},
 					"spec": {
@@ -336,7 +336,7 @@ func TestLiveSubstrateKubectlBridge_InspectsClusterCRDsAndMarksProvenanceLive(t 
 		}
 		if strings.Contains(cmdStr, "sandboxconfigs.ate.dev") {
 			return []byte(`{
-				"apiVersion": "ate.dev/v1alpha1",
+				"apiVersion": "ate.dev/v1",
 				"kind": "SandboxConfig",
 				"metadata": {"name": "gvisor-default"},
 				"spec": {"runtimeClassName": "gvisor"}
@@ -413,7 +413,7 @@ func TestLiveSubstrateKubectlBridge_InspectsClusterCRDsAndMarksProvenanceLive(t 
 		Persona:    aegis.PersonaAlice,
 		ScenarioID: aegis.Scenario04AttenuatedA2ASandbox,
 		Posture:    aegis.AllBluePosture(),
-		Prompt:     "Verify checkout v2.4 patch via kubectl-bridged Agent Substrate v0.5.0 gVisor pool.",
+		Prompt:     "Verify checkout v2.4 patch via kubectl-bridged Agent Substrate v1.0.0-rc.1 gVisor pool.",
 	})
 	if err != nil {
 		t.Fatalf("ExecuteTurn() error = %v", err)
@@ -686,7 +686,7 @@ func TestRemediatorActorHandler_HealthzAndSandboxExecute(t *testing.T) {
 		HTTPClient:          actorSrv.Client(),
 	})
 	execResp, wire, ok := aegis.NewSubstrateSandboxConnector(rt).Execute(context.Background(), aegis.SandboxExecutionRequest{
-		APIVersion:        "ate.dev/v1alpha1",
+		APIVersion:        "ate.dev/v1",
 		Kind:              "ActorTemplate",
 		SandboxClass:      "gvisor",
 		PreferredFidelity: "SNAPSHOT_FIDELITY_MEMORY",
@@ -867,7 +867,7 @@ func TestSubstrateManifests_ValidatedWorkerPoolAndActorTemplateSchema(t *testing
 		"kind: Namespace",
 		"name: aegis-system",
 		`ate.dev/api-access: "true"`,
-		"apiVersion: ate.dev/v1alpha1",
+		"apiVersion: ate.dev/v1",
 		"kind: WorkerPool",
 		"name: aegis-remediator-pool",
 		"workload: aegis-remediator-pool",
@@ -937,9 +937,11 @@ func TestSubstrateManifests_ValidatedWorkerPoolAndActorTemplateSchema(t *testing
 		"name: LIVE_SUBSTRATE",
 		`value: "true"`,
 		"name: SUBSTRATE_GATEWAY_URL",
-		"http://atenet-router.ate-system.svc.cluster.local/sandbox/execute",
+		"https://atenet-router.ate-system.svc.cluster.local/sandbox/execute",
 		"name: SUBSTRATE_TARGET_ACTOR",
 		"aegis-system/remediator-1",
+		"/run/podidentity.podcert.ate.dev",
+		"/run/servicedns-ca",
 	} {
 		if !strings.Contains(deployContent, expected) {
 			t.Errorf("manifests/02-aegis-deployment.yaml missing %q", expected)
@@ -1028,4 +1030,62 @@ func TestLiveSubstrateRealCluster_AutoBridgedAtenetRouter(t *testing.T) {
 	}
 	t.Logf("Verified live GKE Actor/remediator-1 auto-bridge: kernel=%q zeroSecrets=%q github=%q evil=%q pod=%q",
 		fields["kernelSignature"], fields["zeroEnvSecretsVerified"], fields["githubAllowedProbe"], fields["evilExfilProbe"], fields["sandboxPod"])
+}
+
+func TestSandboxExecuteBridgeEndpoint_ForwardsToConnector(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.96.0.1")
+
+	var gotActorHdr string
+	actorSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotActorHdr = r.Header.Get("ate-target-actor")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(aegis.SandboxExecutionResponse{
+			Verified:          true,
+			SandboxClass:      "gvisor",
+			PreferredFidelity: "SNAPSHOT_FIDELITY_MEMORY",
+			WorkerPool:        "aegis-remediator-pool",
+			SandboxConfig:     "gvisor-default",
+			Provenance:        aegis.ProvenanceLive,
+			Metadata: map[string]string{
+				"zeroEnvSecretsVerified": "true",
+				"kernelSignature":        "Linux version 4.19.0-gvisor",
+				"githubAllowedProbe":     "http:200",
+				"evilExfilProbe":         "blocked:EOF",
+			},
+		})
+	}))
+	defer actorSrv.Close()
+
+	rt := aegis.NewRuntime(aegis.RuntimeConfig{
+		LiveSubstrate:       true,
+		SubstrateGatewayURL: actorSrv.URL + "/sandbox/execute",
+		HTTPClient:          actorSrv.Client(),
+	})
+
+	appSrv := httptest.NewServer(aegis.NewHTTPHandler(rt))
+	defer appSrv.Close()
+
+	reqBody := `{"apiVersion":"ate.dev/v1","kind":"ActorTemplate","sandboxClass":"gvisor","preferredFidelity":"SNAPSHOT_FIDELITY_MEMORY","atenetMitmEnabled":true}`
+	req, err := http.NewRequest(http.MethodPost, appSrv.URL+"/sandbox/execute", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("ate-target-actor", "aegis-system/remediator-1")
+
+	resp, err := appSrv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("POST /sandbox/execute: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /sandbox/execute status = %d, want 200", resp.StatusCode)
+	}
+	var out aegis.SandboxExecutionResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("Decode response: %v", err)
+	}
+	if !out.Verified || out.Provenance != aegis.ProvenanceLive || gotActorHdr != "aegis-system/remediator-1" {
+		t.Errorf("got Verified=%v Provenance=%q actorHdr=%q, want true/LIVE/aegis-system/remediator-1", out.Verified, out.Provenance, gotActorHdr)
+	}
 }

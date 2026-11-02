@@ -3,7 +3,12 @@ package aegis
 import (
 	"bytes"
 	"context"
+	"crypto"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -17,11 +22,135 @@ import (
 )
 
 const (
-	substrateCmdRunnerExtKey        = "substrate_cmd_runner"
-	substrateRouterBridgeExtKey     = "substrate_router_bridge"
-	defaultSubstrateTargetActor     = "aegis-system/remediator-1"
-	inClusterAtenetRouterExecuteURL = "http://atenet-router.ate-system.svc.cluster.local/sandbox/execute"
+	substrateCmdRunnerExtKey             = "substrate_cmd_runner"
+	substrateRouterBridgeExtKey          = "substrate_router_bridge"
+	defaultSubstrateTargetActor          = "aegis-system/remediator-1"
+	inClusterAtenetRouterExecuteURL      = "https://atenet-router.ate-system.svc.cluster.local/sandbox/execute"
+	inClusterAtenetRouterServerName      = "atenet-router.ate-system.svc"
+	defaultSubstrateRouterCredBundlePath = "/run/podidentity.podcert.ate.dev/credential-bundle.pem"
+	defaultSubstrateRouterCAFilePath     = "/run/servicedns-ca/trust-bundle.pem"
 )
+
+func init() {
+	RegisterHTTPRoutes(registerSubstrateHTTPRoutes)
+}
+
+// TODO(security): POST /sandbox/execute bridges attenuated SandboxExecutionRequests (zero 3LO credentials)
+// to in-cluster svc/atenet-router over SPIFFE mTLS when KUBERNETES_SERVICE_HOST is set;
+// SQL parameterization, multipart file-upload scanning, and cookie-based CSRF tokens are N/A
+// (zero SQL DB, zero file uploads, zero auth cookies).
+func registerSubstrateHTTPRoutes(mux *http.ServeMux, rt *Runtime) {
+	mux.HandleFunc("POST /sandbox/execute", func(w http.ResponseWriter, r *http.Request) {
+		var execReq SandboxExecutionRequest
+		if r.Body != nil {
+			defer r.Body.Close()
+			_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&execReq)
+		}
+		if strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST")) != "" {
+			gwURL := strings.TrimSpace(rt.Config().SubstrateGatewayURL)
+			if gwURL == "" || (r.Host != "" && strings.Contains(gwURL, r.Host)) {
+				gwURL = inClusterAtenetRouterExecuteURL
+			}
+			if resp, _, ok := NewSubstrateSandboxConnector(rt).dispatchGatewayHTTP(r.Context(), gwURL, execReq); ok && resp != nil {
+				writeJSON(w, http.StatusOK, resp)
+				return
+			}
+		}
+		NewRemediatorActorHandler(nil).ServeHTTP(w, r)
+	})
+}
+
+// NewSubstrateRouterMTLSClient constructs an *http.Client configured with the projected
+// podidentity.podcert.ate.dev/identity client certificate bundle and servicedns.podcert.ate.dev/identity
+// ClusterTrustBundle CA pool for SPIFFE mTLS dispatch to svc/atenet-router:443.
+func NewSubstrateRouterMTLSClient(caFile, credBundle string) (*http.Client, error) {
+	caFile = strings.TrimSpace(caFile)
+	credBundle = strings.TrimSpace(credBundle)
+	if caFile == "" || credBundle == "" {
+		return nil, errors.New("both router CA file and credential bundle paths are required")
+	}
+	caBytes, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("read router CA bundle %q: %w", caFile, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caBytes) {
+		return nil, fmt.Errorf("router CA bundle %q contains no valid certificates", caFile)
+	}
+	cert, err := parseSubstrateRouterCredBundle(credBundle)
+	if err != nil {
+		return nil, fmt.Errorf("parse router credential bundle %q: %w", credBundle, err)
+	}
+
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		base = &http.Transport{}
+	}
+	tr := base.Clone()
+	tr.TLSClientConfig = &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		ServerName: inClusterAtenetRouterServerName,
+		RootCAs:    pool,
+		GetClientCertificate: func(_ *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			if fresh, freshErr := parseSubstrateRouterCredBundle(credBundle); freshErr == nil {
+				return fresh, nil
+			}
+			return cert, nil
+		},
+	}
+	return &http.Client{
+		Transport: tr,
+		Timeout:   25 * time.Second,
+	}, nil
+}
+
+func parseSubstrateRouterCredBundle(path string) (*tls.Certificate, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var privKey crypto.PrivateKey
+	var chain [][]byte
+	rest := raw
+	for len(rest) > 0 {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		switch block.Type {
+		case "CERTIFICATE":
+			chain = append(chain, block.Bytes)
+		case "PRIVATE KEY":
+			k, parseErr := x509.ParsePKCS8PrivateKey(block.Bytes)
+			if parseErr != nil {
+				return nil, fmt.Errorf("parse PKCS#8 private key: %w", parseErr)
+			}
+			privKey = k
+		case "EC PRIVATE KEY":
+			k, parseErr := x509.ParseECPrivateKey(block.Bytes)
+			if parseErr != nil {
+				return nil, fmt.Errorf("parse EC private key: %w", parseErr)
+			}
+			privKey = k
+		}
+	}
+	if privKey == nil {
+		return nil, errors.New("no PRIVATE KEY block found in credential bundle")
+	}
+	if len(chain) == 0 {
+		return nil, errors.New("no CERTIFICATE block found in credential bundle")
+	}
+	leaf, err := x509.ParseCertificate(chain[0])
+	if err != nil {
+		return nil, fmt.Errorf("parse leaf certificate: %w", err)
+	}
+	return &tls.Certificate{
+		Certificate: chain,
+		Leaf:        leaf,
+		PrivateKey:  privKey,
+	}, nil
+}
 
 func substrateTargetActor(cfg RuntimeConfig) string {
 	return firstNonEmpty(strings.TrimSpace(cfg.SubstrateTargetActor), defaultSubstrateTargetActor)
@@ -65,10 +194,11 @@ func sanitizeKubeIdentifier(raw string) string {
 }
 
 // SubstrateCommandRunner executes a local CLI command (such as kubectl) when inspecting
-// or bridging to an Agent Substrate v0.5.0 gVisor WorkerPool on GKE.
+// or bridging to an Agent Substrate v1.0.0-rc.1 gVisor WorkerPool on GKE.
 type SubstrateCommandRunner func(ctx context.Context, name string, args ...string) ([]byte, error)
 
-// SubstrateRouterBridge opens a short-lived local 127.0.0.1 HTTP tunnel to svc/atenet-router:80
+// SubstrateRouterBridge opens a short-lived local 127.0.0.1 tunnel to svc/aegis-sre:80
+// (or svc/atenet-router:443 when local podidentity mTLS credentials are present)
 // and returns the base URL along with a cleanup callback to close the tunnel.
 type SubstrateRouterBridge func(ctx context.Context) (baseURL string, closeFn func(), err error)
 
@@ -78,7 +208,7 @@ func DefaultSubstrateCommandRunner(ctx context.Context, name string, args ...str
 }
 
 // SetSubstrateCommandRunner configures a custom SubstrateCommandRunner on the Runtime
-// for deterministic testing of kubectl-bridged Agent Substrate v0.5.0 verification.
+// for deterministic testing of kubectl-bridged Agent Substrate v1.0.0-rc.1 verification.
 func (r *Runtime) SetSubstrateCommandRunner(fn SubstrateCommandRunner) {
 	r.SetExtension(substrateCmdRunnerExtKey, fn)
 }
@@ -119,6 +249,23 @@ func (r *Runtime) substrateRouterBridge() (SubstrateRouterBridge, bool) {
 	return nil, false
 }
 
+func resolveSubstrateRouterTLSPaths() (caFile, credBundle string) {
+	caFile = firstNonEmpty(strings.TrimSpace(os.Getenv("SUBSTRATE_ROUTER_CA_FILE")), defaultSubstrateRouterCAFilePath)
+	credBundle = firstNonEmpty(strings.TrimSpace(os.Getenv("SUBSTRATE_ROUTER_CRED_BUNDLE")), defaultSubstrateRouterCredBundlePath)
+	return caFile, credBundle
+}
+
+func hasLocalSubstrateRouterMTLS() bool {
+	caFile, credBundle := resolveSubstrateRouterTLSPaths()
+	if _, err := os.Stat(caFile); err != nil {
+		return false
+	}
+	if _, err := os.Stat(credBundle); err != nil {
+		return false
+	}
+	return true
+}
+
 func defaultKubectlRouterBridge(ctx context.Context) (string, func(), error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -132,14 +279,25 @@ func defaultKubectlRouterBridge(ctx context.Context) (string, func(), error) {
 	freePort := tcpAddr.Port
 	_ = ln.Close()
 
+	targetNS := "aegis-system"
+	targetSvc := "svc/aegis-sre"
+	targetPort := 80
+	scheme := "http"
+	if hasLocalSubstrateRouterMTLS() {
+		targetNS = "ate-system"
+		targetSvc = "svc/atenet-router"
+		targetPort = 443
+		scheme = "https"
+	}
+
 	pfCtx, pfCancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(
 		pfCtx,
 		"kubectl",
-		"-n", "ate-system",
+		"-n", targetNS,
 		"port-forward",
-		"svc/atenet-router",
-		fmt.Sprintf("%d:80", freePort),
+		targetSvc,
+		fmt.Sprintf("%d:%d", freePort, targetPort),
 		"--address", "127.0.0.1",
 	)
 	cmd.Stdout = io.Discard
@@ -187,7 +345,7 @@ func defaultKubectlRouterBridge(ctx context.Context) (string, func(), error) {
 		conn, dialErr := net.DialTimeout("tcp", addr, 150*time.Millisecond)
 		if dialErr == nil {
 			_ = conn.Close()
-			return fmt.Sprintf("http://%s", addr), closeFn, nil
+			return fmt.Sprintf("%s://%s", scheme, addr), closeFn, nil
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -197,7 +355,7 @@ func defaultKubectlRouterBridge(ctx context.Context) (string, func(), error) {
 }
 
 // SandboxExecutionRequest is the attenuated A2A payload dispatched from the Triage Orchestrator
-// to the Agent Substrate v0.5.0 gVisor Sandbox Remediator (ADR-0004, ADR-0007).
+// to the Agent Substrate v1.0.0-rc.1 gVisor Sandbox Remediator (ADR-0004, ADR-0007).
 type SandboxExecutionRequest struct {
 	APIVersion        string            `json:"apiVersion"`
 	Kind              string            `json:"kind"`
@@ -214,7 +372,7 @@ type SandboxExecutionRequest struct {
 }
 
 // SandboxExecutionResponse captures the result of executing or verifying an untrusted test suite
-// inside an Agent Substrate v0.5.0 gVisor Actor with atenet Egress MITM.
+// inside an Agent Substrate v1.0.0-rc.1 gVisor Actor with atenet Egress MITM.
 type SandboxExecutionResponse struct {
 	Verified          bool              `json:"verified"`
 	SandboxClass      string            `json:"sandboxClass"`
@@ -228,8 +386,8 @@ type SandboxExecutionResponse struct {
 	Metadata          map[string]string `json:"metadata,omitempty"`
 }
 
-// SubstrateSandboxConnector dispatches untrusted repository test runs to a live Agent Substrate v0.5.0
-// gateway URL or verifies the active GKE cluster's ate.dev/v1alpha1 WorkerPool and gVisor SandboxConfig.
+// SubstrateSandboxConnector dispatches untrusted repository test runs to a live Agent Substrate v1.0.0-rc.1
+// gateway URL or verifies the active GKE cluster's ate.dev/v1 WorkerPool and gVisor SandboxConfig.
 type SubstrateSandboxConnector struct {
 	rt *Runtime
 }
@@ -237,6 +395,14 @@ type SubstrateSandboxConnector struct {
 // NewSubstrateSandboxConnector returns a SubstrateSandboxConnector bound to rt.
 func NewSubstrateSandboxConnector(rt *Runtime) *SubstrateSandboxConnector {
 	return &SubstrateSandboxConnector{rt: rt}
+}
+
+func (c *SubstrateSandboxConnector) routerHTTPClient() *http.Client {
+	caFile, credBundle := resolveSubstrateRouterTLSPaths()
+	if mtlsClient, err := NewSubstrateRouterMTLSClient(caFile, credBundle); err == nil && mtlsClient != nil {
+		return mtlsClient
+	}
+	return &http.Client{Timeout: 25 * time.Second}
 }
 
 // Provenance returns ProvenanceLive when LiveSubstrate or SubstrateGatewayURL is configured.
@@ -298,7 +464,7 @@ func (c *SubstrateSandboxConnector) dispatchGatewayHTTP(
 
 	hc := c.rt.Config().HTTPClient
 	if hc == nil {
-		hc = &http.Client{Timeout: 25 * time.Second}
+		hc = c.routerHTTPClient()
 	}
 
 	resp, err := hc.Do(httpReq)
@@ -413,7 +579,7 @@ func (c *SubstrateSandboxConnector) verifyClusterViaKubectl(
 		Metadata: map[string]string{
 			"workerPool":    poolName,
 			"sandboxConfig": sandboxConfigName,
-			"bridgeMode":    "kubectl-ate-v1alpha1",
+			"bridgeMode":    "kubectl-ate-v1",
 		},
 	}
 
