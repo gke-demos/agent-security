@@ -417,7 +417,7 @@ func TestRedVsBlueTenTrajectories(t *testing.T) {
 		// 2. Agent Registry + Agent Gateway UAP read-only logging.entries.list & container.clusters.get (B4 VerdictAllowed + VerdictBlocked for container.clusters.delete)
 		// 3. Alice 3LO Jira SEC-101 & GitHub GHSA-sec-101 fetch via auth.Transport (B3 VerdictAllowed)
 		// 4. Attenuated A2A v2 delegation + peer response screening (B5 VerdictAllowed, B2 VerdictAllowed)
-		// 5. Agent Substrate v0.5.0 gVisor Egress MITM test run (B6 VerdictBlocked on evil.example.com, allowed api.github.com)
+		// 5. Agent Substrate v1.0.0-rc.1 gVisor Egress MITM test run (B6 VerdictBlocked on evil.example.com, allowed api.github.com)
 		// 6. Step-Up Confirmation pause (B1 VerdictChallenge -> OutcomeApprovalRequired)
 		step1 := postTurn(t, aegis.TurnRequest{
 			SessionID:  "eval-t10-s5-blue-alice",
@@ -527,7 +527,7 @@ func TestRepositoryManifestsScriptsAndHygiene(t *testing.T) {
 			"kind: ServiceAccount",
 		},
 		"manifests/01-agent-substrate-v050.yaml": {
-			"apiVersion: ate.dev/v1alpha1",
+			"apiVersion: ate.dev/v1",
 			"kind: WorkerPool",
 			"sandboxClasses:",
 			"name: gvisor",
@@ -559,7 +559,7 @@ func TestRepositoryManifestsScriptsAndHygiene(t *testing.T) {
 			"GOOGLE_API_ENABLE_RUNTIME_BOUND_TOKEN",
 			"SUBSTRATE_TARGET_ACTOR",
 			"aegis-system/remediator-1",
-			"http://atenet-router.ate-system.svc.cluster.local/sandbox/execute",
+			"https://atenet-router.ate-system.svc.cluster.local/sandbox/execute",
 		},
 		"manifests/03-gke-diy-agent-gateway.yaml": {
 			"kind: Gateway",

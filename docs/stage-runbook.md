@@ -4,7 +4,7 @@ This runbook covers the 10-minute live stage sequence for **AegisSRE** on Google
 
 ## 1. Pre-flight check (2 minutes before stage)
 
-Run these commands in a backstage terminal to verify the GKE pods, the Agent Substrate `v0.5.0` gVisor pool, and the external `Gateway/aegis-ingress-gateway` load balancer VIP:
+Run these commands in a backstage terminal to verify the GKE pods, the Agent Substrate `v1.0.0-rc.1` gVisor pool, and the external `Gateway/aegis-ingress-gateway` load balancer VIP:
 
 ```bash
 KUBE_CTX="$(kubectl config current-context)"

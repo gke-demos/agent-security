@@ -13,7 +13,7 @@ import (
 )
 
 // NewRemediatorActorHandler returns an http.Handler for the built-in `--mode=remediator-actor`
-// server mode that runs inside an Agent Substrate v0.5.0 gVisor guest Actor (ADR-0010).
+// server mode that runs inside an Agent Substrate v1.0.0-rc.1 gVisor guest Actor (ADR-0010).
 func NewRemediatorActorHandler(probeClient *http.Client) http.Handler {
 	if probeClient == nil {
 		probeClient = &http.Client{Timeout: 2 * time.Second}
@@ -117,7 +117,7 @@ func hasLeakedCredentialEnvVars(environ []string) bool {
 			return true
 		case strings.HasPrefix(key, "GITHUB_") && key != "GITHUB_TARGET_REPO" && key != "GITHUB_API_URL" && key != "GITHUB_ACTIONS":
 			return true
-		case strings.HasPrefix(key, "GOOGLE_") && key != "GOOGLE_CLOUD_PROJECT" && key != "GOOGLE_CLOUD_LOCATION" && key != "GOOGLE_AUTH_WEBAUTHN_PLUGIN":
+		case strings.HasPrefix(key, "GOOGLE_") && key != "GOOGLE_CLOUD_PROJECT" && key != "GOOGLE_CLOUD_LOCATION" && key != "GOOGLE_AUTH_WEBAUTHN_PLUGIN" && key != "GOOGLE_LOG_DIR" && key != "GOOGLE_API_ENABLE_RUNTIME_BOUND_TOKEN":
 			return true
 		case strings.HasPrefix(key, "JIRA_") && key != "JIRA_BASE_URL":
 			return true

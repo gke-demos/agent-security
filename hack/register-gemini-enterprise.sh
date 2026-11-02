@@ -31,7 +31,7 @@ curl -sS -X POST \
   -H "X-Goog-User-Project: ${PROJECT_ID}" \
   -d "{
     \"displayName\": \"AegisSRE Zero-Trust Triage Orchestrator\",
-    \"description\": \"Zero-trust SRE incident triage and Agent Substrate v0.5.0 gVisor sandbox remediation platform on GKE.\",
+    \"description\": \"Zero-trust SRE incident triage and Agent Substrate v1.0.0-rc.1 gVisor sandbox remediation platform on GKE.\",
     \"a2aAgentDefinition\": {
       \"agentCardUri\": \"${AGENT_CARD_URL}\",
       \"endpointUri\": \"${A2A_RPC_URL}\",
