@@ -32,6 +32,6 @@ spec:
       limits:
         cpu: "2"
         memory: "2Gi"
-# Companion Substrate API resources (applied via `kubectl-ate apply -f manifests/01b-substrate-actor-template.yaml`):
+# Companion Substrate API resources (created via `kubectl-ate create actor-template -f` and `kubectl-ate create egress-policy remediator-1 -a aegis-system -f` from `manifests/01b-substrate-actor-template.yaml`):
 # - kind: ActorTemplate (name: sandbox-remediator-template, sandboxClass: gvisor, preferredFidelity: SNAPSHOT_FIDELITY_MEMORY, trustBundleDataSource: egress-mitm.ate.dev)
-# - kind: EgressPolicy (name: default, rule: allow-github-archive-via-atenet-mitm -> api.github.com:443)
+# - kind: EgressPolicy (actor: remediator-1, rule: allow-github-archive-via-atenet-mitm -> api.github.com:443)

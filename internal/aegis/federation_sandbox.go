@@ -20,7 +20,7 @@ type a2aMessagePart struct {
 	Data     map[string]any `json:"data,omitempty"`
 }
 
-// substrateActorSpec models the Agent Substrate v1.0.0-rc.1 (ate.dev/v1) Actor execution config.
+// substrateActorSpec models the Agent Substrate v1.0.0 (ate.dev/v1) Actor execution config.
 type substrateActorSpec struct {
 	APIVersion        string            `json:"apiVersion"`
 	Kind              string            `json:"kind"`
@@ -97,7 +97,7 @@ func registerA2ARoutes(mux *http.ServeMux, rt *Runtime) {
 
 		agentCard := map[string]any{
 			"name":               "AegisSRE Zero-Trust Triage Orchestrator",
-			"description":        "Zero-trust SRE incident triage and Agent Substrate v1.0.0-rc.1 gVisor sandbox remediation platform on GKE.",
+			"description":        "Zero-trust SRE incident triage and Agent Substrate v1.0.0 gVisor sandbox remediation platform on GKE.",
 			"url":                baseURL + "/a2a",
 			"version":            "0.9.0",
 			"defaultInputModes":  []string{"text", "text/plain", "application/json"},
@@ -153,7 +153,7 @@ func registerA2ARoutes(mux *http.ServeMux, rt *Runtime) {
 				{
 					"id":          "sandbox-remediate",
 					"name":        "Attenuated Sandbox Remediator",
-					"description": "Delegates untrusted go test verification over attenuated A2A v2 to an Agent Substrate v1.0.0-rc.1 gVisor Actor.",
+					"description": "Delegates untrusted go test verification over attenuated A2A v2 to an Agent Substrate v1.0.0 gVisor Actor.",
 					"inputModes":  []string{"text", "text/plain"},
 					"outputModes": []string{"text", "text/plain", "application/json+a2ui"},
 				},

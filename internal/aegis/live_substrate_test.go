@@ -51,7 +51,7 @@ func TestLiveSubstrateGateway_AttenuatedA2ADispatchAndProvenance(t *testing.T) {
 			SandboxConfig:     "gvisor-default",
 			AllowedEgress:     "api.github.com",
 			BlockedEgress:     "https://evil.example.com/exfil",
-			TestOutput:        "PASS: TestCheckoutHotfix (0.03s) in live Agent Substrate v1.0.0-rc.1 gVisor Actor",
+			TestOutput:        "PASS: TestCheckoutHotfix (0.03s) in live Agent Substrate v1.0.0 gVisor Actor",
 			Provenance:        aegis.ProvenanceLive,
 		}
 		_ = json.NewEncoder(w).Encode(resp)
@@ -70,7 +70,7 @@ func TestLiveSubstrateGateway_AttenuatedA2ADispatchAndProvenance(t *testing.T) {
 		Persona:              aegis.PersonaAlice,
 		ScenarioID:           aegis.Scenario04AttenuatedA2ASandbox,
 		Posture:              aegis.AllBluePosture(),
-		Prompt:               "Verify checkout v2.4 patch in live Agent Substrate v1.0.0-rc.1 gVisor sandbox.",
+		Prompt:               "Verify checkout v2.4 patch in live Agent Substrate v1.0.0 gVisor sandbox.",
 		ForwardedBearerToken: upstreamSecret,
 	})
 	if err != nil {
@@ -413,7 +413,7 @@ func TestLiveSubstrateKubectlBridge_InspectsClusterCRDsAndMarksProvenanceLive(t 
 		Persona:    aegis.PersonaAlice,
 		ScenarioID: aegis.Scenario04AttenuatedA2ASandbox,
 		Posture:    aegis.AllBluePosture(),
-		Prompt:     "Verify checkout v2.4 patch via kubectl-bridged Agent Substrate v1.0.0-rc.1 gVisor pool.",
+		Prompt:     "Verify checkout v2.4 patch via kubectl-bridged Agent Substrate v1.0.0 gVisor pool.",
 	})
 	if err != nil {
 		t.Fatalf("ExecuteTurn() error = %v", err)

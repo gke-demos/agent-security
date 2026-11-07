@@ -13,7 +13,7 @@ import (
 )
 
 // NewRemediatorActorHandler returns an http.Handler for the built-in `--mode=remediator-actor`
-// server mode that runs inside an Agent Substrate v1.0.0-rc.1 gVisor guest Actor (ADR-0010).
+// server mode that runs inside an Agent Substrate v1.0.0 gVisor guest Actor (ADR-0010).
 func NewRemediatorActorHandler(probeClient *http.Client) http.Handler {
 	if probeClient == nil {
 		probeClient = &http.Client{Timeout: 2 * time.Second}

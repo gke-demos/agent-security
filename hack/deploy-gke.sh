@@ -28,6 +28,7 @@ fi
 CLUSTER_LOCATION="${CLUSTER_LOCATION:-${DEFAULT_CLUSTER_LOCATION}}"
 CLUSTER_NAME="${CLUSTER_NAME:-${DEFAULT_CLUSTER_NAME}}"
 REGION="${REGION:-us-central1}"
+SUBSTRATE_WORKER_IMAGE="${SUBSTRATE_WORKER_IMAGE:-ghcr.io/agent-substrate/substrate/ateworker-gvisor:v1.0.0@sha256:f8987236c6256f58c4b2625e543b43f4ae4bdded6ee6821c03d966effb7c0f17}"
 
 render_manifest() {
   local file="$1"
@@ -39,13 +40,14 @@ render_manifest() {
     -e "s|\${CLUSTER_NAME}|${CLUSTER_NAME}|g" \
     -e "s|\${CLUSTER_LOCATION}|${CLUSTER_LOCATION}|g" \
     -e "s|\${REGION}|${REGION}|g" \
+    -e "s|\${SUBSTRATE_WORKER_IMAGE}|${SUBSTRATE_WORKER_IMAGE}|g" \
     "${file}"
 }
 
 echo "==> Deploying AegisSRE Zero-Trust Agent Security Stack to context: ${KUBE_CONTEXT} (project: ${PROJECT_ID}, cluster: ${CLUSTER_NAME}, location: ${CLUSTER_LOCATION}, region: ${REGION})"
 
 render_manifest manifests/00-namespace-and-rbac.yaml | kubectl --context "${KUBE_CONTEXT}" apply -f -
-if kubectl --context "${KUBE_CONTEXT}" api-resources --api-group=ate.dev -o wide 2>/dev/null | grep -q "ate.dev/v1.*ActorTemplate"; then
+if kubectl --context "${KUBE_CONTEXT}" api-resources --api-group=ate.dev -o wide 2>/dev/null | grep -q "ate.dev/v1.*WorkerPool"; then
   render_manifest manifests/01-agent-substrate-v050.yaml | kubectl --context "${KUBE_CONTEXT}" apply -f -
 else
   echo "==> Agent Substrate (ate.dev/v1) managed via kubectl-ate control plane; skipping raw kubectl CRD apply for manifests/01-agent-substrate-v050.yaml."

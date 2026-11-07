@@ -194,7 +194,7 @@ func sanitizeKubeIdentifier(raw string) string {
 }
 
 // SubstrateCommandRunner executes a local CLI command (such as kubectl) when inspecting
-// or bridging to an Agent Substrate v1.0.0-rc.1 gVisor WorkerPool on GKE.
+// or bridging to an Agent Substrate v1.0.0 gVisor WorkerPool on GKE.
 type SubstrateCommandRunner func(ctx context.Context, name string, args ...string) ([]byte, error)
 
 // SubstrateRouterBridge opens a short-lived local 127.0.0.1 tunnel to svc/aegis-sre:80
@@ -208,7 +208,7 @@ func DefaultSubstrateCommandRunner(ctx context.Context, name string, args ...str
 }
 
 // SetSubstrateCommandRunner configures a custom SubstrateCommandRunner on the Runtime
-// for deterministic testing of kubectl-bridged Agent Substrate v1.0.0-rc.1 verification.
+// for deterministic testing of kubectl-bridged Agent Substrate v1.0.0 verification.
 func (r *Runtime) SetSubstrateCommandRunner(fn SubstrateCommandRunner) {
 	r.SetExtension(substrateCmdRunnerExtKey, fn)
 }
@@ -355,7 +355,7 @@ func defaultKubectlRouterBridge(ctx context.Context) (string, func(), error) {
 }
 
 // SandboxExecutionRequest is the attenuated A2A payload dispatched from the Triage Orchestrator
-// to the Agent Substrate v1.0.0-rc.1 gVisor Sandbox Remediator (ADR-0004, ADR-0007).
+// to the Agent Substrate v1.0.0 gVisor Sandbox Remediator (ADR-0004, ADR-0007).
 type SandboxExecutionRequest struct {
 	APIVersion        string            `json:"apiVersion"`
 	Kind              string            `json:"kind"`
@@ -372,7 +372,7 @@ type SandboxExecutionRequest struct {
 }
 
 // SandboxExecutionResponse captures the result of executing or verifying an untrusted test suite
-// inside an Agent Substrate v1.0.0-rc.1 gVisor Actor with atenet Egress MITM.
+// inside an Agent Substrate v1.0.0 gVisor Actor with atenet Egress MITM.
 type SandboxExecutionResponse struct {
 	Verified          bool              `json:"verified"`
 	SandboxClass      string            `json:"sandboxClass"`
@@ -386,7 +386,7 @@ type SandboxExecutionResponse struct {
 	Metadata          map[string]string `json:"metadata,omitempty"`
 }
 
-// SubstrateSandboxConnector dispatches untrusted repository test runs to a live Agent Substrate v1.0.0-rc.1
+// SubstrateSandboxConnector dispatches untrusted repository test runs to a live Agent Substrate v1.0.0
 // gateway URL or verifies the active GKE cluster's ate.dev/v1 WorkerPool and gVisor SandboxConfig.
 type SubstrateSandboxConnector struct {
 	rt *Runtime

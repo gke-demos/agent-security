@@ -213,7 +213,7 @@ func canonicalScenarioDescriptors() []ScenarioDescriptor {
 		},
 		{
 			ID:             Scenario04AttenuatedA2ASandbox,
-			Title:          "Attenuated A2A v2 Delegation & Agent Substrate v1.0.0-rc.1 gVisor Egress MITM",
+			Title:          "Attenuated A2A v2 Delegation & Agent Substrate v1.0.0 gVisor Egress MITM",
 			Subtitle:       "Boundaries 5 & 6: Strips upstream 3LO tokens on A2A handoff and runs untrusted go test in gVisor with zero env secrets & atenet Egress MITM.",
 			DefaultPersona: PersonaAlice,
 			DefaultPrompt:  "Delegate checkout-service@v2.4 go test verification to Sandbox Remediator over A2A v2.",
