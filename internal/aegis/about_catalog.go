@@ -1424,7 +1424,7 @@ func canonicalADRCatalogEntries() []ADRCatalogEntry {
 			Number:   "0004",
 			Slug:     "attenuated-a2a-and-agent-substrate-v050-egress-mitm",
 			FileName: "0004-attenuated-a2a-and-agent-substrate-v050-egress-mitm.md",
-			Title:    "Attenuated A2A v2 Delegation and Agent Substrate v1.0.0-rc.1 gVisor Sandbox with Egress MITM",
+			Title:    "Attenuated A2A v2 Delegation and Agent Substrate v1.0.0 gVisor Sandbox with Egress MITM",
 			Summary:  "Scrubs upstream 3LO credentials on A2A handoff and runs untrusted go test suites inside gVisor Actors with zero env secrets, EgressPolicy, and atenet MITM.",
 			PrimaryBoundaries: []BoundaryID{
 				BoundaryCrossAgentA2A,

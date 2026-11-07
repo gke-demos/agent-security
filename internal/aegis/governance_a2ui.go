@@ -255,8 +255,8 @@ func defaultRegistryCatalog() *RegistryCatalog {
 			{
 				Name:        "projects/aegis-sre/locations/us-central1/agents/sandbox-remediator",
 				DisplayName: "Sandbox Remediator",
-				Description: "Isolated gVisor A2A peer agent on Agent Substrate v1.0.0-rc.1 for untrusted repository test execution",
-				Version:     "1.0.0-rc.1",
+				Description: "Isolated gVisor A2A peer agent on Agent Substrate v1.0.0 for untrusted repository test execution",
+				Version:     "1.0.0",
 				Protocols: []agentregistry.Protocol{
 					{
 						Type:            "A2A",
@@ -273,7 +273,7 @@ func defaultRegistryCatalog() *RegistryCatalog {
 					{
 						ID:          "verify_patch_in_gvisor_sandbox",
 						Name:        "Verify Patch in gVisor Sandbox",
-						Description: "Runs go test inside an ephemeral Agent Substrate v1.0.0-rc.1 gVisor Actor with Egress MITM",
+						Description: "Runs go test inside an ephemeral Agent Substrate v1.0.0 gVisor Actor with Egress MITM",
 					},
 				},
 			},

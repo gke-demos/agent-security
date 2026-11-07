@@ -1,4 +1,4 @@
-# Agent Substrate v1.0.0-rc.1 protojson ActorTemplate & EgressPolicy manifests.
+# Agent Substrate v1.0.0 protojson ActorTemplate & EgressPolicy manifests.
 # Register against atespace `aegis-system` after WorkerPool/aegis-remediator-pool is Ready:
 #   1. kubectl-ate create actor-template -f <actor-template-doc>
 #   2. kubectl-ate create actor remediator-1 --template sandbox-remediator-template -a aegis-system

@@ -307,12 +307,12 @@ func (r *Runtime) GetSourcesStatus(_ context.Context) ([]SourceStatus, error) {
 		),
 		buildSourceStatus(
 			SourceSubstrateSandbox,
-			"Agent Substrate v1.0.0-rc.1 gVisor",
+			"Agent Substrate v1.0.0 gVisor",
 			BoundarySandboxEgress,
 			substrateLive,
 			firstNonEmpty(cfg.SubstrateGatewayURL, "kubectl://aegis-system/aegis-remediator-pool (gVisor)"),
 			"in-memory://substrate-gvisor-atenet-fixture",
-			"Live Agent Substrate v1.0.0-rc.1 gVisor WorkerPool & atenet Egress MITM",
+			"Live Agent Substrate v1.0.0 gVisor WorkerPool & atenet Egress MITM",
 			"Deterministic gVisor Actor & atenet Egress MITM fixture",
 		),
 	}

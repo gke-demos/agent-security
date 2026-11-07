@@ -417,7 +417,7 @@ func TestRedVsBlueTenTrajectories(t *testing.T) {
 		// 2. Agent Registry + Agent Gateway UAP read-only logging.entries.list & container.clusters.get (B4 VerdictAllowed + VerdictBlocked for container.clusters.delete)
 		// 3. Alice 3LO Jira SEC-101 & GitHub GHSA-sec-101 fetch via auth.Transport (B3 VerdictAllowed)
 		// 4. Attenuated A2A v2 delegation + peer response screening (B5 VerdictAllowed, B2 VerdictAllowed)
-		// 5. Agent Substrate v1.0.0-rc.1 gVisor Egress MITM test run (B6 VerdictBlocked on evil.example.com, allowed api.github.com)
+		// 5. Agent Substrate v1.0.0 gVisor Egress MITM test run (B6 VerdictBlocked on evil.example.com, allowed api.github.com)
 		// 6. Step-Up Confirmation pause (B1 VerdictChallenge -> OutcomeApprovalRequired)
 		step1 := postTurn(t, aegis.TurnRequest{
 			SessionID:  "eval-t10-s5-blue-alice",
@@ -1638,6 +1638,15 @@ func (fn roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 func TestPhase4_AutoBridgedAtenetRouterRemediatorEval(t *testing.T) {
+	for _, kv := range os.Environ() {
+		parts := strings.SplitN(kv, "=", 2)
+		k := parts[0]
+		if strings.HasPrefix(k, "ALICE_") || strings.HasPrefix(k, "BOB_") || k == "GITHUB_TOKEN" || strings.HasPrefix(k, "GOOGLE_OAUTH_") || strings.HasPrefix(k, "JIRA_") {
+			t.Setenv(k, "")
+			_ = os.Unsetenv(k)
+		}
+	}
+
 	mockEgressProbeClient := &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			if req.URL.Host == "api.github.com" {

@@ -699,7 +699,7 @@ func buildUnifiedGovernedADKTools(r *Runtime) ([]tool.Tool, []string, error) {
 		},
 		{
 			name: "delegate_sandbox_test",
-			desc: "Delegate untrusted go test verification over attenuated A2A v2 to Agent Substrate v1.0.0-rc.1 gVisor Sandbox Remediator",
+			desc: "Delegate untrusted go test verification over attenuated A2A v2 to Agent Substrate v1.0.0 gVisor Sandbox Remediator",
 			fn: func(tctx agent.Context, args governedToolInput) (map[string]any, error) {
 				tc := r.lookupActiveTurnFromContext(tctx, tctx.SessionID())
 				if tc == nil {
@@ -1279,7 +1279,7 @@ func executeGovernedSandboxDelegationTool(ctx context.Context, r *Runtime, tc *a
 
 		tc.addStep(BoundaryTraceEvent{
 			Boundary:   BoundarySandboxEgress,
-			Shield:     "Sandbox Egress MITM (Agent Substrate v1.0.0-rc.1)",
+			Shield:     "Sandbox Egress MITM (Agent Substrate v1.0.0)",
 			Component:  "ate.dev/v1 Actor (gvisor + atenet)",
 			Action:     "ExecuteUntrustedGoTest(checkout-service@v2.4)",
 			Verdict:    VerdictBlocked,
@@ -1303,7 +1303,7 @@ func executeGovernedSandboxDelegationTool(ctx context.Context, r *Runtime, tc *a
 		})
 		tc.addStep(BoundaryTraceEvent{
 			Boundary:   BoundarySandboxEgress,
-			Shield:     "Sandbox Egress MITM (Agent Substrate v1.0.0-rc.1)",
+			Shield:     "Sandbox Egress MITM (Agent Substrate v1.0.0)",
 			Component:  "Unisolated Runner (No EgressPolicy)",
 			Action:     "ExecuteUntrustedGoTest(checkout-service@v2.4)",
 			Verdict:    VerdictBypassedRed,
@@ -1954,9 +1954,9 @@ func enforceStepUpBeforeTool(ctx agent.Context, tc *adkActiveTurnContext) (map[s
 				Version:   "0.9",
 				Type:      CardSandboxExecution,
 				Title:     "Full-Chain Step 4–5: gVisor Sandbox Verification Passed",
-				Subtitle:  "Boundaries 5 & 6: Attenuated A2A v2 + Agent Substrate v1.0.0-rc.1 Egress MITM",
+				Subtitle:  "Boundaries 5 & 6: Attenuated A2A v2 + Agent Substrate v1.0.0 Egress MITM",
 				Severity:  "SUCCESS",
-				Body:      "Sandbox Remediator verified TestCheckoutHotfix inside an Agent Substrate v1.0.0-rc.1 gVisor Actor with zero env secrets, injected GitHub credentials out-of-sandbox via atenet Egress MITM, and blocked evil.example.com exfiltration.",
+				Body:      "Sandbox Remediator verified TestCheckoutHotfix inside an Agent Substrate v1.0.0 gVisor Actor with zero env secrets, injected GitHub credentials out-of-sandbox via atenet Egress MITM, and blocked evil.example.com exfiltration.",
 				Fields:    s5SandboxFields,
 			}, tc.req.Posture)
 			if err != nil {
@@ -2020,7 +2020,7 @@ func enforceStepUpBeforeTool(ctx agent.Context, tc *adkActiveTurnContext) (map[s
 			tc.mu.Unlock()
 			tc.haltWithOutcome(
 				OutcomeApprovalRequired,
-				"Completed full-chain zero-trust triage (Cloud SDP PII redaction, Agent Gateway UAP read-only MCP diagnostics, Alice 3LO SEC-101 correlation, and Agent Substrate v1.0.0-rc.1 gVisor patch verification). Awaiting Operator Step-Up Confirmation (adk_request_confirmation) to create GitHub Pull Request #42.",
+				"Completed full-chain zero-trust triage (Cloud SDP PII redaction, Agent Gateway UAP read-only MCP diagnostics, Alice 3LO SEC-101 correlation, and Agent Substrate v1.0.0 gVisor patch verification). Awaiting Operator Step-Up Confirmation (adk_request_confirmation) to create GitHub Pull Request #42.",
 				"",
 				stepUpCard,
 				sandboxCard,
@@ -3024,13 +3024,13 @@ func finalizeTurnOutcomeAndCards(r *Runtime, tc *adkActiveTurnContext) []A2UICar
 				Version:   "0.9",
 				Type:      CardSandboxExecution,
 				Title:     "Untrusted go test Verified in gVisor Sandbox; Exfiltration Blocked",
-				Subtitle:  "Boundaries 5 & 6: Attenuated A2A v2 + Agent Substrate v1.0.0-rc.1 Egress MITM",
+				Subtitle:  "Boundaries 5 & 6: Attenuated A2A v2 + Agent Substrate v1.0.0 Egress MITM",
 				Severity:  "SUCCESS",
-				Body:      "Triage Orchestrator stripped upstream 3LO tokens before A2A delegation. Sandbox Remediator ran go test inside an Agent Substrate v1.0.0-rc.1 gVisor Actor with zero container env secrets, injected GitHub credentials out-of-sandbox via atenet Egress MITM, blocked init() exfiltration to evil.example.com, and screened the returned peer summary via Model Armor.",
+				Body:      "Triage Orchestrator stripped upstream 3LO tokens before A2A delegation. Sandbox Remediator ran go test inside an Agent Substrate v1.0.0 gVisor Actor with zero container env secrets, injected GitHub credentials out-of-sandbox via atenet Egress MITM, blocked init() exfiltration to evil.example.com, and screened the returned peer summary via Model Armor.",
 				Fields:    s4SandboxFields,
 			}, tc.req.Posture)
 			tc.outcome = OutcomeDefendedSuccess
-			tc.assistantText = "Verified checkout v2.4 hotfix in Agent Substrate v1.0.0-rc.1 gVisor sandbox. Upstream 3LO credentials were stripped on A2A handoff, evil.example.com exfiltration was blocked by EgressPolicy, and the peer A2A response was screened via Model Armor."
+			tc.assistantText = "Verified checkout v2.4 hotfix in Agent Substrate v1.0.0 gVisor sandbox. Upstream 3LO credentials were stripped on A2A handoff, evil.example.com exfiltration was blocked by EgressPolicy, and the peer A2A response was screened via Model Armor."
 			tc.sanitizedInputPreview = tc.cleanPeerSummary
 			tc.outboundCommentPreview = tc.cleanPeerSummary
 			return []A2UICard{card}

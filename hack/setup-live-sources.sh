@@ -265,9 +265,9 @@ ask_secret ALICE_GMAIL_TOKEN "Alice Gmail OAuth Access Token (gmail.readonly, op
 [[ -n "${BOB_JIRA_TOKEN:-}" ]] && write_env BOB_JIRA_TOKEN "$BOB_JIRA_TOKEN"
 [[ -n "${ALICE_GMAIL_TOKEN:-}" ]] && write_env ALICE_GMAIL_TOKEN "$ALICE_GMAIL_TOKEN"
 
-# ── Stage 5: Agent Substrate v1.0.0-rc.1 gVisor Pool Verification ──────────
-stage "Agent Substrate v1.0.0-rc.1 gVisor Pool Verification"
-say "Enable live Agent Substrate v1.0.0-rc.1 gVisor WorkerPool & atenet Egress MITM verification."
+# ── Stage 5: Agent Substrate v1.0.0 gVisor Pool Verification ──────────
+stage "Agent Substrate v1.0.0 gVisor Pool Verification"
+say "Enable live Agent Substrate v1.0.0 gVisor WorkerPool & atenet Egress MITM verification."
 step "Verify that manifests/01-agent-substrate-v050.yaml is applied to your active kubectl context."
 ask SUBSTRATE_GATEWAY_URL "Optional Substrate Gateway URL (leave blank to auto-bridge via kubectl):"
 write_env LIVE_SUBSTRATE "true"

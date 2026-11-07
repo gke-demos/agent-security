@@ -4,7 +4,7 @@ This runbook covers the 10-minute live stage sequence for **AegisSRE** on Google
 
 ## 1. Pre-flight check (2 minutes before stage)
 
-Run these commands in a backstage terminal to verify the GKE pods, the Agent Substrate `v1.0.0-rc.1` gVisor pool, and the external `Gateway/aegis-ingress-gateway` load balancer VIP:
+Run these commands in a backstage terminal to verify the GKE pods, the Agent Substrate `v1.0.0` gVisor pool, and the external `Gateway/aegis-ingress-gateway` load balancer VIP:
 
 ```bash
 KUBE_CTX="$(kubectl config current-context)"
@@ -15,7 +15,7 @@ kubectl --context "${KUBE_CTX}" -n aegis-system get svc aegis-sre aegis-model-ar
 
 # 2. Verify Agent Substrate WorkerPool/aegis-remediator-pool and Actor/remediator-1
 kubectl --context "${KUBE_CTX}" -n aegis-system get workerpools.ate.dev aegis-remediator-pool
-kubectl --context "${KUBE_CTX}" -n aegis-system get actors.ate.dev remediator-1
+kubectl ate get actor remediator-1 -a aegis-system
 
 # 3. Resolve the external regional Application Load Balancer VIP on Gateway/aegis-ingress-gateway
 export GATEWAY_VIP="$(kubectl --context "${KUBE_CTX}" -n aegis-system get gateway aegis-ingress-gateway -o jsonpath='{.status.addresses[0].value}')"
